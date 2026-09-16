@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-SCHEMA_VERSION = "abc-surface-v1"
+SCHEMA_VERSION = "abc-surface-v2"  # v2: surface_field.npz adds vertex-level udf_* arrays
 DEFAULT_ABC_ROOT = Path("/opt/data/private/yihengxu/Datasets/abc")
 DEFAULT_OUTPUT_ROOT = Path("/opt/data/private/yihengxu/Datasets/surface")
 DEFAULT_VORONOI_EXE = Path("Voronoi/build/calculate_voronoi/calculate_voronoi")

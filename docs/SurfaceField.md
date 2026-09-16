@@ -436,7 +436,7 @@ $$
 | `transform.json` | 自定义保存的坐标变换及距离单位说明 |
 | `cluster.ply` | 分割结果，三角面带整数 `label` 属性 |
 
-`surface_field.npz` 建议保存 `points`、`normals`、`triangle_id`、`udf_raw`、`udf_target`、`tau`。这些键是本方案建议，不是 DualBrep 原始 dataset loader 的现成输入格式。
+`surface_field.npz` 建议保存 `points`、`normals`、`triangle_id`、`udf_raw`、`udf_target`、`tau`。这些键是本方案建议，不是 DualBrep 原始 dataset loader 的现成输入格式。当前实现（schema `abc-surface-v2`）额外导出与 `geometry.npz` 顶点一一对应的 `udf_vertex_raw`、`udf_vertex_metric`、`udf_vertex_target`，与面重心值在同一距离后端、同批查询得到；顶点值用于分析与可视化，逐面标签仍以面重心数组为准。
 
 不要只导出彩色点云替代 `cluster.ply`。官方读取的是 PLY 三角面属性中的 `label`，兼容 `cluster` 字段；颜色本身不构成标签。[rebuild.py](https://github.com/AutodeskAILab/DualBrep/blob/main/rebuild.py)
 

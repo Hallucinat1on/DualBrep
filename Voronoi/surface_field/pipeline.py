@@ -59,7 +59,9 @@ def process_one(row: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]
         required = (sample_dir / "geometry.npz", sample_dir / "surface_field.npz",
                     sample_dir / "recon_sdf.ply", sample_dir / "udf_g.npy")
         if previous.get("status") == "success" and expected and all(path.is_file() for path in required):
-            return previous
+            with np.load(sample_dir / "surface_field.npz") as archive:
+                if "udf_vertex_raw" in archive.files:  # v2 schema; v1 samples are regenerated
+                    return previous
         if previous.get("status") == "success" and not args.overwrite:
             return {
                 "schema_version": SCHEMA_VERSION,
@@ -128,12 +130,19 @@ def process_one(row: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]
                                    args.seed + int(shape_id))
 
         voronoi = load_triangle_mesh(work_dir / "voronoi.ply")
-        udf_raw, actual_backend = unsigned_distance(
-            centers, voronoi, args.distance_backend, args.query_batch_size)
-        if not np.isfinite(udf_raw).all() or np.any(udf_raw < 0):
+        # Face centroids and mesh vertices are queried in a single batch so both
+        # share the same distance backend; the result is split back apart below.
+        combined, actual_backend = unsigned_distance(
+            np.concatenate((centers, vertices), axis=0), voronoi,
+            args.distance_backend, args.query_batch_size)
+        udf_raw = combined[:len(centers)]
+        udf_vertex_raw = combined[len(centers):].astype(np.float32)
+        if not np.isfinite(combined).all() or np.any(combined < 0):
             raise PipelineError("distance_nonfinite", "distance result is negative or non-finite")
         udf_metric = np.minimum(udf_raw, args.tau).astype(np.float32)
         udf_target = (udf_metric / args.tau).astype(np.float32)
+        udf_vertex_metric = np.minimum(udf_vertex_raw, args.tau).astype(np.float32)
+        udf_vertex_target = (udf_vertex_metric / args.tau).astype(np.float32)
 
         violation = np.empty(0, dtype=np.float32)
         if len(adjacency):
@@ -175,6 +184,9 @@ def process_one(row: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]
                 udf_raw=udf_raw,
                 udf_metric=udf_metric,
                 udf_target=udf_target,
+                udf_vertex_raw=udf_vertex_raw,
+                udf_vertex_metric=udf_vertex_metric,
+                udf_vertex_target=udf_vertex_target,
                 tau=np.float32(args.tau),
             )
             np.save(tmp_dir / "udf_g.npy", udf_metric)
@@ -210,6 +222,10 @@ def process_one(row: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]
                     "mean": float(udf_raw.mean()),
                     "saturated_fraction": float(np.mean(udf_raw >= args.tau)),
                     "max_lipschitz_violation": max_violation,
+                    "vertex_minimum": float(udf_vertex_raw.min()),
+                    "vertex_maximum": float(udf_vertex_raw.max()),
+                    "vertex_mean": float(udf_vertex_raw.mean()),
+                    "vertex_saturated_fraction": float(np.mean(udf_vertex_raw >= args.tau)),
                 },
                 "elapsed_seconds": time.time() - started,
             }

@@ -241,7 +241,8 @@ distance, _, _, _ = igl.signed_distance(
 | 同上 | `condition_points`, `condition_normals` | `(N,3)` float32，仅来自输入几何 |
 | 同上 | `condition_triangle_id`, `condition_barycentric` | 采样溯源 |
 | `surface_field.npz` | `query_xyz`, `query_normal`, `query_triangle_id` | `(F,3)`、`(F,3)`、`(F,)` |
-| 同上 | `udf_raw`, `udf_metric`, `udf_target`, `tau` | 三个 `(F,)` float32 数组和标量 |
+| 同上 | `udf_raw`, `udf_metric`, `udf_target`, `tau` | 三个 `(F,)` float32 数组（面重心）和标量 |
+| 同上 | `udf_vertex_raw`, `udf_vertex_metric`, `udf_vertex_target` | 三个 `(V,)` float32 数组（顶点），与 `geometry.npz` 的 `vertices` 一一对应；与面重心在同一距离后端、同批查询 |
 | `supervision.npz` | `cad_face_id`, `ambiguous_mask`, `boundary_mask` | 监督与评价专用，不作为条件 |
 | 同上 | 可选边界查询、拓扑数据 | 不与主查询数组混用 |
 | `transform.json` | 正/逆矩阵、尺度、平移、单位约定 | 双向恢复坐标 |

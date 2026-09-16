@@ -1,8 +1,8 @@
 # ABC → Voronoi-UDF 表面场：数据处理计划
 
-核对日期：2026-09-12。代码基线：`f37eecfa61e1cc856a67bc5c59763a8e0fc66f61`，正式处理还需记录实际工作区脚本哈希。本文依据本地数据目录、当前处理脚本和 [SurfaceField.md](SurfaceField.md) 制定。
+核对日期：2026-09-13。代码基线：`f37eecfa61e1cc856a67bc5c59763a8e0fc66f61` 加本文所述工作区修改，正式处理需记录实际脚本哈希。本文依据本地数据目录、当前处理脚本和 [SurfaceField.md](SurfaceField.md) 制定。
 
-**目标：以给定 mesh 为条件，直接用 DDPM 或 Flow Matching 生成表面 Voronoi-UDF 标量；不生成几何或完整体 UDF，不以回归模型、VAE 为前置步骤。** 本文是待实施计划，不是已生成的数据集。当前仅完成目录统计与代码检查，未解析全部 STEP、构造 Voronoi、查询标签或运行 B-rep 重建。
+**目标：以给定 mesh 为条件，直接用 DDPM 或 Flow Matching 生成表面 Voronoi-UDF 标量；不生成几何或完整体 UDF，不以回归模型、VAE 为前置步骤。** 主数据处理器已经实现，并以两个真实 STEP/OBJ 完成实验后端的端到端 smoke test；全量正式标签尚未生成，C++ Voronoi 后端也尚未构建测试。
 
 ## 1. 本地数据与首版范围
 
@@ -13,7 +13,7 @@ abc/
 ├── step/abc_0000_step_v00.7z
 ├── step/0000/<shape_id>/*_step_*.step
 ├── obj/abc_0000_obj_v00.7z
-├── obj/0000/<shape_id>/*_trimesh_*.obj
+├── obj/<shape_id>/*_trimesh_*.obj
 ├── step_v00.txt
 ├── obj_v00.txt
 └── download.md
@@ -34,7 +34,7 @@ abc/
 
 ```text
 step/0000/00009867/00009867_086229ea796640d29acd68ff_step_002.step
-obj/0000/00009867/00009867_086229ea796640d29acd68ff_trimesh_002.obj
+obj/00009867/00009867_086229ea796640d29acd68ff_trimesh_002.obj
 ```
 
 配对记录 `chunk + shape_id + 中间标识串 + 末尾编号`。先按 ID 找候选，再核对其余标识与几何，不盲目拼路径；多匹配和冲突进入隔离清单。
@@ -212,30 +212,27 @@ distance, _, _, _ = igl.signed_distance(
 
 ## 5. 产物目录与字段规范
 
-建议派生数据写入项目内 `data/abc_surface_v1/`，不改原始数据目录：
+实际派生数据根目录为 `/opt/data/private/yihengxu/Datasets/surface`，不改原始 ABC 目录：
 
 ```text
-data/abc_surface_v1/
+/opt/data/private/yihengxu/Datasets/surface/
 ├── config.json
 ├── manifest.jsonl
 ├── splits/{train,val,test}.txt
-├── reports/{inventory,quality,failures}.jsonl
+├── reports/inventory.json
+├── reports/process_results.jsonl
+├── reports/items/<id>.json
 ├── work/<id>/                 # Voronoi 中间产物与日志
 ├── samples/<id>/
 │   ├── recon_sdf.ply
 │   ├── geometry.npz
 │   ├── surface_field.npz
-│   ├── supervision.npz
 │   ├── transform.json
 │   └── quality.json
-├── gt_seg/                    # eval_seg 专用格式
-└── validation/gt_field/<id>/
-    ├── recon_sdf.ply
-    ├── udf_g.npy              # GT g_metric，仅用于对照
-    └── cluster.ply            # 对照运行后生成
+└── validation/                # 后续 GT 分割/B-rep 对照
 ```
 
-以上是拟定布局，尚未生成。不同 mesh variant 使用不同版本目录或显式 variant 层；现有脚本的导出 root 每次只放一种 variant，用八位 ID，避免下划线与旋转编号解析冲突。
+清单、报告和两个 smoke 样本已经按该布局生成。`supervision.npz`、`gt_seg/` 和 B-rep 对照属于下一阶段，当前处理器没有伪造这些文件。不同 mesh variant 应使用不同输出根目录；每个根目录只放一种 variant，用八位 ID 避免旋转后缀解析冲突。
 
 | 文件 | 字段 | 类型与用途 |
 | --- | --- | --- |
@@ -254,46 +251,78 @@ manifest/config 还需记录 schema 版本、源文件/mesh/标签哈希、实�
 
 loader 读取几何与 `udf_target`，在线采样噪声与时间，无需预存 DDPM/FM 带噪状态。一次采样轨迹内不重采样位置，多候选只改变随机种子。可选 Laplacian、质量矩阵、特征分解缓存绑定 mesh 哈希和参数，不是计算标签的必要步骤。
 
-## 6. 待新增模块与实施顺序
+## 6. 已实现处理器、运行方式与后续模块
 
-以下文件名为拟议接口，目前没有实现，不能直接执行：
+[prepare_abc_surface.py](../scripts/prepare_abc_surface.py) 已实现：递归扫描与精确配对、稳定 split、STEP/OBJ 预检、C++ 子进程隔离、坐标变换、OBJ/STEP bbox 对齐、全部三角面中心距离查询、Open3D/libigl 后端、条件点采样、原子导出、缓存溯源和失败报告。它只处理 `pair_status=paired` 的样本，因此本阶段不会从 2,832 个缺 OBJ 的 STEP 自动三角化补入训练集。
 
-| 模块 | 职责 |
-| --- | --- |
-| `scripts/abc_manifest.py` | 配对、哈希、去重组、split |
-| `scripts/abc_precheck.py` | OCC/mesh 检查与失败理由 |
-| `scripts/abc_voronoi.py` | C++ 子进程、超时、日志、变换与对齐 |
-| `scripts/abc_surface_field.py` | 冻结 mesh、面中心距离查询、标签导出 |
-| `scripts/abc_seg_gt.py` | face/edge/vertex 真值及 eval_seg 格式 |
-| `scripts/abc_validate.py` | 索引/数值/坐标验证、GT 场对照与报告 |
-| 新 SurfaceField Dataset 类 | 几何/目标读取、变长 batch、在线加噪 |
+先建立或刷新清单：
 
-先实现 10–20 个 smoke 样本，再扩大至 100–200 个覆盖平面、圆柱、圆角、薄壁、孔洞和自由曲面的样本，最后处理全部候选。数量是预算建议，不承诺筛选后规模与耗时。
+```bash
+python scripts/prepare_abc_surface.py inventory \
+  --abc-root /opt/data/private/yihengxu/Datasets/abc \
+  --output-root /opt/data/private/yihengxu/Datasets/surface
+```
+
+正式处理默认使用项目 C++ Voronoi：
+
+```bash
+/miniconda/envs/HYCAD/bin/python scripts/prepare_abc_surface.py process \
+  --output-root /opt/data/private/yihengxu/Datasets/surface \
+  --voronoi-exe Voronoi/build/calculate_voronoi/calculate_voronoi \
+  --limit 20
+```
+
+也可使用 `run` 在一次调用中刷新清单后处理。默认 `--resume` 只复用处理配置和 Voronoi 来源均一致的成功结果；设置变化时必须显式 `--overwrite`，旧结果会先重命名归档，不会直接覆盖。
+
+仍待实现的是 CAD face/edge/vertex 监督导出器、`eval_seg.py` 所需 GT 格式、GT labels/B-rep 对照和训练 Dataset 类。下一步先用正式 C++ 后端处理 10–20 个分层 smoke 样本，再扩至 100–200 个，最后决定是否全量处理。数量是预算建议，不承诺筛选后规模与耗时。
 
 当前默认路径下未发现编译好的 `Voronoi/build/calculate_voronoi/calculate_voronoi` 和 `checkpoints/parametrizer.ckpt`，但未检查机器上其他环境/路径。表面标签生成无需 parametrizer 权重，B-rep 对照需要。
 
+为验证除 C++ 外的完整链路，处理器提供显式启用的 `--voronoi-backend scipy --allow-experimental-voronoi`。它从规范化 STEP 的逐 face 三角化中采样带 CAD face ID 的点，用 SciPy 三维 Voronoi 提取不同 face 样本站点之间的有限 ridge，再生成分界面网格。其采样与项目 C++/Geogram 实现不同，只用于 smoke test；输出的 `quality.json` 和 `voronoi_backend.json` 均标记 `experimental=true`，正式训练前必须用 C++ 后端重建，缓存不会跨后端复用。
+
+2026-09-13 的真实数据 smoke 结果：
+
+| ID | 结果 | 输入 OBJ 三角面 | 说明 |
+| --- | --- | ---: | --- |
+| `00000003` | 成功 | 41,238 | 逐面查询、Open3D 距离、PLY 回读和 NPZ 一致性通过 |
+| `00009867` | 成功 | 46,634 | 同上 |
+| `00000002`、`00000004` | 预检隔离 | — | STEP 含退化 edge，与当前 C++ 限制一致 |
+| `00000005` | 预检隔离 | — | 含 10 个 solids，超出首版单 solid 范围 |
+
+两个成功样本位于 `samples/<id>/`，其 `len(triangles) == len(query_xyz) == len(udf_raw) == len(udf_g)`，raw/metric/target 换算和非负有限性断言均通过。该结果证明处理器链路能运行，不构成 SciPy 标签与正式 C++ 标签等价或可用于训练的结论。复现实验命令为：
+
+```bash
+/miniconda/envs/HYCAD/bin/python scripts/prepare_abc_surface.py process \
+  --output-root /opt/data/private/yihengxu/Datasets/surface \
+  --ids 00000003,00009867 \
+  --voronoi-backend scipy --allow-experimental-voronoi \
+  --scipy-voronoi-points 2000 --scipy-min-face-points 8 \
+  --condition-points 2048 --alignment-samples 512 \
+  --distance-backend open3d
+```
+
 构建依据 [Voronoi/install.sh](../Voronoi/install.sh) 和 [README](../README.md)。安装脚本含 sudo/apt、网络下载和依赖构建，属于独立环境准备步骤，不能在数据扫描时自动执行。C++ 采样半径、边采样密度等当前写在源码中，记录源码哈希，不编造 CLI 参数。
 
-构建完成后，现有工具的单样本命令为：
+构建完成后，也可直接测试 C++ 单样本接口：
 
 ```bash
 Voronoi/build/calculate_voronoi/calculate_voronoi \
   /opt/data/private/yihengxu/Datasets/abc/step/0000/00009867/00009867_086229ea796640d29acd68ff_step_002.step \
-  data/abc_surface_v1/work/00009867/
+  /opt/data/private/yihengxu/Datasets/surface/work_cpp_test/00009867/
 ```
 
-这只是接口示例，不代表该样本已通过几何预检。随后由待实现脚本读取对应 OBJ、权威变换与 Voronoi，生成表面标签，不运行完整 `prepare_implicit.py` 制造无关体数据。
+实际批处理应由 `prepare_abc_surface.py` 调用该程序，以获得超时、日志、来源哈希、对齐检查和失败记录；不运行完整 `prepare_implicit.py` 制造无关体数据。
 
 GT 场对照目录准备好后可复用：
 
 ```bash
-python clustering.py data/abc_surface_v1/validation/gt_field
+python clustering.py /opt/data/private/yihengxu/Datasets/surface/validation/gt_field
 python rebuild.py \
-  --input data/abc_surface_v1/validation/gt_field \
-  --out data/abc_surface_v1/validation/brep_gt_field \
+  --input /opt/data/private/yihengxu/Datasets/surface/validation/gt_field \
+  --out /opt/data/private/yihengxu/Datasets/surface/validation/brep_gt_field \
   --rotations 3
 python postprocess.py \
-  --input data/abc_surface_v1/validation/brep_gt_field --serial
+  --input /opt/data/private/yihengxu/Datasets/surface/validation/brep_gt_field --serial
 ```
 
 全程保持规范化坐标，不在这些目录混入旧 `norm_params.npz`：分割入口发现它会反归一化，且其 scale 是逆变换的除数，与 C++ 的乘数不是同一约定。最终 STEP 若需恢复原坐标，在规范化评价完成后明确执行一次逆变换并验证 round-trip。

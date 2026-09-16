@@ -1,4 +1,5 @@
 #include <iostream>
+#include <iomanip>
 #include <unordered_set>
 
 #include <glog/logging.h>
@@ -78,7 +79,7 @@ void write_topp_shape(const TopoDS_Shape& v_shape, const fs::path& v_filename)
         const int cur_vertex_size = vertices.size();
         for (int i = 0; i < triangulation->NbNodes(); ++i)
         {
-            gp_Pnt p = triangulation->Node(i + 1);
+            gp_Pnt p = triangulation->Node(i + 1).Transformed(loc.Transformation());
             vertices.emplace_back(p.X(), p.Y(), p.Z());
         }
 
@@ -421,10 +422,14 @@ Point_set_3 sample_points_surface(const TopoDS_Shape& shape, std::vector<std::ve
                 Standard_Integer n1, n2, n3;
                 t.Get(n1, n2, n3);
 
+                const gp_Trsf local_to_global = loc.Transformation();
+                const gp_Pnt p1 = triangulation->Node(n1).Transformed(local_to_global);
+                const gp_Pnt p2 = triangulation->Node(n2).Transformed(local_to_global);
+                const gp_Pnt p3 = triangulation->Node(n3).Transformed(local_to_global);
                 local_tris.emplace_back(
-                    K::Point_3(triangulation->Node(n1).X(), triangulation->Node(n1).Y(), triangulation->Node(n1).Z()),
-                    K::Point_3(triangulation->Node(n2).X(), triangulation->Node(n2).Y(), triangulation->Node(n2).Z()),
-                    K::Point_3(triangulation->Node(n3).X(), triangulation->Node(n3).Y(), triangulation->Node(n3).Z()));
+                    K::Point_3(p1.X(), p1.Y(), p1.Z()),
+                    K::Point_3(p2.X(), p2.Y(), p2.Z()),
+                    K::Point_3(p3.X(), p3.Y(), p3.Z()));
             }
         }
         const double area = std::accumulate(local_tris.begin(), local_tris.end(),
@@ -543,7 +548,11 @@ int main(int argc, char** argv)
         shape = transformer.Shape();
 
         std::ofstream ofs((output_root / "normalized_params.txt").string());
-        ofs << -(xmin + xmax) / 2 << " " << -(ymin + ymax) / 2 << " " << - (zmin + zmax) / 2 << " " << scaleFactor;
+        ofs << std::setprecision(17)
+            << -(xmin + xmax) / 2 << " "
+            << -(ymin + ymax) / 2 << " "
+            << -(zmin + zmax) / 2 << " "
+            << scaleFactor;
         ofs.close();
     }
     const double mesh_threshold = 0.001;

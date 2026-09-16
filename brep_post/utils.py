@@ -893,7 +893,11 @@ def create_wire_from_unordered_edges(face_edges, connected_tolerance, max_retry_
         edges_seq = TopTools_HSequenceOfShape()
         for edge in face_edges:
             edges_seq.Append(edge)
-        wire_array_c = ShapeAnalysis_FreeBounds.ConnectEdgesToWires(edges_seq, connected_tolerance, False)
+        try:
+            wire_array_c = ShapeAnalysis_FreeBounds.ConnectEdgesToWires(edges_seq, connected_tolerance, False)
+        except TypeError:  # OCC >= 7.9: wires sequence is an out-parameter, no return value
+            wire_array_c = TopTools_HSequenceOfShape()
+            ShapeAnalysis_FreeBounds.ConnectEdgesToWires(edges_seq, connected_tolerance, False, wire_array_c)
 
         # Check if all wires is valid
         all_wire_valid = True

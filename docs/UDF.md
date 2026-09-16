@@ -423,3 +423,435 @@ DualBrep 的 UDF 可以概括为一个“连续、可查询、经过截断的 Vo
 5. **拓扑处理层**：在 SDF 表面三角形中心查询为 `udf_g.npy`，把低值带作为 B-rep 边界，再通过连通分量得到 `cluster.ply`。
 
 所以，UDF 的最终目标不是代替 SDF 重建物体，而是给 SDF 恢复出的几何外壳补上“在哪里切分成 B-rep faces”的拓扑线索。
+
+## 15. 从 SDF/UDF 到最终 B-rep 的完整还原流程
+
+前面的内容解释到了 `cluster.ply`。但 `cluster.ply` 仍然只是带面标签的三角网格，并不是严格意义上的 B-rep。B-rep 除了几何形状，还必须显式包含：
+
+- face 对应的参数曲面；
+- edge 对应的参数曲线；
+- 每条 edge 邻接哪些 face；
+- edge 如何组成闭合 wire；
+- wire 如何裁剪无限参数曲面；
+- 多个 trimmed face 如何缝合为闭合 shell 和 solid。
+
+本仓库通过“隐式场重建 → 网格分割 → 参数化网络 → OpenCASCADE 组装”完成这一转换。总入口 `run_pipeline.sh` 将它划分为三步：
+
+```text
+输入点云/隐式样本
+  │
+  ├─ ae_reconstruct.py
+  │    SDF/UDF → recon_sdf.ply + udf_g.npy → cluster.ply
+  │
+  ├─ rebuild.py
+  │    cluster.ply → 参数曲面网格 + 交线 + 拓扑 → post.npz
+  │
+  └─ postprocess.py + brep_post/
+       post.npz → B-spline 曲面/曲线 → trimmed faces
+                → sewn shell → solid → STEP
+```
+
+### 15.1 第一阶段：SDF 恢复几何外壳
+
+`ae_reconstruct.py:97-100` 先把网络的两个输出通道恢复为归一化空间中的截断距离：
+
+```python
+sdf = np.clip(grid[..., 0], -1, 1) * clip_value
+udf = np.clip(grid[..., 1],  0, 1) * clip_value
+```
+
+然后 `mesh_utils.py::sdf2mesh` 在：
+
+$$
+\mathcal S=\{\mathbf x\mid s(\mathbf x)=0\}
+$$
+
+上执行 marching cubes：
+
+```python
+v, f = mcubes.marching_cubes(v_sdf, 0.0)
+v = v / (res - 1) * 2 - 1
+```
+
+结果 `recon_sdf.ply` 是位于 $[-1,1]^3$ 中的三角网格。它提供了后续 B-rep 的整体几何外形，但此时没有参数曲面、解析曲线或显式 face-edge 拓扑。
+
+`recon_udf.ply` 是在 `UDF=udf_threshold` 上提取的等值壳，仅用于显示 UDF 分界场或可选的 `udf_mesh` 分割模式。默认 B-rep 还原并不直接把它拟合成 OCC edge。
+
+### 15.2 第二阶段：UDF 将外壳切分成候选 B-rep faces
+
+`ae_reconstruct.py:115-121` 在 `recon_sdf.ply` 每个三角形中心直接查询网络 UDF，保存为 `udf_g.npy`。`clustering.py::process_item` 随后：
+
+1. 只保留 SDF 网格的最大连通分量；
+2. 将 `UDF < 0.005` 的三角形视为边界带并标为 `-1`；
+3. 对剩余相邻三角形求连通分量；
+4. 过滤过小分量；
+5. 用 `UDF >= 0.01` 做第二遍细分；
+6. 将 cluster id 写入 `cluster.ply` 的 per-face `label` 属性。
+
+因此 `cluster.ply` 中的一个 label 是一个候选 B-rep face 的离散支撑区域：
+
+```text
+recon_sdf.ply 中的一组三角形
+              +
+同一个 per-face label
+              ↓
+一个候选 B-rep 参数曲面
+```
+
+这一步建立的是“哪些三角形属于同一个面”，还没有恢复面之间的准确交线。低 UDF 的边界三角形被标成 `-1`，后续参数化时不会作为任何 face 的输入。
+
+### 15.3 第三阶段：把每个三角网格分块变成参数化网络输入
+
+入口是 `rebuild.py`。`read_cluster` 从 PLY face 属性中读取 `label`；`sample_faces` 遍历除 `-1` 外的所有唯一标签（`rebuild.py:76-101`）。对每个标签：
+
+1. 提取属于该 label 的子网格；
+2. 用 Open3D 均匀采样默认 100 个点；
+3. 每个点拼接三角面法向，形成 `(x,y,z,nx,ny,nz)`；
+4. 计算该分块的中心和三轴 extent，形成 6 维 bbox。
+
+模型输入因而是：
+
+| 字段 | 形状 | 含义 |
+|---|---:|---|
+| `face_sample_points` | `(N,100,6)` | $N$ 个候选 face 的位置与法向采样 |
+| `face_input_bbox` | `(N,6)` | 每个 face 的中心 `(cx,cy,cz)` 与 extent `(sx,sy,sz)` |
+| `face_attn_mask` | `(N,N)` | face 之间的 attention mask；推理时全为 `False` |
+
+这里 `normalize_coord0516` 计算：
+
+$$
+\mathbf c_i=\operatorname{mean}(P_i),\qquad
+\mathbf e_i=\max(P_i)-\min(P_i)
+$$
+
+薄轴 extent 小于 `0.01` 时，在归一化/反归一化计算里暂时用 1 替代，避免除零（`rebuild_model.py:66-114`）。
+
+若一个 `cluster.ply` 少于两个有效 label，`rebuild.py:208-211` 会跳过该候选，因为后续模型需要从多个 face 中预测相交关系。
+
+### 15.4 测试时旋转：为几何组装生成多个候选
+
+`rebuild.py` 使用八面体旋转群的 24 个旋转矩阵。对每个旋转 $M_k$：
+
+```python
+m = mesh.copy()
+T[:3, :3] = ROT[k]
+m.apply_transform(T)
+```
+
+随后重新采样并独立运行参数化网络，候选保存到：
+
+```text
+<out>/tmp/<shape>_<k>/post.npz
+```
+
+旋转没有改变目标拓扑，但会改变神经网络看到的姿态，因此 24 个候选的曲面、交线和连接误差会略有不同。某个姿态组装失败不意味着所有姿态都会失败。默认 `run_pipeline.sh` 使用 `ROTATIONS=all`。
+
+### 15.5 Parametrizer 如何预测参数曲面
+
+`rebuild_model.py::Parametrizer.encode` 对每个 face 的点云使用 `PointEncoder3` 编码，并把 bbox 特征拼接进去（`rebuild_model.py:373-413`）。所有 face 特征再经过 Transformer，使一个面的表示能参考模型中其他面。
+
+`decode_face` 从一个 $2\times2$ face feature map 连续上采样三次，最终输出：
+
+```text
+face_norm: (N,16,16,6)
+```
+
+最后 6 个通道表示归一化 xyz 和 normal。网络还预测 bbox 修正量：
+
+```python
+delta_bbox = self.face_center_scale_decoder(...)
+face_bbox = delta_bbox + face_input_bbox
+```
+
+随后 `denormalize_coord0516` 将规则网格恢复到全局坐标，得到：
+
+```text
+pred_face: (N,16,16,6)
+```
+
+对每个 face，`pred_face[i,:,:,0:3]` 可以看成一个离散参数曲面：
+
+$$
+\mathbf S_i(u_p,v_q),\qquad p,q=0,\ldots,15
+$$
+
+它与分割三角片的区别是：三角片只有不规则离散表面，而 `16×16` 网格已经建立了规则的二维 $(u,v)$ 参数域，为后续 B-spline 曲面拟合提供输入。
+
+### 15.6 Parametrizer 如何预测 face 邻接和交线
+
+`Parametrizer.decode_edge` 枚举全部有序 face 对，包括 `(i,j)`、`(j,i)` 和 `(i,i)`（`rebuild_model.py:436-450`）。每对 face feature 经过：
+
+```python
+self.inter       # 构造相交特征
+self.classifier  # 判断两个 face 是否相交
+```
+
+分类概率经 sigmoid 后使用 `0.5` 阈值：
+
+```python
+pred_labels = torch.sigmoid(pred) > 0.5
+```
+
+对判定相交的 face 对，输出：
+
+```text
+pred_edge_face_connectivity[e] = [edge_id, face_id_1, face_id_2]
+```
+
+这就是 B-rep 中最重要的显式拓扑关系：一条 edge 由哪两个 face 共享。
+
+edge decoder 还为每条边输出 16 个参数点，其中前两个通道是第一个相邻 face 参数域中的 $(u,v)$。`hermite_sample` 把它们从 `[0,1]` 转到 `grid_sample` 使用的 `[-1,1]`，再在预测的 `16×16` face 网格上做双线性采样（`rebuild_model.py:13-24, 652-665`）：
+
+$$
+\mathbf C_e(t_k)=mathbf S_{f_1}(u_k,v_k),qquad k=0,\ldots,15
+$$
+
+因此得到：
+
+```text
+pred_edge: (E,16,3)
+```
+
+这种构造保证预测 edge 点落在第一个相邻预测曲面上；后处理中的几何优化再让它同时靠近第二个相邻曲面。
+
+`rebuild.py::save_outputs` 最终保存：
+
+| `post.npz` 字段 | 形状 | 用途 |
+|---|---:|---|
+| `pred_face` | `(N,16,16,6)` | 拟合 OCC 参数曲面的规则采样网格 |
+| `pred_edge` | `(E,16,3)` | 拟合 OCC 参数曲线的有序采样点 |
+| `pred_edge_face_connectivity` | `(E,3)` | `[edge_id, face1, face2]` 拓扑关系 |
+
+`recon_faces.ply` 和 `recon_edges.ply` 只是这些预测的可视化；真正交给 B-rep 组装器的是 `post.npz`。
+
+### 15.7 清理重复 half-edge 并建立局部拓扑
+
+`postprocess.py::build_one` 调用 `brep_post.construct_brep.construct_brep_from_datanpz`。`get_data` 读取 `post.npz` 并建立 `Shape`（`construct_brep.py:122-153`）。
+
+由于模型枚举的是有序 face 对，`(i,j)` 和 `(j,i)` 可能各预测一条几何上重复的 edge。`Shape.remove_half_edges` 会把正反 face 对归到一起，并根据预测 edge 到两个相邻 face 的 Chamfer 距离选择更合适的一条；明显远离两个面的候选会被删除（`brep_post/utils.py:155-241`）。
+
+随后：
+
+- `check_openness` 根据曲线首尾方向判断 edge 是否近似闭合；
+- `build_fe` 建立每个 face 对应的 edge 列表 `face_edge_adj`；
+- `build_vertices` 搜索三个两两相邻 face 构成的环，并确定三条 edge 中应当汇聚的端点。
+
+此时已经有了近似的 face-edge-vertex 组合关系，但不同网络输出之间通常还有小间隙。
+
+### 15.8 几何优化：让交线真正贴合两个相邻曲面
+
+默认 `postprocess.py` 开启几何优化，最大迭代数默认为 200。`brep_post/utils.py::optimize` 为：
+
+- 每条 edge 学习逐轴缩放和平移参数；
+- 每个 face 学习一个平移量。
+
+主要损失包括：
+
+1. **edge-face 贴合损失**：每条边同时靠近两个相邻 face，并惩罚到两侧距离不平衡；
+2. **corner 损失**：三个 face 交汇处对应的三条 edge 端点应汇聚到同一点；
+3. **wire 连通损失**：同一个 face 周围各 edge 的端点应能两两连接；
+4. **正则项**：限制 edge 变换和 face 平移不要偏离原预测太远。
+
+核心形式可概括为：
+
+$$
+L=L_{edge\leftrightarrow face}+L_{corner}+L_{wire}+L_{reg}
+$$
+
+对应实现位于 `brep_post/utils.py:504-635`。如果优化被判断为发散，代码会退回原始 face/edge 预测，而不是使用发散结果。
+
+### 15.9 离散规则网格拟合为 OCC B-spline 几何
+
+几何优化后，`construct_brep.py:295-303` 分别调用：
+
+```python
+recon_geom_faces = [create_surface(points) ...]
+recon_geom_curves = [create_edge(points) ...]
+```
+
+#### 曲面拟合
+
+`create_surface` 将 `16×16` xyz 网格填入 `TColgp_Array2OfPnt`，调用：
+
+```python
+GeomAPI_PointsToBSplineSurface(...).Surface()
+```
+
+生成 `Geom_BSplineSurface`。代码依次尝试：
+
+```text
+FACE_FITTING_TOLERANCE = [0.001, 0.01, 0.03, 0.05, 0.08]
+```
+
+以采样点到拟合曲面的 `RMSE + max_error` 选取较好结果；目标连续性为 `GeomAbs_C2`，曲面次数范围为 3 到 8。若规则网格首尾足够接近，还会把曲面设置为 U 或 V 周期曲面（`brep_post/utils.py:762-829`）。
+
+#### 曲线拟合
+
+`create_edge` 将 16 个 edge 点填入 `TColgp_Array1OfPnt`，调用：
+
+```python
+GeomAPI_PointsToBSpline(...).Curve()
+```
+
+依次尝试：
+
+```text
+EDGE_FITTING_TOLERANCE = [0.001, 0.005, 0.008, 0.05]
+```
+
+同样按拟合误差选取曲线，连续性为 C2，次数最大为 8（`brep_post/utils.py:832-878`）。
+
+然后用 `BRepBuilderAPI_MakeEdge` 把几何曲线变成拓扑 edge。注意这里的 B-spline 是对神经网络预测点的近似拟合，不是在识别平面、圆柱、圆或直线等解析 primitive。
+
+### 15.10 用 edge 构造 wire，并裁剪参数曲面
+
+一个无限延伸的 `Geom_BSplineSurface` 还不是有限 B-rep face。对于 face $i$，代码利用 `pred_edge_face_connectivity` 收集所有相邻 edge（`construct_brep.py:324-345`），然后尝试把无序 edge 连接成闭合 wire：
+
+```python
+ShapeAnalysis_FreeBounds.ConnectEdgesToWires(
+    edges, connected_tolerance, False)
+```
+
+连接容差按以下序列从严到松尝试：
+
+```text
+[0.002, 0.006, 0.01, 0.015, 0.02, 0.025, 0.05, 0.08]
+```
+
+如果无序连接无法闭合，代码会回退到 `create_wire_from_ordered_edges`：按照最近端点顺序串联 edge，并使用 `ShapeFix_Wire` 修复局部间隙（`brep_post/utils.py:940-1011`）。
+
+得到 wire 后，`create_trimmed_face_from_wire` 使用 `ShapeFix_Face` 将一个或多个 wire 添加到参数曲面上，修复三维 gap、方向和缺失 seam，并通过 `BRepCheck_Analyzer` 验证（`brep_post/utils.py:1025-1122`）。
+
+这里：
+
+- 最大 wire 通常是外边界；
+- 其他闭合 wire 可以表示孔洞的内边界；
+- 参数曲面提供 face 的几何；
+- wire 提供 face 的有限拓扑边界。
+
+只有成功裁剪的结果才成为 OCC `TopoDS_Face`。
+
+### 15.11 从 trimmed faces 缝合 shell 和 solid
+
+当成功裁剪的 face 数量超过候选 face 数量的 80% 时，代码调用 `get_solid`（`construct_brep.py:373-385`）：
+
+1. 将所有 trimmed face 加入 `BRepBuilderAPI_Sewing`；
+2. 按逐渐增大的连接容差缝合共享边；
+3. 若结果是多个不相连部分组成的 `COMPOUND`，直接判定当前 solid 失败；
+4. 用 `ShapeFix_Shell` 修复 face 和 shell 方向；
+5. 用 `BRepBuilderAPI_MakeSolid` 从闭合 shell 构造 solid；
+6. 用 `ShapeFix_Solid` 修复 shell/solid；
+7. 仅当结果类型是 `TopAbs_SOLID` 且 `BRepCheck_Analyzer` 有效时返回。
+
+实现位于 `brep_post/utils.py:1259-1321`。
+
+成功后，`construct_brep.py:387-398` 先应用 $M_k^{-1}$ 撤销 `rebuild.py` 中的测试时旋转，再写出 `recon_brep.step`。代码会重新读取 STEP，并同时检查：
+
+```text
+shape.ShapeType() == TopAbs_SOLID
+BRepCheck_Analyzer(shape).IsValid() == True
+```
+
+只有两项都通过，才生成 `success.txt` 和 `recon_brep.stl`。如果无法形成有效 solid，代码可能额外输出由全部面组成的 compound STEP 作为调试结果，但它没有 `success.txt`，不会被当作成功 B-rep 提升到最终输出。
+
+### 15.12 多旋转候选的选择与最终文件
+
+`postprocess.py` 可用 Ray 并行组装每个 `<shape>_<rotation>` 候选。它按 shape 分组，选择排序后第一个存在 `success.txt` 的候选，将：
+
+```text
+tmp/<shape>_<k>/pp/recon_brep.step
+```
+
+复制为：
+
+```text
+<out>/<shape>.step
+```
+
+并将成功 solid 的 STL 三角化结果转为 `<shape>.ply`。因此最终 `.step` 的判据不是“成功写出了文件”，而是候选确实被 OCC 识别为有效 `SOLID`。
+
+### 15.13 SDF 和 UDF 在 B-rep 还原中的职责边界
+
+完整链路中两种隐式场的作用可以精确区分为：
+
+| 信息来源 | 直接贡献 | 不直接负责 |
+|---|---|---|
+| SDF | `SDF=0` 生成整体三角外壳，为各 face 提供几何采样 | 不提供显式面邻接和精确参数曲线 |
+| UDF | 在 SDF 表面定位低值分界带，产生 face cluster | 默认流程不直接把 `recon_udf.ply` 当 OCC edge |
+| Parametrizer | 将 face cluster 重拟合为规则参数网格，预测 edge 和 face-edge 拓扑 | 不再查询原始 SDF/UDF |
+| OCC 后处理 | B-spline 拟合、wire、trim、sew、solid、STEP 验证 | 不重新推断缺失的全局语义拓扑 |
+
+换句话说，从 `rebuild.py` 开始，后续代码不再使用稠密 SDF/UDF 数值；它只使用由二者共同产生的 `cluster.ply`。因此早期误差会沿链路传播：
+
+```text
+SDF 几何误差
+  → cluster 的表面位置不准
+  → 参数曲面拟合偏移
+
+UDF 分界误差
+  → face 过分割/欠分割
+  → face 数量与邻接预测错误
+  → wire 无法闭合或 shell 无法密封
+```
+
+### 15.14 坐标系与尺寸
+
+测试时八面体旋转会在成功组装后撤销，因此不会改变最终方向。但是否恢复到原始输入尺寸取决于上游数据路径：
+
+- 隐式 STEP `.npz` 路径中的 SDF/UDF 位于归一化空间，当前 B-rep 流程没有再次读取 `calculate_voronoi` 的原始 STEP 归一化参数，所以最终 B-rep 通常仍在归一化坐标系；
+- 点云路径若启用 `per_axis_norm`，`ae_reconstruct.py` 会保存 `norm_params.npz`，`clustering.py` 在写 `cluster.ply` 时执行 `v_orig = v_norm * scale + center`，因此参数化和最终 STEP 使用反归一化后的点云坐标；
+- 默认点云配置 `per_axis_norm: false` 时，输入仍按最长轴归一化，最终结果也保留该尺度。
+
+### 15.15 运行方式和关键中间结果
+
+完整命令为：
+
+```bash
+./run_pipeline.sh
+```
+
+等价于依次执行：
+
+```bash
+python ae_reconstruct.py \
+    config=config_pc.yaml \
+    runtime.compute_clustering=true \
+    runtime.output_dir=output_pipeline/recon
+
+python rebuild.py \
+    --input output_pipeline/recon \
+    --out output_pipeline/brep \
+    --rotations all
+
+python postprocess.py \
+    --input output_pipeline/brep
+```
+
+建议排查 B-rep 失败时按以下顺序检查：
+
+| 文件 | 检查内容 |
+|---|---|
+| `recon_sdf.ply` | 整体表面是否完整、封闭、无明显浮壳 |
+| `udf_g.npy` / `cluster.ply` | B-rep 面是否过分割、欠分割，边界是否合理 |
+| `recon_faces.ply` | `16×16` 参数曲面是否贴合各 cluster |
+| `recon_edges.ply` | 交线是否落在两个相邻面附近，端点能否闭合 |
+| `post.npz` | face 数、edge 数和 `[edge,face1,face2]` 是否合理 |
+| `pp/optimized_edge.obj` | 几何优化后边界是否连续 |
+| `pp/separate_faces.ply` | OCC 拟合后的独立曲面是否正确 |
+| `pp/success.txt` | 是否最终形成通过 BRepCheck 的有效 solid |
+
+最终可以把“由 SDF/UDF 还原 B-rep”概括为：
+
+$$
+[SDF,UDF]
+\rightarrow
+\text{segmented triangle surface}
+\rightarrow
+\text{parametric face/edge samples + topology}
+\rightarrow
+\text{B-spline geometry + trimmed topology}
+\rightarrow
+\text{watertight OCC solid}
+$$
+
+其中 SDF/UDF 解决连续隐式几何和分界，Parametrizer 解决参数化及显式邻接预测，OpenCASCADE 解决满足 CAD 数据结构要求的几何拟合、拓扑裁剪、缝合和有效性验证。

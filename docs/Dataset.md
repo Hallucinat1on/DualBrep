@@ -253,12 +253,12 @@ loader 读取几何与 `udf_target`，在线采样噪声与时间，无需预存
 
 ## 6. 已实现处理器、运行方式与后续模块
 
-[prepare_abc_surface.py](../scripts/prepare_abc_surface.py) 已实现：递归扫描与精确配对、稳定 split、STEP/OBJ 预检、C++ 子进程隔离、坐标变换、OBJ/STEP bbox 对齐、全部三角面中心距离查询、Open3D/libigl 后端、条件点采样、原子导出、缓存溯源和失败报告。它只处理 `pair_status=paired` 的样本，因此本阶段不会从 2,832 个缺 OBJ 的 STEP 自动三角化补入训练集。
+[Voronoi/surface_field](../Voronoi/surface_field/) 包（入口 `python -m Voronoi.surface_field`，在仓库根运行；模块划分为 common/inventory/precheck/voronoi_cpp/voronoi_scipy/geometry/pipeline/cli）已实现：递归扫描与精确配对、稳定 split、STEP/OBJ 预检、C++ 子进程隔离、坐标变换、OBJ/STEP bbox 对齐、全部三角面中心距离查询、Open3D/libigl 后端、条件点采样、原子导出、缓存溯源和失败报告。它只处理 `pair_status=paired` 的样本，因此本阶段不会从 2,832 个缺 OBJ 的 STEP 自动三角化补入训练集。
 
 先建立或刷新清单：
 
 ```bash
-python scripts/prepare_abc_surface.py inventory \
+python -m Voronoi.surface_field inventory \
   --abc-root /opt/data/private/yihengxu/Datasets/abc \
   --output-root /opt/data/private/yihengxu/Datasets/surface
 ```
@@ -266,7 +266,7 @@ python scripts/prepare_abc_surface.py inventory \
 正式处理默认使用项目 C++ Voronoi：
 
 ```bash
-/miniconda/envs/HYCAD/bin/python scripts/prepare_abc_surface.py process \
+/miniconda/envs/HYCAD/bin/python -m Voronoi.surface_field process \
   --output-root /opt/data/private/yihengxu/Datasets/surface \
   --voronoi-exe Voronoi/build/calculate_voronoi/calculate_voronoi \
   --limit 20
@@ -292,7 +292,7 @@ python scripts/prepare_abc_surface.py inventory \
 两个成功样本位于 `samples/<id>/`，其 `len(triangles) == len(query_xyz) == len(udf_raw) == len(udf_g)`，raw/metric/target 换算和非负有限性断言均通过。该结果证明处理器链路能运行，不构成 SciPy 标签与正式 C++ 标签等价或可用于训练的结论。复现实验命令为：
 
 ```bash
-/miniconda/envs/HYCAD/bin/python scripts/prepare_abc_surface.py process \
+/miniconda/envs/HYCAD/bin/python -m Voronoi.surface_field process \
   --output-root /opt/data/private/yihengxu/Datasets/surface \
   --ids 00000003,00009867 \
   --voronoi-backend scipy --allow-experimental-voronoi \
@@ -311,7 +311,7 @@ Voronoi/build/calculate_voronoi/calculate_voronoi \
   /opt/data/private/yihengxu/Datasets/surface/work_cpp_test/00009867/
 ```
 
-实际批处理应由 `prepare_abc_surface.py` 调用该程序，以获得超时、日志、来源哈希、对齐检查和失败记录；不运行完整 `prepare_implicit.py` 制造无关体数据。
+实际批处理应由 `Voronoi/surface_field` 处理器调用该程序，以获得超时、日志、来源哈希、对齐检查和失败记录；不运行完整 `prepare_implicit.py` 制造无关体数据。
 
 GT 场对照目录准备好后可复用：
 

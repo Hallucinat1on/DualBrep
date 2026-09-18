@@ -17,7 +17,9 @@ void compute_voronoi(const Point_set_3& sample_points, const std::vector<std::ve
 		vertices.push_back(sample_points.point(i).y());
 		vertices.push_back(sample_points.point(i).z());
 	}
-	const auto& index_map = sample_points.property_map<int>("primitive_index").first;
+	const auto index_map_optional = sample_points.property_map<int>("primitive_index");
+	CHECK(index_map_optional.has_value()) << "Missing primitive_index property map";
+	const auto index_map = index_map_optional.value();
 
 	GEO::initialize();
 

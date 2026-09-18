@@ -1,7 +1,8 @@
 cmake_minimum_required (VERSION 3.10)
 PROJECT(calculate_voronoi)
 
-set(CMAKE_CXX_STANDARD 11)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 FILE(GLOB SOURCE_FILE *.cpp *.h)
 
@@ -9,6 +10,7 @@ find_package(Boost REQUIRED COMPONENTS filesystem)
 find_package(glog CONFIG REQUIRED)
 find_package(OpenCASCADE CONFIG REQUIRED)
 find_package(CGAL CONFIG REQUIRED)
+find_package(Eigen3 CONFIG REQUIRED)
 #set(GEOGRAM_INSTALL_PREFIX ${ROOT_PATH}/external/geogram/build/install/)
 #include(${ROOT_PATH}/external/geogram/build/install/lib/cmake/modules/FindGeogram.cmake)
 find_package(Geogram CONFIG REQUIRED)
@@ -29,4 +31,5 @@ target_link_libraries(${PROJECT_NAME} PRIVATE Geogram::geogram)
 target_link_libraries(${PROJECT_NAME} PRIVATE ${OpenCASCADE_LIBRARIES})
 target_link_libraries(${PROJECT_NAME} PRIVATE glog::glog)
 target_link_libraries(${PROJECT_NAME} PRIVATE CGAL::CGAL)
+target_link_libraries(${PROJECT_NAME} PRIVATE Eigen3::Eigen)
 target_link_libraries(${PROJECT_NAME} PRIVATE Boost::boost Boost::filesystem)

@@ -81,7 +81,9 @@ Point_set_3 sample_poisson_points(const std::vector<Triangle_3>& v_mesh, const d
 	class MyMesh : public tri::TriMesh< std::vector<MyVertex>, std::vector<MyFace>, std::vector<MyEdge>  > {};
 
 	Point_set_3 montecarlo_points = sample_points(v_mesh, std::max(10000, init_points), true);
-	auto montecarlo_index_map = montecarlo_points.property_map<int>("face_index").first;
+	const auto montecarlo_index_map_optional = montecarlo_points.property_map<int>("face_index");
+	CHECK(montecarlo_index_map_optional.has_value()) << "Missing face_index property map";
+	const auto montecarlo_index_map = montecarlo_index_map_optional.value();
 	MyMesh MontecarloMesh;
 	tri::Allocator<MyMesh>::AddVertices(MontecarloMesh, montecarlo_points.size());
 	// #pragma omp parallel for

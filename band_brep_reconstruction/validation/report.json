@@ -1,0 +1,122 @@
+{
+  "date": "2026-10-13",
+  "environment": {
+    "python": "3.9.25",
+    "OCC": "7.7.0",
+    "numpy": "1.26.4",
+    "scipy": "1.12.0"
+  },
+  "tests": {
+    "count": 31,
+    "passed": 31,
+    "isolated_copy": true,
+    "seconds": 121.83
+  },
+  "abc07": {
+    "status": "solid_validated",
+    "seconds": 155.3767214473337,
+    "config": {
+      "resolution": 65,
+      "max_resolution": 129,
+      "bounds": [
+        -1.0,
+        1.0
+      ],
+      "query_batch_size": 8192,
+      "tau_edge": 0.025,
+      "tau_vertex": 0.04,
+      "max_band_edge": 0.0125,
+      "max_refinements": 7,
+      "max_triangles": 1500000,
+      "stability_factors": [
+        0.85,
+        1.0,
+        1.15
+      ],
+      "require_stability": true,
+      "verify_band_stability": true,
+      "field_error": 0.0002,
+      "surface_tolerance": 0.003,
+      "localization_tolerance": 0.001,
+      "curve_tolerance": 0.001,
+      "boundary_tolerance": 0.001,
+      "cad_tolerance": 0.002,
+      "max_segments": 64,
+      "face_samples": 1200,
+      "spline_controls": 8,
+      "max_spline_controls": 16,
+      "uv_iterations": 4,
+      "seed": 0,
+      "stop_after": "solid",
+      "save_queries": true
+    },
+    "cache_key": "7e8a7f4a932a8a394b564282bd865b773df1403e001287eb3f43cf496e24a060",
+    "code_hash": "235072eae9fcec08a50a5b134dcf4ff731ae4915a40662af1a431ae226e9c4c3",
+    "graph": {
+      "faces": 3,
+      "edges": 2,
+      "vertices": 0
+    },
+    "seeds": {
+      "count": 3,
+      "sizes": [
+        29314,
+        16778,
+        16778
+      ],
+      "threshold_sweep": [
+        {
+          "factor": 0.85,
+          "count": 3,
+          "bijective_overlap": true
+        },
+        {
+          "factor": 1.0,
+          "count": 3,
+          "bijective_overlap": true
+        },
+        {
+          "factor": 1.15,
+          "count": 3,
+          "bijective_overlap": true
+        }
+      ],
+      "stable": true,
+      "mesh_refinement_stability": {
+        "coarse_count": 3,
+        "fine_count": 3,
+        "coarse_triangles": 57822,
+        "fine_triangles": 169194,
+        "bijective_overlap": true,
+        "fine_max_band_edge": 0.00625
+      }
+    },
+    "curves": {
+      "coverage": {
+        "tested": 2048,
+        "localized": 2048,
+        "max_curve_distance": 0.0006903586077231853,
+        "continuous_coverage_certified": false
+      },
+      "kinds": {
+        "0": "circle",
+        "1": "circle"
+      },
+      "max_fit_error": 2.149349756779061e-05
+    },
+    "cad": {
+      "valid": true,
+      "volume": 0.6388173106193598,
+      "roundtrip_volume": 0.6388159361405445,
+      "roundtrip_volume_error": 1.3744788152081355e-06,
+      "roundtrip_volume_budget": 0.006508836094677655,
+      "max_tolerance": 0.001,
+      "readback_curve_error": 4.236835084860904e-13,
+      "faces": 3,
+      "cad_edges": 3,
+      "logical_edges": 2,
+      "logical_vertices": 0,
+      "roundtrip_checked": true
+    }
+  }
+}

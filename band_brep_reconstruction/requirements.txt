@@ -1,0 +1,5 @@
+numpy>=1.24,<3
+scipy>=1.10
+PyMCubes>=0.1.4
+# Optional: torch (field MLP / copied DualBrep face model), libigl (mesh_fast oracle).
+# CAD assembly / STEP oracle: install pythonocc-core=7.7 via conda-forge.

@@ -1,0 +1,7 @@
+{
+  "resolution": 65,
+  "tau_edge": 0.025,
+  "tau_vertex": 0.04,
+  "max_band_edge": 0.0125,
+  "stop_after": "solid"
+}

@@ -1,0 +1,10 @@
+name: edge-vertex-udf
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pythonocc-core=7.7
+  - numpy>=1.24,<2
+  - scipy>=1.10
+  - pip
+# Optional faster SDF magnitudes: pip install libigl (CAD classifier supplies signs).

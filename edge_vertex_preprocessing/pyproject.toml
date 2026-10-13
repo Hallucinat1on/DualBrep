@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "evudf-preprocessing"
+version = "0.1.0"
+description = "Portable STEP preprocessing for aligned SDF, edge and vertex distance fields"
+requires-python = ">=3.9"
+dependencies = ["numpy>=1.24,<3", "scipy>=1.10"]
+
+[project.optional-dependencies]
+mesh = ["libigl==2.6.2"]
+
+[project.scripts]
+evudf-preprocess = "evudf.cli:main"
+evudf-make-manifest = "evudf.cli:manifest_main"
+
+[tool.setuptools.packages.find]
+include = ["evudf*"]

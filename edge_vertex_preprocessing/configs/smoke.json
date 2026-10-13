@@ -1,0 +1,11 @@
+{
+  "query_count": 256,
+  "surface_count": 128,
+  "edge_count": 128,
+  "min_face_samples": 4,
+  "min_edge_samples": 8,
+  "reference_checks": 32,
+  "edge_backend": "cad_bvh",
+  "sdf_backend": "cad",
+  "seed": 0
+}

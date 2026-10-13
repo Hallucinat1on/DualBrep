@@ -1,0 +1,4 @@
+numpy>=1.24,<3
+scipy>=1.10
+# pythonocc-core is installed via conda-forge, not this pip requirements file.
+# Optional mesh-SDF backend: pip install libigl

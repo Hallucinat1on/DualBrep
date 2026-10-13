@@ -1,0 +1,22 @@
+{
+  "query_count": 200000,
+  "surface_count": 10000,
+  "edge_count": 10000,
+  "min_face_samples": 16,
+  "min_edge_samples": 32,
+  "edge_backend": "cad_bvh",
+  "sdf_backend": "cad",
+  "mesh_deflection": 0.0002,
+  "solver_tolerance": 1e-7,
+  "geometry_tolerance": 2e-5,
+  "label_tolerance": 1e-4,
+  "clip_sdf": 0.02,
+  "clip_edge": 0.02,
+  "clip_vertex": 0.02,
+  "noise_scales": [0.0002, 0.001, 0.005, 0.02],
+  "query_weights": [0.16, 0.24, 0.16, 0.32, 0.12],
+  "batch_size": 4096,
+  "reference_checks": 128,
+  "seed": 0,
+  "save_mesh": true
+}

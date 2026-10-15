@@ -2,6 +2,9 @@
   "resolution": 65,
   "tau_edge": 0.025,
   "tau_vertex": 0.04,
-  "max_band_edge": 0.0125,
-  "stop_after": "solid"
+  "stop_after": "solid",
+  "face_threshold1": 0.005,
+  "face_threshold2": 0.01,
+  "face_filter_size": 10,
+  "face_avg_udf_threshold": 0.003
 }

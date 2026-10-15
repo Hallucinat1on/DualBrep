@@ -10,8 +10,8 @@
 
 相关背景：
 
-- [DualBrep 的 UDF 定义与处理流程](UDF.md)。
-- [现有拓扑恢复、seam 与特殊边处理](BRepTopologyRecovery.md)。
+- [DualBrep 的 UDF 定义与处理流程](DualBrepUDFAndTopology.md#udf-flow)。
+- [现有拓扑恢复、seam 与特殊边处理](DualBrepUDFAndTopology.md#topology-seam)。
 
 ## 1. 原始设想与评审结论
 
@@ -725,7 +725,7 @@ $$
 
 代码参考是 [`brep_post/utils.py`](../brep_post/utils.py) 的 `create_surface()`、周期性设置和 `create_trimmed_face_from_wire()` 中的 `SetFixMissingSeamMode(True)`／`FixMissingSeam()`。当前 [`brep_post/construct_brep.py`](../brep_post/construct_brep.py) 也会跳过预测连接中的 `face1 == face2` 边。现有修复包含可修改几何和拓扑的操作，不能不加限制地用于冻结边界的新流程，适配要求见 §9.10。
 
-这些步骤需要拟合曲面、参数域、已有 wire 和容差相容，不是任意曲面都能自动补缝。生成模型仍需提供可重建的完整周期面几何；只删除 seam 标签并不能保证后处理成功。这里补建的是适合当前参数化的 seam，位置、分段和拓扑身份可与原始 CAD 不同。更详细的现有行为见 [BRepTopologyRecovery.md](BRepTopologyRecovery.md)。
+这些步骤需要拟合曲面、参数域、已有 wire 和容差相容，不是任意曲面都能自动补缝。生成模型仍需提供可重建的完整周期面几何；只删除 seam 标签并不能保证后处理成功。这里补建的是适合当前参数化的 seam，位置、分段和拓扑身份可与原始 CAD 不同。更详细的现有行为见 [DualBrepUDFAndTopology.md#topology-seam](DualBrepUDFAndTopology.md#topology-seam)。
 
 ### 9.5 借鉴 DualBrep 的参数化初始化
 

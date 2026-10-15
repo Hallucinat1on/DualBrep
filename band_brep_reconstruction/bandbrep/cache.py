@@ -3,7 +3,7 @@ import hashlib
 import json
 from pathlib import Path
 import numpy as np
-from .schemas import VertexNode,EdgeInstance,LogicalGraph,CoedgeUse
+from .schemas import VertexNode,EdgeInstance,LogicalGraph,CoedgeUse,BandTopology
 from .curve_fitting import CurveRecord
 from .surface_fitting import FacePatch
 
@@ -33,3 +33,11 @@ def load_records(path,kind):
         if kind=='curve':out[int(i)]=CurveRecord(**{**v,'data':data})
         else:out[int(i)]=FacePatch(**{**v,'data':data,'normal':np.array(v['normal'])})
     return out
+
+
+def load_topology(directory):
+    directory=Path(directory)
+    d=json.loads((directory/'incidence.json').read_text())
+    a=np.load(directory/'topology_labels.npz')
+    return BandTopology(d['face_count'],a['face_labels'],a['edge_labels'],a['vertex_labels'],
+                        d['edges'],d['vertices'],a['contacts'],d['report'])

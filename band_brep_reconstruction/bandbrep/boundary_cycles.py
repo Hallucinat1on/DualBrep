@@ -19,7 +19,7 @@ def complete_face_regions_and_cycles(graph):
                 end=e.vertices[1 if u.forward else 0]
                 if end==first:break
                 possible=[v for v in remaining.values() if graph.edges[v.edge].vertices[0 if v.forward else 1]==end]
-                # Direction comes from oriented interface/face sectors; do not reorder by 3D distance.
+                # Direction is determined after fitting, from each face interior and its normal.
                 require(len(possible)==1,'face_sector_ambiguous','No unique next use in oriented face sector',face=f,vertex=end,candidates=[v.edge for v in possible])
                 u=possible[0]
             else:require(False,'wire_not_closed','Face boundary does not close')

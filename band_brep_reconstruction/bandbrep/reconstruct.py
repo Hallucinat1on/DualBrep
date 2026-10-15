@@ -1,27 +1,25 @@
 """Staged reconstruction; no target IDs are read by this module."""
-import hashlib
 import json
 import time
 from pathlib import Path
 import numpy as np
 from . import __version__
-from .schemas import write_json,jsonable,ReconstructionError,require,SurfaceMesh,BandState,ArrivalState,InterfaceGraph
+from .schemas import write_json,jsonable,require,SurfaceMesh,BandState,VertexNode
 from .surface_mesh import extract_surface
 from .bands import build_bands
-from .face_seeds import extract_face_seeds,verify_seed_refinement
-from .propagation import propagate_arrivals
-from .interfaces import extract_interfaces
+from .face_seeds import extract_face_seeds
+from .topology import recover_topology
 from .vertex_localization import localize_vertices
-from .edge_graph import instantiate_edges
-from .geometry_refinement import refine_edge_geometry,validate_structure_coverage
-from .boundary_cycles import complete_face_regions_and_cycles
+from .edge_geometry import build_edge_geometry
+from .geometry_refinement import validate_structure_coverage
 from .curve_fitting import fit_shared_curves
+from .postprocess import orient_boundaries
 from .surface_fitting import initialize_face_surfaces
 
 
 def reconstruct(provider,cfg,output_dir,face_model=None,resume=False):
     cfg.validate();out=Path(output_dir);out.mkdir(parents=True,exist_ok=True)
-    from .cache import cache_key,file_hash,load_graph,load_records
+    from .cache import cache_key,file_hash,load_graph,load_records,load_topology
     key,cache_input=cache_key(provider,cfg,face_model)
     prior=None
     if (out/'run.json').exists():
@@ -54,7 +52,7 @@ def reconstruct(provider,cfg,output_dir,face_model=None,resume=False):
     try:
         base=getattr(provider,'provider',provider)
         if getattr(base,'normalized',False):
-            for channel,tau,present in ((1,cfg.tau_edge,provider.presence()[0]),(2,cfg.tau_vertex,provider.presence()[1])):
+            for channel,tau,present in ((1,max(cfg.tau_edge,cfg.face_threshold2),provider.presence()[0]),(2,cfg.tau_vertex,provider.presence()[1])):
                 if present=='present':require(tau+cfg.field_error<base.clips[channel],
                     'saturated_band_threshold','Band threshold reaches a clipped UDF plateau; reduce threshold / supply metric unsaturated field')
         if hasattr(provider,'validation'):write_json(out/'field_validation.json',provider.validation)
@@ -66,56 +64,55 @@ def reconstruct(provider,cfg,output_dir,face_model=None,resume=False):
         mark(stage,mesh.report)
         stage='bands'
         if stage in accepted:
-            a=np.load(out/'bands.npz');mesh=SurfaceMesh(a['vertices'],a['triangles'],mesh.report)
-            bands=BandState(*(a[k] for k in ('values','edge_band','vertex_band','edge_region','core_mask','triangle_core')),accepted[stage])
+            a=np.load(out/'bands.npz')
+            bands=BandState(*(a[k] for k in ('points','values','edge_band','vertex_band','edge_region','core_mask')),accepted[stage], a['face_labels'], a['exclusion_reasons'])
         else:mesh,bands=build_bands(mesh,provider,cfg)
-        np.savez_compressed(out/'bands.npz',vertices=mesh.vertices,triangles=mesh.triangles,values=bands.values,
-            edge_band=bands.edge_band,vertex_band=bands.vertex_band,edge_region=bands.edge_region,core_mask=bands.core_mask,triangle_core=bands.triangle_core)
+        np.savez_compressed(out/'bands.npz',points=bands.points,values=bands.values,
+            edge_band=bands.edge_band,vertex_band=bands.vertex_band,edge_region=bands.edge_region,core_mask=bands.core_mask,
+            face_labels=bands.face_labels,exclusion_reasons=bands.exclusion_reasons)
         mark(stage,bands.report)
         stage='seeds'
         if stage in accepted:seeds=np.load(out/'face_seeds.npz')['labels'];report=accepted[stage]
-        else:
-            seeds,report=extract_face_seeds(mesh,bands,provider,cfg)
-            if cfg.verify_band_stability:
-                mesh,bands,seeds,report=verify_seed_refinement(mesh,bands,seeds,report,provider,cfg)
-                np.savez_compressed(out/'bands.npz',vertices=mesh.vertices,triangles=mesh.triangles,values=bands.values,
-                    edge_band=bands.edge_band,vertex_band=bands.vertex_band,edge_region=bands.edge_region,core_mask=bands.core_mask,triangle_core=bands.triangle_core)
+        else:seeds,report=extract_face_seeds(mesh,bands,provider,cfg)
         np.savez_compressed(out/'face_seeds.npz',labels=seeds);mark(stage,report)
         if cfg.stop_after=='seeds':return finish('face_seeds_ready')
-        stage='propagation'
-        if stage in accepted:
-            a=np.load(out/'arrivals.npz');arrivals=ArrivalState(a['costs'],a['vertex_labels'],a['triangle_labels'],{})
-        else:arrivals=propagate_arrivals(mesh,bands,seeds,cfg)
-        np.savez_compressed(out/'arrivals.npz',costs=arrivals.costs,vertex_labels=arrivals.vertex_labels,triangle_labels=arrivals.triangle_labels)
-        mark(stage,{'sources':len(arrivals.costs),'unassigned_vertices':int((arrivals.vertex_labels<0).sum())})
-        stage='interfaces'
-        if stage in accepted:
-            a=np.load(out/'interfaces.npz');interfaces=InterfaceGraph(a['points'],json.loads((out/'interface_segments.json').read_text()))
-        else:interfaces=extract_interfaces(mesh,bands,arrivals,provider,cfg)
-        write_json(out/'interface_segments.json',interfaces.segments)
-        np.savez_compressed(out/'interfaces.npz',points=interfaces.points,segments=np.array([s['nodes'] for s in interfaces.segments],int))
-        mark(stage,{'points':len(interfaces.points),'segments':len(interfaces.segments)})
         stage='graph'
-        if stage in accepted:graph=load_graph(out/'logical_graph.json')
-        else:
-            vertices=localize_vertices(provider,mesh,bands,cfg)
-            graph=instantiate_edges(interfaces,vertices,bands,cfg,len(arrivals.costs))
-            complete_face_regions_and_cycles(graph)
-        write_json(out/'logical_graph.json',graph);mark(stage,{'faces':graph.face_count,'edges':len(graph.edges),'vertices':len(graph.vertices)})
+        topology=load_topology(out) if stage in accepted else recover_topology(mesh,bands,seeds)
+        np.savez_compressed(out/'topology_labels.npz',face_labels=topology.face_labels,
+            edge_labels=topology.edge_labels,vertex_labels=topology.vertex_labels,contacts=topology.contacts)
+        write_json(out/'incidence.json',dict(face_count=topology.face_count,edges=topology.edges,
+            vertices=topology.vertices,report=topology.report,
+            face_edges={f:[e['id'] for e in topology.edges if f in e['faces']] for f in range(topology.face_count)},
+            face_vertices={f:[v['id'] for v in topology.vertices if f in v['faces']] for f in range(topology.face_count)}))
+        mark(stage,topology.report)
         if cfg.stop_after=='graph':return finish('logical_graph_ready')
+        stage='vertices'
+        if stage in accepted:
+            vertices=[VertexNode(**{**v,'position':np.asarray(v['position'])}) for v in json.loads((out/'vertices.json').read_text())]
+        else:vertices=localize_vertices(provider,bands,topology,cfg)
+        write_json(out/'vertices.json',vertices)
+        mark(stage,{'count':len(vertices),'max_distance_residual':max((v.residual for v in vertices),default=0.)})
+        if cfg.stop_after=='vertices':return finish('vertices_ready')
         stage='curves'
-        if stage in accepted:curves=load_records(out/'curves.json','curve')
+        if stage in accepted:
+            graph=load_graph(out/'logical_graph.json');curves=load_records(out/'curves.json','curve')
         else:
-            for e in graph.edges:refine_edge_geometry(e,provider,graph.vertices,cfg)
+            graph=build_edge_geometry(topology,bands,vertices,provider,cfg)
             curves=fit_shared_curves(graph,provider,cfg)
-        np.savez_compressed(out/'refined_geometry.npz',**{f'edge_{e.id}':e.samples for e in graph.edges},vertices=np.array([v.position for v in graph.vertices]).reshape(-1,3))
-        write_json(out/'curves.json',curves);write_json(out/'logical_graph.json',graph)
+        write_json(out/'logical_graph.json',graph);write_json(out/'curves.json',curves)
+        np.savez_compressed(out/'refined_geometry.npz',**{f'edge_{e.id}':e.samples for e in graph.edges},
+            vertices=np.array([v.position for v in vertices]).reshape(-1,3))
         coverage=accepted.get(stage,{}).get('coverage') if stage in accepted else validate_structure_coverage(mesh,bands,curves,provider,cfg)
-        mark(stage,{'coverage':coverage,'kinds':{i:c.kind for i,c in curves.items()},'max_fit_error':max((c.residual for c in curves.values()),default=0.)})
+        mark(stage,{'coverage':coverage,'kinds':{i:c.kind for i,c in curves.items()},
+            'max_fit_error':max((c.residual for c in curves.values()),default=0.)})
         if cfg.stop_after=='curves':return finish('curves_ready')
+        stage='postprocess'
+        if stage in accepted:graph=load_graph(out/'cad_graph.json')
+        else:orient_boundaries(mesh,topology,graph,curves)
+        write_json(out/'cad_graph.json',graph);mark(stage,{'face_cycles':{f:len(c) for f,c in graph.cycles.items()}})
         stage='surfaces'
         if stage in accepted:patches=load_records(out/'face_patches.json','patch')
-        else:patches=initialize_face_surfaces(mesh,arrivals,graph,curves,provider,cfg,face_model)
+        else:patches=initialize_face_surfaces(mesh,seeds,graph,curves,provider,cfg,face_model)
         write_json(out/'face_patches.json',patches);mark(stage,{i:p.report for i,p in patches.items()})
         if cfg.stop_after=='surfaces':return finish('surfaces_ready')
         stage='cad'

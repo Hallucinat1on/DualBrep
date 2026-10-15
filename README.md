@@ -5,6 +5,8 @@ Official implementation of **DualBrep: A Dual-Field Continuous Representation fo
 **SIGGRAPH 2026** — [arXiv:2606.31579](https://arxiv.org/abs/2606.31579). If you use this code,
 please [cite it](#citation).
 
+本仓库的原理说明、三场预处理、独立重建方案及实验汇总见 [文档导航](docs/README.md)。
+
 Boundary Representation (B-rep) is the dominant data format in Computer-Aided Design (CAD), prized
 for its analytical precision and native support for parametric editing. Its heterogeneous
 structure, however — continuous parametric geometry coupled with a discrete topological graph —

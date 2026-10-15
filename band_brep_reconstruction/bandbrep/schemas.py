@@ -30,26 +30,38 @@ class SurfaceMesh:
 
 @dataclass
 class BandState:
+    # Every row is a triangle-center graph node, never a mesh vertex.
+    points: np.ndarray
     values: np.ndarray
     edge_band: np.ndarray
     vertex_band: np.ndarray
     edge_region: np.ndarray
     core_mask: np.ndarray
-    triangle_core: np.ndarray
     report: dict = field(default_factory=dict)
-    parent_triangles: np.ndarray = None
+    face_labels: np.ndarray = None
+    exclusion_reasons: np.ndarray = None
 
 @dataclass
-class ArrivalState:
-    costs: np.ndarray
+class BandTopology:
+    face_count: int
+    face_labels: np.ndarray
+    edge_labels: np.ndarray
     vertex_labels: np.ndarray
-    triangle_labels: np.ndarray
-    source_nodes: dict
+    edges: list
+    vertices: list
+    contacts: np.ndarray
+    report: dict = field(default_factory=dict)
 
-@dataclass
-class InterfaceGraph:
-    points: np.ndarray
-    segments: list
+    def node_labels(self, node):
+        """Component-backed broadcast: all members see the complete terminal set."""
+        v = int(self.vertex_labels[node])
+        if v >= 0:
+            return set(self.vertices[v]['faces']), set(self.vertices[v]['edges'])
+        e = int(self.edge_labels[node])
+        if e >= 0:
+            return set(self.edges[e]['faces']), {e}
+        f = int(self.face_labels[node])
+        return ({f} if f >= 0 else set()), set()
 
 @dataclass
 class VertexNode:
@@ -57,7 +69,6 @@ class VertexNode:
     position: np.ndarray
     residual: float
     support_radius: float
-    ports: list = field(default_factory=list)
 
 @dataclass
 class EdgeInstance:

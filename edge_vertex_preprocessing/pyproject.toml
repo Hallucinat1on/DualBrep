@@ -15,6 +15,7 @@ mesh = ["libigl==2.6.2"]
 [project.scripts]
 evudf-preprocess = "evudf.cli:main"
 evudf-make-manifest = "evudf.cli:manifest_main"
+evudf-visualize = "evudf.visualize:main"
 
 [tool.setuptools.packages.find]
 include = ["evudf*"]

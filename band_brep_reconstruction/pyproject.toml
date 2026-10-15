@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "band-brep-reconstruction"
-version = "0.1.0"
+version = "0.3.0"
 description = "Portable SDF / edge-UDF / vertex-UDF band-label reconstruction"
 requires-python = ">=3.9"
 dependencies = ["numpy>=1.24,<3", "scipy>=1.10", "PyMCubes>=0.1.4"]

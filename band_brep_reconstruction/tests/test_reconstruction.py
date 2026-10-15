@@ -4,21 +4,28 @@ import tempfile
 import unittest
 import numpy as np
 from bandbrep.config import Config
-from bandbrep.schemas import SurfaceMesh,InterfaceGraph,ReconstructionError
+from bandbrep.schemas import SurfaceMesh,ReconstructionError
 from bandbrep.field_provider import CallableFieldProvider,SampledFieldProvider
-from bandbrep.surface_mesh import mesh_edges,split_edges
+from bandbrep.surface_mesh import extract_surface
 from bandbrep.face_seeds import core_components
-from bandbrep.interfaces import lower_envelope_segments
 from bandbrep.vertex_localization import distance_center
 from bandbrep.curve_fitting import fit_cubic_fixed_ends,fit_circle
 from bandbrep.surface_fitting import constrained_lstsq,fit_four_sided_bezier
-from bandbrep.edge_graph import instantiate_edges
-from bandbrep.boundary_cycles import complete_face_regions_and_cycles
 from bandbrep.reconstruct import reconstruct
 
 class CoreTests(unittest.TestCase):
-    def test_config_rejects_unresolved_band(self):
-        with self.assertRaises(ValueError):Config(max_band_edge=.1).validate()
+    def test_surface_residual_warning_keeps_resolution_retry(self):
+        p=CallableFieldProvider(lambda x:np.column_stack((np.linalg.norm(x,axis=1)-.63,np.ones(len(x)),np.ones(len(x)))),presence=('absent','absent'))
+        cfg=Config(resolution=9,max_resolution=17,surface_tolerance=1e-6)
+        with self.assertRaises(ReconstructionError) as failure:extract_surface(p,cfg)
+        self.assertEqual(failure.exception.code,'surface_error')
+        cfg.allow_surface_residual_exceedance=True
+        m=extract_surface(p,cfg)
+        self.assertEqual(m.report['resolution'],17)
+        self.assertEqual(m.report['resolution_attempts'][0]['reason'],'surface_error')
+        self.assertTrue(m.report['surface_residual_warning'])
+        self.assertEqual(m.report['boundary_edges'],0)
+        self.assertGreater(m.report['sdf_residual_exceedance_fraction'],0)
     def test_channel_scale_gradient(self):
         p=CallableFieldProvider(lambda x:np.column_stack((x[:,0],np.abs(x[:,1]),np.abs(x[:,2]))),normalized=True,clip_values=[2,3,4],presence=('present','present'))
         x=np.array([[.1,.2,.3]]);np.testing.assert_allclose(p.evaluate(x).values,[[.2,.6,1.2]])
@@ -27,14 +34,6 @@ class CoreTests(unittest.TestCase):
         with self.assertRaises(ReconstructionError):CallableFieldProvider(lambda x:np.full((len(x),3),-1.)).evaluate([[0,0,0]])
     def test_isolated_core_preserved(self):
         r=core_components(np.array([[0,1]]),np.array([True,True,False,True]));self.assertEqual(r[0],r[1]);self.assertNotEqual(r[0],r[3]);self.assertEqual(r[2],-1)
-    def test_conforming_split(self):
-        m=SurfaceMesh(np.array([[0.,0,0],[1,0,0],[0,1,0],[1,1,0]]),np.array([[0,1,2],[1,3,2]]))
-        e,_,_=mesh_edges(m.triangles);r,_=split_edges(m,np.flatnonzero((e==[1,2]).all(axis=1)))
-        self.assertEqual(len(r.vertices),5);self.assertEqual(len(r.triangles),4);_,_,c=mesh_edges(r.triangles);self.assertEqual(np.sum(c==1),4)
-    def test_third_source_blocks_pair(self):self.assertEqual(lower_envelope_segments(np.array([[0.,1,1],[1,0,1],[-1,-1,-1]])),[])
-    def test_three_source_envelope(self):
-        c=np.array([[0.,2,2],[2,0,2],[2,2,0]]);s=lower_envelope_segments(c);self.assertEqual(len(s),3)
-        for a,b,p,q in s:self.assertAlmostEqual(c[a]@p,c[b]@p);self.assertLessEqual(c[a]@q,np.min(c@q)+1e-8)
     def test_distance_center_not_centroid(self):
         v=np.array([.2,-.1,.3]);p=np.random.default_rng(1).uniform(0,.2,(100,3))+v;r,e,rank=distance_center(p,np.linalg.norm(p-v,axis=1))
         np.testing.assert_allclose(r,v,atol=1e-8);self.assertEqual(rank,3);self.assertGreater(np.linalg.norm(p.mean(axis=0)-v),.1)
@@ -52,12 +51,6 @@ class CoreTests(unittest.TestCase):
         u=np.linspace(0,1,4);bottom=np.column_stack((u,0*u,.2*np.sin(np.pi*u)));top=bottom+[0,1,0];left=np.column_stack((0*u,u,0*u));right=left+[1,0,0]
         uv=np.random.default_rng(1).random((40,2));net=fit_four_sided_bezier(uv,np.column_stack((uv,np.zeros(40))),bottom,right,top,left)
         np.testing.assert_allclose(net[:,0],bottom,atol=1e-15);np.testing.assert_allclose(net[:,-1],top,atol=1e-15)
-    def test_same_face_pair_two_closed_edges(self):
-        points=[];segments=[]
-        for z in (-.4,.4):
-            offset=len(points);t=np.linspace(0,2*np.pi,20,endpoint=False);points.extend(np.column_stack((np.cos(t)*.3,np.sin(t)*.3,np.full(20,z))))
-            segments.extend({'nodes':(offset+i,offset+(i+1)%20),'faces':(0,1),'left':0,'triangle':i} for i in range(20))
-        g=instantiate_edges(InterfaceGraph(np.asarray(points),segments),[],None,Config(),2);self.assertEqual(len(g.edges),2);self.assertTrue(all(e.closed for e in g.edges));complete_face_regions_and_cycles(g);self.assertEqual(len(g.cycles[0]),2)
     def test_unknown_presence_is_not_absence(self):
         from bandbrep.bands import build_bands
         with self.assertRaises(ReconstructionError):build_bands(SurfaceMesh(np.zeros((3,3)),np.array([[0,1,2]])),CallableFieldProvider(lambda x:np.zeros_like(x)),Config())
@@ -75,12 +68,6 @@ class CoreTests(unittest.TestCase):
 if __name__=='__main__':unittest.main()
 
 class ExtendedTests(unittest.TestCase):
-    def test_self_loop_has_two_ports_one_vertex(self):
-        from bandbrep.schemas import VertexNode
-        t=np.linspace(0,2*np.pi,20,endpoint=False);pts=np.column_stack((np.cos(t)*.3,np.sin(t)*.3,t*0))
-        segments=[{'nodes':(i,(i+1)%20),'faces':(0,1),'left':0,'triangle':i} for i in range(20)]
-        v=VertexNode(0,pts[0],0.,.01);g=instantiate_edges(InterfaceGraph(pts,segments),[v],None,Config(),2)
-        self.assertEqual(len(g.edges),1);self.assertEqual(g.edges[0].vertices,[0,0]);self.assertEqual(len(v.ports),2)
     def test_face_scoring_handles_label_permutation(self):
         from bandbrep.evaluation import match_face_regions
         result=match_face_regions([1,1,0,0],[0,0,1,1]);self.assertEqual(result['mapping'],{0:1,1:0});self.assertEqual(result['merged_predictions'],[])

@@ -5,3 +5,4 @@ outputs/
 build/
 dist/
 .pytest_cache/
+benchmarks/datasets*

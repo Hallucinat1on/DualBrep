@@ -1,35 +1,37 @@
+"""Two-pass face cores define disjoint propagation masks on a fixed mesh."""
 import numpy as np
-from .schemas import BandState,require
-from .surface_mesh import mesh_edges,split_edges,evaluate_batched
+from .schemas import BandState, require
+from .surface_mesh import evaluate_batched, face_adjacency
+from types import SimpleNamespace
+from .vendor.dualbrep_segmentation import hierarchical_segmentation
 
 
-def build_bands(mesh,provider,cfg):
-    presence=provider.presence()
-    require(presence[0]!='unknown' and presence[1]!='unknown','presence_unknown',
-            'Provide predicted or verified edge/vertex existence; absence cannot be inferred from missed minima')
-    history=[];parents=np.arange(len(mesh.triangles))
-    for level in range(cfg.max_refinements+1):
-        vals=evaluate_batched(provider,mesh.vertices,cfg.query_batch_size)
-        tri=mesh.vertices[mesh.triangles];centers=tri.mean(axis=1)
-        cv=evaluate_batched(provider,centers,cfg.query_batch_size)
-        radius=np.linalg.norm(tri-centers[:,None],axis=2).max(axis=1)
-        near=np.zeros(len(tri),bool)
-        if presence[0]=='present':near|=cv[:,1]-radius-cfg.field_error<=cfg.tau_edge*max(cfg.stability_factors)
-        if presence[1]=='present':near|=cv[:,2]-radius-cfg.field_error<=cfg.tau_vertex*max(cfg.stability_factors)
-        edges,inv,_=mesh_edges(mesh.triangles)
-        length=np.linalg.norm(mesh.vertices[edges[:,0]]-mesh.vertices[edges[:,1]],axis=1)
-        selected=np.unique(inv[near].ravel());selected=selected[length[selected]>cfg.max_band_edge]
-        history.append({'level':level,'triangles':len(tri),'split_edges':len(selected)})
-        if not len(selected):break
-        require(level<cfg.max_refinements,'band_resolution_limit','Near-band cells remain too large',history=history)
-        require(len(tri)+6*len(selected)<=cfg.max_triangles,'mesh_resource_limit','Refinement triangle budget exceeded',history=history)
-        mesh,parent=split_edges(mesh,selected,provider,max_step=cfg.surface_tolerance)
-        parents=parents[parent]
-    eb=vals[:,1]<cfg.tau_edge if presence[0]=='present' else np.zeros(len(vals),bool)
-    vb=vals[:,2]<cfg.tau_vertex if presence[1]=='present' else np.zeros(len(vals),bool)
-    core=~(eb|vb)
-    # A partially cut triangle still contains a core polygon. Adjacency is
-    # permitted only across the outside-band portion of its shared edge.
-    tc=core[mesh.triangles].any(axis=1)
-    return mesh,BandState(vals,eb,vb,eb&~vb,core,tc,{'refinement':history,'strict_band_certification':False,
-          'classification':'linear core cut topology after vertex/centroid distance-radius refinement'},parents)
+def build_bands(mesh, provider, cfg):
+    presence = provider.presence()
+    require(all(p != 'unknown' for p in presence), 'presence_unknown',
+            'Supply edge/vertex existence; missed minima do not imply absence')
+    points = mesh.vertices[mesh.triangles].mean(axis=1)
+    values = evaluate_batched(provider, points, cfg.query_batch_size)
+    udf = values[:, 1] if presence[0] == 'present' else np.full(len(points), max(cfg.face_threshold2, cfg.face_avg_udf_threshold)+1.)
+    count, labels, reasons, segmentation = hierarchical_segmentation(
+        SimpleNamespace(face_adjacency=face_adjacency(mesh.triangles)), udf,
+        threshold1=cfg.face_threshold1, threshold2=cfg.face_threshold2,
+        filter_size=cfg.face_filter_size, avg_udf_threshold=cfg.face_avg_udf_threshold)
+    # A rejected high-distance component is not evidence of an edge.
+    eb = np.isin(reasons, [1, 2]) if presence[0] == 'present' else np.zeros(len(points), bool)
+    core = labels >= 0
+    vb = eb & (values[:, 2] < cfg.tau_vertex) if presence[1] == 'present' else np.zeros(len(points), bool)
+    segmentation.update(count=count, sizes=np.bincount(labels[core]).tolist(),
+        method='dualbrep_two_pass_triangle_components',
+        threshold1=cfg.face_threshold1, threshold2=cfg.face_threshold2,
+        filter_size=cfg.face_filter_size, avg_udf_threshold=cfg.face_avg_udf_threshold,
+        reason_codes={'core':0,'first_threshold':1,'split_threshold':2,'size_rejected':3,
+                      'mean_rejected':4,'subcluster_size_rejected':5})
+    report = dict(nodes=len(points), edge_nodes=int(eb.sum()), vertex_nodes=int(vb.sum()),
+                  regular_nodes=int((eb & ~vb).sum()), core_nodes=int(core.sum()),
+                  excluded_nodes=int((~core & ~eb).sum()),
+                  exclusion_counts={str(i):int((reasons==i).sum()) for i in range(6)},
+                  sampling='triangle_centers', vertex_domain='nested_in_edge_band',
+                  segmentation=segmentation,
+                  field_query_points=len(points), strict_topology_guarantee=False)
+    return mesh, BandState(points, values, eb, vb, eb & ~vb, core, report, labels, reasons)

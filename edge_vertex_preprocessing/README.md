@@ -194,10 +194,54 @@ PYTHONPATH=. python -m unittest discover -s tests -v
 
 实际验证环境、ABC 示例结果及检查范围见 [VALIDATION.md](VALIDATION.md)。
 
-## 8. 文件组织与迁移
+## 8. E-UDF / V-UDF 三维可视化
+
+`visualize_fields.py` 读取已有 `fields.npz` 和 `metadata.json`，分别导出带 RGB 颜色的二进制 PLY 点云。只需要 NumPy，不需要 OCC、GPU 或重新计算距离。安装本目录后也可使用 `evudf-visualize` 命令。
+
+在本目录执行，批量导出已有四份成功结果：
+
+```bash
+python visualize_fields.py --input outputs/abc10_default_20261012 --output visualizations/abc10_all --references
+```
+
+每份样本对应一个输出子目录：
+
+```text
+e_udf.ply                  # 查询位置，按到目标边的距离着色
+v_udf.ply                  # 查询位置，按到必要顶点的距离着色；空顶点集不导出
+reference_edges.ply        # --references 时保存，白色 CAD 目标边采样
+reference_vertices.ply     # --references 时保存，白色必要顶点；非空时保存
+visualization.json         # 色标、单位、筛选参数、点数及空集合状态
+```
+
+可用 CloudCompare、MeshLab 等查看 PLY 的 RGB 点云；PLY 同时保存未截断的 `distance` 标量和 `query_source`，支持自定义标量显示的查看器可进一步按距离查看。参考点云用于叠加比较 CAD 目标，不表示重建结果。输出保持与预处理相同的归一化坐标，可与保存的表面几何叠加。
+
+颜色由小距离到大距离依次为 **深蓝 → 青 → 绿 → 黄 → 红**。默认线性色标上限来自各通道的 `clip_values`（本批数据为 `0.02`）；超过上限的点显示红色，但 PLY 中仍保存其真实距离。通过 `--color-max` 改变色标上限。`visualization.json` 记录每个色标节点的距离及 RGB。
+
+全域点云可能遮挡内部细节，以下两种筛选适合观察几何结构。第一种仅显示带 `on_surface` 来源标记的查询点，第二种显示表面附近且靠近目标结构的查询点：
+
+```bash
+python visualize_fields.py --input outputs/abc10_default_20261012 --output visualizations/abc10_surface --selection surface --references
+python visualize_fields.py --input outputs/abc10_default_20261012 --output visualizations/abc10_near --surface-band 0.002 --max-distance 0.01 --color-max 0.01 --references
+```
+
+所有筛选阈值使用归一化长度。`--surface-band` 使用 `abs(SDF)` 同时筛选两类点云；`--max-distance` 分别依据 E-UDF 和 V-UDF 筛选，两个文件的点数因而可以不同。正阈值得到的是边／顶点附近的候选点带，不是精确提取的曲线／顶点。
+
+若希望分辨接近零值的距离变化，可使用对数色标：
+
+```bash
+python visualize_fields.py --input outputs/abc10_default_20261012 --output visualizations/abc10_log --surface-band 0.002 --scale log --log-offset 0.00001 --references
+```
+
+单份样本目录或其 `fields.npz` 路径也可以作为 `--input`。默认每个 UDF 最多导出 200,000 个点，以固定 `--seed` 随机抽样；`--max-points 0` 导出全部筛选点。没有通过筛选的通道记录 `no_selected_points`，空目标集合记录 `absent` 并跳过占位值可视化。
+
+脚本默认输出到输入目录的 `visualizations/`；已有同名导出文件时要求使用新的 `--output`，避免将不同筛选配置混在同一目录。
+
+## 9. 文件组织与迁移
 
 ```text
 preprocess.py / make_manifest.py    命令行入口
+visualize_fields.py                两类 UDF 的彩色 PLY 导出入口
 evudf/config.py                    配置与参数验证
 evudf/cad.py                       STEP、拓扑、归一化、三角化
 evudf/distance.py                  CAD/BVH 边距离、顶点距离、SDF
@@ -205,6 +249,7 @@ evudf/sampling.py                  实例覆盖、混合查询、空集配额
 evudf/pipeline.py                  三通道输出、质量检查、缓存与提交
 evudf/manifest.py                  ABC 索引、去重分组、split
 evudf/io.py                        训练读取，仅需要 NumPy
+evudf/visualize.py                 距离着色、筛选和三维点云导出
 configs/                          完整与小规模配置
 tests/                            CAD 回归及迁移测试
 ```

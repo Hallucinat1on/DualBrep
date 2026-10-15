@@ -19,7 +19,7 @@ def main():
     p.add_argument('--resume',action='store_true')
     p.add_argument('--config',type=Path)
     p.add_argument('--resolution',type=int)
-    p.add_argument('--stop-after',choices=('seeds','graph','curves','surfaces','solid'))
+    p.add_argument('--stop-after',choices=('seeds','graph','vertices','curves','surfaces','solid'))
     args=p.parse_args();cfg=load_config(args.config,{'resolution':args.resolution,'stop_after':args.stop_after})
     if args.provider=='cad':
         metadata=json.loads((args.sample_dir/'metadata.json').read_text()) if args.sample_dir else None

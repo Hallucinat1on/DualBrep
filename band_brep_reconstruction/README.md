@@ -1,164 +1,120 @@
 # 独立三场 B-rep 重建模块
 
-根据 `ThreeFieldBRepReconstructionImplementation.md` 实现隔离带标签方案。**复制本目录即可迁移**；运行时不导入上级项目的 `rebuild_model.py`、`clustering.py`、`brep_post` 或 `edge_vertex_preprocessing`。复用源码均已复制到 `bandbrep/vendor/`，来源见 [PROVENANCE.md](PROVENANCE.md)。
+版本 0.3.0，按 `docs/BandLabelTopologyRecovery.md` 的多标签方案实现。复制本目录即可迁移；运行时不导入上级 DualBrep 或预处理项目的代码。复用代码位于 `bandbrep/vendor/`，来源见 [PROVENANCE.md](PROVENANCE.md)。
 
-流程为：metric 三场 → SDF Marching Cubes → 近带共形细分 → 双隔离带／面核心 → 全局部来源 Dijkstra → 共同最小界面 → 顶点／边实例 → UDF 定位 → 共享端点曲线 → 固定边界曲面 → 共享 OCC 实体／seam → STEP 读回验收。
+## 当前流程
 
-本模块实际运行全部阶段，并提供明确的中间状态与失败报告；不保证任意 ABC 模型或任意生成场都能成功。`solid_validated` 表示通过配置误差预算下的 CAD 与读回检查，不是连续全域正确性证明。
+1. SDF 提取固定表面网格，在三角形中心查询 `[sdf, dE, dV]`。
+2. 复制 DualBrep 两阶段核心提取：第一阶段保留 `dE >= 0.005`，过滤小于 10 个三角形或平均 UDF 不大于 0.003 的分量；第二阶段在父分量内用 `dE >= 0.01` 拆分，仅当至少两个子分量满足大小条件时替换父核心。
+3. 最终核心仅作标签来源。第一阶段低距离点、成功拆分时排除的低距离点组成 E；大小/均值过滤掉的分量单独标记，不传播、不作为边。`V = E & (dV < tau_vertex)`，普通带为 `E & ~V`。因此核心不再等于 `~E`，还存在排除区。
+4. 普通带组件收集所有相邻面标签，得到独立 edge_id。相同邻面的一对孔口圆环仍是两条独立边。
+5. 顶点域收集实际接触的 edge_id 和所有面标签，域内所有节点读取完整集合。禁止顶点域向普通带反向转发；后来标签不会丢失。
+6. 输出无方向 E–F、V–E、V–F 关联；此时不要求端点使用次数、面环或方向。
+7. v-UDF 距离中心拟合共享顶点；e-UDF 定位各边支持点，按几何组织曲线并固定共享端点拟合。
+8. 几何后处理确定闭合/自环及边界方向和环；面内部从面核心采样，以 SDF 校验，在固定共享曲线约束下拟合曲面。
+9. 补建 seam/pcurve，装配共享 OCC 实体，导出并读回 STEP。
 
-## 安装和迁移
+多标签以组件引用存储：`BandTopology.node_labels(node)` 返回每个图节点完整的面/边集合，无需复制稠密 face×node 矩阵。`topology_labels.npz` 与 `incidence.json` 一起定义全部标签和成员支持。
 
-Python 3.9+。基础依赖安装：
+已删除旧最短路竞争、等代价界线提取、前置端口实例化、近带反复细分和多阈值核心审计。旧模式与旧配置项不兼容，新配置中不再接受 `max_band_edge`、`max_refinements`、`band_refinement`、`face_seed_sampling`、`stability_factors`、`require_stability`、`verify_band_stability`。历史统计和成功结果保留，部分旧缓存已清理，不能作为新版 resume 缓存。
+
+## 安装
 
 ```bash
 cd band_brep_reconstruction
 python -m pip install -e .
 ```
 
-完整 STEP 重建需要 `pythonocc-core`，本项目实际测试版本为 7.7。可在 conda 环境中安装：
+完整 CAD 装配需要 `pythonocc-core`；可使用包含它的 conda 环境。可选 `libigl` 用于 mesh_fast CAD SDF，`torch` 用于三场网络与 DualBrep 面初始化器。
 
 ```bash
 conda install -c conda-forge pythonocc-core=7.7
 python -m pip install -r requirements.txt
 ```
 
-可选依赖：`torch` 用于三场 MLP 和 DualBrep 面网络；`libigl` 用于 CAD oracle 的批量 `mesh_fast` SDF。CPU CAD SDF 按点查询较慢。基础拓扑与曲线模块不要求 OCC；CAD oracle／装配阶段才导入 OCC。
+## 输入与运行
 
-迁移时复制本目录的源码、配置、测试和文档即可。`outputs/` 是实验缓存，可以按需要另行复制；其中的数据路径不会成为代码导入依赖。
-
-## 输入模式
-
-| 模式 | 输入 | 含义 |
-|---|---|---|
-| `cad` | STEP，可选已有样本目录校验归一化 | 明确的真值场实验；CAD 只在 provider 内查询三场，不把实例 id 或原始曲面交给算法 |
-| `sampled` | `metadata.json` + `fields.npz` | 局部加权仿射插值实验；先按唯一坐标划分留出集，报告近似误差。它不等于原始连续场 |
-| `neural` | `fit_fields.py` 生成的 checkpoint | 三通道监督 MLP，可连续查询及自动微分；必须检查独立场拟合误差 |
-| Python API | `CallableFieldProvider` | 接入未来生成模型；明确存在性、metric 尺度、误差和唯一输入指纹 |
-
-通道顺序固定为 **`[sdf, dE, dV]`**，SDF 内负外正。生成阶段排除 seam，保留不同 face 之间的相切／共面分界。完整闭环无需生成顶点；必要二度点、高价点、self-loop 和同一面标签对下的多条独立边均有独立数据表示。
-
-正式散点入口只读取 `query_points`、`query_fields`、存在性和尺度。**不会读取** `surface_face_id`、`edge_point_id`、`vertex_points`、最近点或 `topology.json` 来恢复拓扑。离线评分在 `evaluation.py` 中隔离。
-
-## 运行现有样本 07
-
-从本目录执行，路径按迁移后的实际位置替换：
+通道顺序固定 `[sdf, dE, dV]`。坐标和距离采用一致 metric 尺度；截断归一化由 provider 还原。SDF 内负外正。seam 从生成目标排除；不同面之间的相切/共面边仍保留。无生成顶点的闭合边是正常输入。
 
 ```bash
-python reconstruct.py \
-  --provider cad \
-  --sample-dir ../edge_vertex_preprocessing/outputs/abc10_default_20261012/00000007_b33a147f86da49879455d286_step_000 \
-  --sdf-backend mesh_fast \
-  --output outputs/abc07
+# 仅恢复无方向实例关联
+python reconstruct.py --provider cad --step /path/model.step \
+  --sdf-backend mesh_fast --output outputs/model_graph --stop-after graph
+
+# 完整拟合与 STEP
+python reconstruct.py --provider cad --step /path/model.step \
+  --sdf-backend mesh_fast --output outputs/model_solid
+
+# 固定位置采样三场的插值输入
+python reconstruct.py --provider sampled --sample-dir /path/fields \
+  --output outputs/sampled_model --stop-after graph
+
+# 解析场验证样例
+python demo.py --shape sphere_bore --output outputs/sphere_bore
 ```
 
-`--sample-dir` 在 oracle 模式中用于获取源路径与检查坐标变换；也可以只传 `--step /path/input.step`。`mesh_fast` 的几何误差由 `field_error` 预算声明，它不是精确 CAD SDF。
+`--provider neural --field-model /path/model.pt` 接入三场网络；可通过 `--face-checkpoint` 和 `--face-config` 使用面网络初值。点云面网络仅提供初值，不预测边拓扑，也不替代共享边界约束。
 
-只运行面分割或逻辑图：
+`--stop-after` 支持 `seeds / graph / vertices / curves / surfaces / solid`。`--resume` 只接受相同输入、配置（除停止阶段外）与代码哈希，且验证已保存文件哈希。
+
+配置示例：
+
+```json
+{
+  "resolution": 65,
+  "max_resolution": 129,
+  "tau_edge": 0.025,
+  "tau_vertex": 0.04,
+  "face_threshold1": 0.005,
+  "face_threshold2": 0.01,
+  "face_filter_size": 10,
+  "face_avg_udf_threshold": 0.003,
+  "face_samples": 1200,
+  "save_queries": false,
+  "stop_after": "solid"
+}
+```
+
+`tau_edge=0.025` 只保留给原有几何定位半径和覆盖探针检查，不再定义传播边带。分割单独由 `face_threshold1/2` 控制。两阶段是在 `bands` 阶段计算并缓存，`seeds` 阶段验收标签，避免重复分割。
+
+阈值与网格分辨率需要共同评估，默认值不是任意模型的保证。`allow_surface_residual_exceedance=true` 允许最终 SDF 分辨率的残差告警，不绕过闭合与流形检查。仅执行上述两阶段过滤，不追加平面合并、标签回填或将零核心强制改成一个面：关联阶段保存多标签/无源组件和诊断；参数化遇到无法确认的邻面或顶点关联会明确报告，不伪造有效 STEP。
+
+## 输出
+
+| 文件 | 内容 |
+|---|---|
+| `sdf_surface.npz` | 固定 SDF 网格 |
+| `bands.npz` | 三角形中心、三场值、嵌套 E/V 掩码、核心标签与 `exclusion_reasons` |
+| `face_seeds.npz` | 面核心标签 |
+| `topology_labels.npz` | 图节点到面/边/顶点实例的映射和原始区域接触 |
+| `incidence.json` | 独立实例、完整标签集合、无方向关联、未解释区域 |
+| `vertices.json` | v-UDF 定位结果 |
+| `logical_graph.json` / `curves.json` | 几何阶段的共享顶点、端点使用与拟合曲线 |
+| `cad_graph.json` | 后处理补齐的方向和面环 |
+| `face_patches.json` | 固定边界的参数曲面 |
+| `logical_to_cad.json` | 逻辑实例与 CAD 实体映射 |
+| `reconstruction.step` | 通过内核和 STEP 读回验收的结果 |
+| `run.json` / `quality.json` | 阶段、配置、耗时、缓存哈希和失败诊断 |
+
+`logical_graph_ready` 仅表示无方向关联输出完成，可能包含 `unresolved_edges`；不是 CAD 有效性结论。只有 `solid_validated` 表示完整装配与读回检查通过，也不是对连续生成场全域正确性的数学证明。
+
+## 测试与验证
 
 ```bash
-python reconstruct.py --provider cad --step /path/input.step \
-  --sdf-backend mesh_fast --output outputs/example --stop-after seeds
+PYTHONPATH=. python -m unittest discover -s tests -q
+python benchmarks/validate_multilabel.py --output outputs/multilabel_validation
 ```
 
-继续同一输入／配置／代码的缓存，允许把 `stop_after` 从 `seeds` 改为 `solid`：
+测试包含：顶点域完整吸收且不回传、后到标签、同面对多边、嵌套掩码、实际 edge_id 关联、固定端点/边界约束、断点续跑，以及方盒、圆柱、球体通孔、分割球面、空心球的 STEP 读回。验证脚本保存 STEP 和 `REPORT.md`。
 
-```bash
-python reconstruct.py --provider cad --step /path/input.step \
-  --sdf-backend mesh_fast --output outputs/example --stop-after solid --resume
-```
+测试区分分割一致性与下游几何回归：与原 DualBrep 函数比较 100 组随机图标签；验证拆分回退、排除区及缓存恢复。完整 CAD 回归显式使用较宽分割阈值 `0.025/0.05` 和最小分量 1，以保持解析样例的已解析边带；默认 `0.005/0.01` 在低分辨率样例上仍可能缺边，不能将 CAD 回归通过视为默认参数全通过。理想解析场成功不代表 ABC 或生成场的批量成功率，仍需单独运行数据集评估。
 
-缓存验证源指纹、配置、包内源码和所有阶段文件哈希。改变场、阈值、误差预算或代码时使用新的输出目录；不会静默复用旧拓扑。
+旧 `segmentation_ablation`、`refinement_comparison` 运行脚本及空目录已删除；原始统计和诊断保留在 `outputs/`，部分中间数组已清理。数据集三场 oracle 和 30 模型批处理设施仍在 `benchmarks/datasets30_20261013/`，核心重建模块不依赖它们。
 
-## 用已有散点拟合可查询场
+## 两阶段分割诊断
 
-直接插值实验：
+`bands.npz/exclusion_reasons`：0=保留核心，1=第一阶段低距离，2=已成功拆分父域中的第二阶段低距离，3=第一阶段大小过滤，4=第一阶段均值过滤，5=第二阶段子分量大小过滤。仅 1/2 进入边带；3/4/5 均无面标签且不参与传播。`run.json` 的 bands 报告记录各原因计数和分割参数、成功拆分父分量；无核心仍明确失败，不把整张表面伪装成一个面。
 
-```bash
-python reconstruct.py --provider sampled --sample-dir /path/sample \
-  --output outputs/interpolation --stop-after seeds
-```
+2026-10-15 验证：42 项测试通过；默认阈值下固定初始分辨率 65 的解析样例 2/5 完成 STEP（圆柱、空心球），方盒/球面通孔缺边，分割球面在边定位阶段失败。详见 `../docs/ThreeFieldReconstructionExperiments.md`。这些失败不等于复制算法有偏差：测试确认标签与原函数一致，但窄带在粗网格上仍可能不可解析。完整 30 模型实验已重跑，结果为 1/30；详见统一实验报告。覆盖验证、传播及参数化方法保持原实现。
 
-MLP 训练及重建：
-
-```bash
-python fit_fields.py --sample-dir /path/sample --output outputs/field.pt \
-  --steps 5000 --device cuda
-python reconstruct.py --provider neural --field-model outputs/field.pt \
-  --output outputs/neural --config configs/default.json --device cuda
-```
-
-训练会生成 `.validation.json`，按唯一坐标划分训练／验证，避免重复表面点泄漏。场拟合误差需单独计入预算；示例训练步数不构成精度保证。重建时模型固定，几何拟合不会改变 SDF 或两个 UDF。
-
-生成模型接入：
-
-```python
-import numpy as np
-from bandbrep import Config, CallableFieldProvider
-from bandbrep.reconstruct import reconstruct
-
-provider = CallableFieldProvider(
-    lambda xyz: model_query(xyz),    # [N,3], metric [sdf,dE,dV]
-    presence=("present", "absent"), # 模型预测或已核实的结构存在性
-    error=2e-4,
-    fingerprint="my-model-checkpoint-sha256",
-)
-result = reconstruct(provider, Config(), "reconstruction/example")
-```
-
-`unknown` 不会被当作空集；当前入口要求调用者提供已核实／预测的存在性，否则报告 `presence_unknown`。若返回训练归一化距离，设置 `normalized=True, clip_values=[...]`；阈值必须低于相应截断平台。饱和区域无法恢复真实远场距离。
-
-## 可选 DualBrep 面初始化
-
-提供 checkpoint 与模型构造配置：
-
-```bash
-python reconstruct.py --provider neural --field-model outputs/field.pt \
-  --face-checkpoint /path/parametrizer.ckpt --face-config /path/model_config.json \
-  --device cuda --output outputs/with_face_model
-```
-
-网络代码是 `vendor/dualbrep_model.py` 的本地副本。适配器只调用 `encode()`、`decode_face()`，不会调用边预测分支覆盖拓扑。解析支撑面能通过验收时优先采用解析面；一般曲面可用网络网格初始化 UV，再求固定边界样条。没有 checkpoint 时使用解析面或 PCA UV 初始化。
-
-## 配置与算法细节
-
-配置为 JSON，键与 `bandbrep/config.py::Config` 对应，未知键直接报错。
-
-- `resolution/max_resolution`：SDF 初始／最大格点分辨率。表面误差超预算或网格无效时加密，不只保留最大分量。
-- `tau_edge/tau_vertex`：独立的隔离带阈值，默认 `0.025/0.04`；它们不是最终几何精度。小特征需要更小阈值及更细网格。
-- `max_band_edge`：近带最大边长，要求不大于 `tau_edge/2`。使用 UDF 距离与单元覆盖半径发现潜在内部穿越，共用中点细分，避免 T-junction。
-- 核心采用局部线性带切分的连通逻辑：混合三角形可以保留带外部分，仅沿共享边的带外区间连接。没有核心大小过滤。
-- `stability_factors`：相邻阈值的核心重叠匹配；`verify_band_stability` 默认开启，进一步将近带边长减半，检查两级网格之间是否出现合并／分裂。
-- 到达代价保留全部局部来源；界面需要两来源共同最小，第三来源可以阻断候选段。
-- 顶点先用梯度投票区分候选，再用独立三维距离观测拟合共享坐标。曲线固定端点；分段三次曲线施加参数缩放后的 C1 约束，内部 knot 不增加逻辑顶点。
-- 面优先拟合平面／圆柱／球面。一般样条采用秩揭示零空间法满足边界采样等式，并交替更新 UV。四边 Bézier 提供整条边界控制点锁定工具；不只锁四角。
-- 闭环圆边在周期 CAD 装配时统一规划参数锚点。圆柱环带、球面环带和球冠使用显式 seam；后处理锚点、pole 退化边和 seam 不计入逻辑生成图。
-- 共享边一次创建，全局复用；`SameParameter` 后复核。自动修复若替换原有逻辑边或超出容差，直接拒绝。
-- `max_triangles/max_refinements/max_segments/max_spline_controls`：明确资源上限；达到上限保留失败阶段，不伪装成功。
-
-## 输出与验收
-
-每次运行保存 `run.json`、`quality.json`，以及 SDF 网格、隔离带、核心、到达代价、界面、逻辑图、精化点、曲线参数、曲面参数和逻辑到 CAD 映射。`queries/` 保存实际查询；仅查询 SDF 的记录中未查询的 UDF 为 NaN，不能当作训练三通道标签。`save_queries=false` 可关闭。
-
-状态包括 `face_seeds_ready`、`logical_graph_ready`、`curves_ready`、`surfaces_ready`、`solid_validated` 和 `failed`。失败报告包含阶段、错误代码与细节；只在 STEP 读回通过后发布 `reconstruction.step`。CAD 输出在归一化坐标中，原始尺度变换保存在输入 metadata；需要世界尺度时对整个实体统一变换。
-
-验收检查核心稳定性、顶点与边场残差、独立边场覆盖探针、固定端点、整条边的加密边—面残差、内部 SDF、局部雅可比、共享边两侧使用、CAD 容差、正体积、三角化、STEP 读回和读回曲线几何。体积读回预算同时参考表面积与边界误差，不能用几何容差已达 `1e-3` 的结果要求无条件 `1e-7` 体积一致。
-
-## 当前边界
-
-- 任意有限格点和散点都不能保证找出未采到的薄结构。报告明确标记没有严格连续域／全局拓扑保证。
-- 核心／标签界面使用经过细化的离散线性近似；不是精确符号场裁剪器。阈值与加密检查仍不足时返回失败。
-- 多个顶点或短边被带吞掉、高价扇区无法唯一关联、复杂周期域未能补缝时会报告对应失败。当前没有自动的任意局部重新播种和短边搜索调度器；可调整配置重跑，不能声称复杂 ABC 已全面支持。
-- 样条边界约束可能与指定基函数不相容；增加自由度后仍冲突会报告 `surface_boundary_incompatible`。当前未实现任意 rational 多边裁剪域的连续精确边界证明。
-- 已实现局部雅可比和 OCC 有效性检查；**尚无独立的全局曲面自交／折叠认证**。不是通用 CAD 修复器。
-- 原仓库面模型已经复制且接口可用，但未提供／虚构训练权重；实际预训练 checkpoint 的推理需使用者提供相容配置。
-
-## 测试
-
-```bash
-python -m unittest discover -s tests -v
-python demo.py --shape cylinder --output outputs/demo_cylinder
-python demo.py --shape box --output outputs/demo_box
-python demo.py --shape sphere_bore --output outputs/demo_bore
-```
-
-测试包含三来源竞争、同一 face 对两闭环、self-loop 双端口、距离中心定位、硬端点／整边约束、冲突拒绝、空结构、带细分、隐藏真值隔离、缓存和失败报告。完整集成测试覆盖立方体、圆柱、球体通孔、球内腔、平滑球面分界，实际运行 STEP 导出读回。详见 [VALIDATION.md](VALIDATION.md)。
+历次实验、逐模型结果与清理范围统一见 [三场重建实验汇总](../docs/ThreeFieldReconstructionExperiments.md)。原始统计与成功 STEP 保留；归并前报告原文压缩存放于 `outputs/experiment_archive_20261015/`。

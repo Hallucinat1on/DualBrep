@@ -5,3 +5,4 @@ outputs/
 build/
 dist/
 *.egg-info/
+visualizations

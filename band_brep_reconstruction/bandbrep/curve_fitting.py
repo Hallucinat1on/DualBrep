@@ -1,8 +1,8 @@
 from dataclasses import dataclass
 import numpy as np
-from scipy.optimize import least_squares
 from scipy.spatial import cKDTree
 from .schemas import require
+from .surface_mesh import evaluate_batched
 
 @dataclass
 class CurveRecord:
@@ -82,8 +82,10 @@ def fit_shared_curves(graph,provider,cfg):
                 if edge.closed:data['sweep']=np.sign(data['sweep'])*2*np.pi
                 record=CurveRecord(edge.id,'circle',data,err)
         if record is None:record=fit_piecewise(p,cfg);record.id=edge.id
-        test=record.evaluate(np.linspace(0,1,max(500,len(p)*2)))
-        values=provider.evaluate(test).values
+        length=float(np.linalg.norm(np.diff(p,axis=0),axis=1).sum())
+        count=max(500,len(p)*2,int(np.ceil(length/(cfg.curve_tolerance*.5)))+1)
+        test=record.evaluate(np.linspace(0,1,count))
+        values=evaluate_batched(provider,test,cfg.query_batch_size)
         require(values[:,1].max()<=cfg.curve_tolerance*2,'curve_field_failed','Fitted curve violates edge UDF',edge=edge.id,error=float(values[:,1].max()))
         require(np.abs(values[:,0]).max()<=cfg.surface_tolerance,'curve_surface_failed','Fitted curve violates SDF',edge=edge.id)
         cover=cKDTree(test).query(p)[0].max()

@@ -74,6 +74,7 @@ def _extract_surface(provider,cfg):
     cross=np.cross(v[f[:,1]]-v[f[:,0]],v[f[:,2]]-v[f[:,0]])
     f=f[np.linalg.norm(cross,axis=1)>1e-14]
     used,inv=np.unique(f,return_inverse=True);v=v[used];f=inv.reshape(-1,3)
+    require(len(f)<=cfg.max_triangles,'mesh_resource_limit','SDF mesh exceeds triangle budget',triangles=len(f))
     mesh=SurfaceMesh(v,f)
     orient_and_validate(mesh,provider,cfg)
     mesh.report.update(resolution=r,voxel_size=(hi-lo)/(r-1),strict_topology_guarantee=False)
@@ -97,29 +98,14 @@ def orient_and_validate(mesh,provider,cfg):
     residual=np.abs(provider.sdf(mesh.vertices))
     mesh.report.update(components=int(labels.max()+1),vertices=len(mesh.vertices),triangles=len(mesh.triangles),
         max_sdf_residual=float(residual.max()),boundary_edges=0)
-    require(residual.max()<=cfg.surface_tolerance,'surface_error','MC surface exceeds SDF error budget',error=float(residual.max()))
+    exceeded=bool(residual.max()>cfg.surface_tolerance)
+    # Retain the normal resolution retry. Only the final resolution can proceed
+    # with a residual warning; all structural checks above remain mandatory.
+    permitted=cfg.allow_surface_residual_exceedance and cfg.resolution>=cfg.max_resolution
+    mesh.report.update(surface_tolerance=cfg.surface_tolerance,
+        surface_residual_exceeded=exceeded,
+        surface_residual_warning=exceeded and permitted,
+        sdf_residual_quantiles=np.quantile(residual,[.5,.95,.99,1.]).tolist(),
+        sdf_residual_exceedance_fraction=float(np.mean(residual>cfg.surface_tolerance)))
+    require(not exceeded or permitted,'surface_error','MC surface exceeds SDF error budget',error=float(residual.max()))
     return mesh
-
-def split_edges(mesh,selected,provider=None,max_step=None):
-    """Conforming edge bisection: all incident triangles share each midpoint."""
-    edges,inv,_=mesh_edges(mesh.triangles)
-    marked=np.zeros(len(edges),bool);marked[selected]=True
-    newids=np.full(len(edges),-1,np.int64);newids[marked]=np.arange(marked.sum())+len(mesh.vertices)
-    mids=mesh.vertices[edges[marked]].mean(axis=1)
-    if provider is not None and len(mids):
-        for _ in range(3):
-            s=provider.sdf(mids);g,valid=provider.gradient(mids,0)
-            delta=s[:,None]*g/np.maximum(np.sum(g*g,axis=1)[:,None],1e-12)
-            if max_step is not None:
-                norm=np.linalg.norm(delta,axis=1);delta*=np.minimum(1,max_step/np.maximum(norm,1e-12))[:,None]
-            mids[valid]-=delta[valid]
-    out=[];parents=[]
-    for i,(a,b,c) in enumerate(mesh.triangles):
-        x,y,z=newids[inv[i]];mask=(x>=0)+2*int(y>=0)+4*int(z>=0)
-        # bool/numpy arithmetic kept explicit for the first bit.
-        mask=int(x>=0)+2*int(y>=0)+4*int(z>=0)
-        pieces={0:[(a,b,c)],1:[(a,x,c),(x,b,c)],2:[(b,y,a),(y,c,a)],4:[(c,z,b),(z,a,b)],
-                3:[(b,y,x),(a,x,c),(x,y,c)],5:[(a,x,z),(x,b,c),(x,c,z)],
-                6:[(c,z,y),(a,b,z),(b,y,z)],7:[(a,x,z),(x,b,y),(z,y,c),(x,y,z)]}[mask]
-        out.extend(pieces);parents.extend([i]*len(pieces))
-    return SurfaceMesh(np.vstack((mesh.vertices,mids)),np.asarray(out,np.int64),dict(mesh.report)),np.asarray(parents)

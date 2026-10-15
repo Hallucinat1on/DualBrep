@@ -144,17 +144,17 @@ def fit_general_spline(face,points,boundaries,normal,cfg,initial=None):
         except ReconstructionError as exc:last=exc
     raise ReconstructionError('surface_boundary_incompatible','Spline budget cannot satisfy fixed boundary',{'face':face,'cause':str(last)})
 
-def initialize_face_surfaces(mesh,arrivals,graph,curves,provider,cfg,face_model=None):
-    regions=sample_face_regions(mesh,arrivals.triangle_labels,cfg);patches={}
+def initialize_face_surfaces(mesh,face_labels,graph,curves,provider,cfg,face_model=None):
+    regions=sample_face_regions(mesh,face_labels,cfg);patches={}
     model_grids=face_model.predict(regions) if face_model is not None else {}
     for face in range(graph.face_count):
         require(face in regions,'missing_face_region','No sampled region for face',face=face)
         p,n=regions[face]
-        # Interface triangles are topology supports, not exact trimmed geometry.
+        # Core triangles provide face-interior samples; shared curves supply boundaries.
         # Initialize from trustworthy interior samples, with frozen boundaries
         # supplying the full trim extent; never fit leaked points across a sharp edge.
         fv=provider.evaluate(p).values
-        safe=fv[:,1]>cfg.max_band_edge if provider.presence()[0]=='present' else np.ones(len(p),bool)
+        safe=fv[:,1]>cfg.tau_edge*.5 if provider.presence()[0]=='present' else np.ones(len(p),bool)
         if np.sum(safe)>=20:p,n=p[safe],n[safe]
         related=[curves[e.id] for e in graph.edges if face in e.faces]
         boundary=np.vstack([c.evaluate(np.linspace(0,1,65)) for c in related]) if related else np.empty((0,3))

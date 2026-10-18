@@ -65,11 +65,13 @@ def reconstruct(provider,cfg,output_dir,face_model=None,resume=False):
         stage='bands'
         if stage in accepted:
             a=np.load(out/'bands.npz')
-            bands=BandState(*(a[k] for k in ('points','values','edge_band','vertex_band','edge_region','core_mask')),accepted[stage], a['face_labels'], a['exclusion_reasons'])
+            optional=[a[k] if k in a.files else None for k in ('vertex_labels','vertex_centers')]
+            bands=BandState(*(a[k] for k in ('points','values','edge_band','vertex_band','edge_region','core_mask')),accepted[stage], a['face_labels'], a['exclusion_reasons'],*optional)
         else:mesh,bands=build_bands(mesh,provider,cfg)
+        extra={k:getattr(bands,k) for k in ('vertex_labels','vertex_centers') if getattr(bands,k) is not None}
         np.savez_compressed(out/'bands.npz',points=bands.points,values=bands.values,
             edge_band=bands.edge_band,vertex_band=bands.vertex_band,edge_region=bands.edge_region,core_mask=bands.core_mask,
-            face_labels=bands.face_labels,exclusion_reasons=bands.exclusion_reasons)
+            face_labels=bands.face_labels,exclusion_reasons=bands.exclusion_reasons,**extra)
         mark(stage,bands.report)
         stage='seeds'
         if stage in accepted:seeds=np.load(out/'face_seeds.npz')['labels'];report=accepted[stage]
@@ -77,7 +79,7 @@ def reconstruct(provider,cfg,output_dir,face_model=None,resume=False):
         np.savez_compressed(out/'face_seeds.npz',labels=seeds);mark(stage,report)
         if cfg.stop_after=='seeds':return finish('face_seeds_ready')
         stage='graph'
-        topology=load_topology(out) if stage in accepted else recover_topology(mesh,bands,seeds)
+        topology=load_topology(out) if stage in accepted else recover_topology(mesh,bands,seeds,cfg,provider)
         np.savez_compressed(out/'topology_labels.npz',face_labels=topology.face_labels,
             edge_labels=topology.edge_labels,vertex_labels=topology.vertex_labels,contacts=topology.contacts)
         write_json(out/'incidence.json',dict(face_count=topology.face_count,edges=topology.edges,

@@ -108,7 +108,16 @@ def build_edge_geometry(topology, bands, vertices, provider, cfg):
         require(len(item['faces'])==2,'edge_neighbors_unresolved','Curve requires two confirmed neighboring faces',edge=item['id'],faces=item['faces'])
         vids=list(item['vertices']);require(len(vids)<=2,'edge_vertices_unresolved','Edge touches more than two vertex candidates',edge=item['id'],vertices=vids)
         radius=max(cfg.tau_edge*3,cfg.surface_tolerance*4)
-        points=project_support(bands.points[item['nodes']],provider,radius,cfg)
+        ids=np.asarray(item.get('support_nodes',item['nodes']),int)
+        if cfg.infer_short_edges and len(vids)==2 and (item.get('status')=='inferred_short' or len(ids)<3):
+            # Endpoint-supported segment; fit_shared_curves still rejects it unless
+            # e-UDF and SDF vanish along the whole segment.
+            ends=np.array([vertices[v].position for v in vids])
+            require(np.linalg.norm(ends[1]-ends[0])>cfg.localization_tolerance,'coincident_vertex_candidates','Distinct vertex candidates have coincident geometry')
+            edges.append(EdgeInstance(item['id'],tuple(item['faces']),ends,False,vids,-1,radius))
+            continue
+        require(len(ids)>=3,'edge_support_insufficient','Too few distance-supported edge nodes',edge=item['id'],count=len(ids))
+        points=project_support(bands.points[ids],provider,radius,cfg)
         ends=np.array([vertices[v].position for v in vids]).reshape(-1,3)
         ordered=None
         if len(ends)==2:

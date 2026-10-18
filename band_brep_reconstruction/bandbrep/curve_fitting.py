@@ -69,6 +69,41 @@ def fit_piecewise(points,cfg):
         if error<=cfg.curve_tolerance:curve.residual=float(error);return curve
     require(False,'curve_fit_failed','Piecewise fixed-end C1 fitting exceeds segment / error budget')
 
+def fit_fixed_arc(points,v0,v1):
+    """Circular arc through both fixed endpoints; center on the chord bisector.
+
+    Returns (data, max_error) or None.  Endpoints are reproduced to round-off,
+    so shared vertices never move.
+    """
+    chord=v1-v0;length=np.linalg.norm(chord)
+    if length<1e-9 or len(points)<3:return None
+    c=chord/length;m=(v0+v1)/2
+    normal=np.linalg.svd(np.vstack((points,v0,v1))-np.vstack((points,v0,v1)).mean(axis=0),full_matrices=False)[2][-1]
+    normal=normal-(normal@c)*c
+    if np.linalg.norm(normal)<1e-6:return None
+    normal/=np.linalg.norm(normal);w=np.cross(normal,c)
+    q=points-m;a=q@w;b=q@c;h=length/2
+    # |q - s w| = sqrt(h^2 + s^2)  <=>  a^2 + b^2 - 2 a s = h^2  (in-plane, linear in s)
+    keep=np.abs(a)>1e-9
+    if keep.sum()<2:return None
+    s=float(np.sum(a[keep]*(a[keep]**2+b[keep]**2-h*h))/np.sum(2*a[keep]**2))
+    center=m+s*w;radius=float(np.hypot(h,s))
+    x=(v0-center)/radius;y=np.cross(normal,x)
+    end=v1-center;angle_end=float(np.arctan2(end@y,end@x))
+    angles=np.arctan2((points-center)@y,(points-center)@x)
+    sweeps=[np.mod(angle_end,2*np.pi),np.mod(angle_end,2*np.pi)-2*np.pi]
+    best=None
+    for sweep in sweeps:
+        if abs(sweep)<1e-9:continue
+        rel=np.mod(angles,2*np.pi) if sweep>0 else np.mod(angles,2*np.pi)-2*np.pi
+        inside=np.mean((rel/sweep>=-1e-6)&(rel/sweep<=1+1e-6))
+        if best is None or inside>best[0]:best=(inside,sweep)
+    if best is None or best[0]<.95:return None
+    delta=points-center;off=delta@normal
+    error=np.sqrt(off**2+(np.linalg.norm(delta-off[:,None]*normal,axis=1)-radius)**2)
+    return dict(center=center,radius=radius,x=x,y=y,normal=normal,start=0.,sweep=float(best[1])),float(error.max())
+
+
 def fit_shared_curves(graph,provider,cfg):
     curves={}
     for edge in graph.edges:
@@ -76,6 +111,9 @@ def fit_shared_curves(graph,provider,cfg):
         if not edge.closed:
             q=(1-t[:,None])*p[0]+t[:,None]*p[-1];err=np.linalg.norm(q-p,axis=1).max()
             if err<=cfg.curve_tolerance:record=CurveRecord(edge.id,'line',{'p0':p[0],'p1':p[-1]},float(err))
+        if record is None and cfg.curve_candidates=='arcs' and not edge.closed and len(edge.vertices)==2 and len(p)>=6:
+            arc=fit_fixed_arc(p[1:-1],p[0],p[-1])
+            if arc is not None and arc[1]<=cfg.curve_tolerance:record=CurveRecord(edge.id,'circle',arc[0],arc[1])
         if record is None and len(p)>=6:
             data,err=fit_circle(p)
             if err<=cfg.curve_tolerance and (edge.closed or not edge.vertices):

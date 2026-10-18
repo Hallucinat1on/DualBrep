@@ -44,7 +44,7 @@ class FacePatch:
                     base=self.evaluate(uv);h=1e-4
                     du=(self.evaluate(uv+[h,0])-base)/h;dv=(self.evaluate(uv+[0,h])-base)/h
                     J=np.stack((du,dv),axis=2);lhs=np.einsum('nki,nkj->nij',J,J)+np.eye(2)*1e-10
-                    rhs=np.einsum('nki,nk->ni',J,p-base);delta=np.linalg.solve(lhs,rhs)
+                    rhs=np.einsum('nki,nk->ni',J,p-base);delta=np.linalg.solve(lhs,rhs[...,None])[...,0]
                     uv=np.clip(uv+np.clip(delta,-.1,.1),0,1)
             return uv
         q=p-d['origin'];z=q@d['axis'];x=q@d['x'];y=q@d['y'];u=np.arctan2(y,x)
@@ -52,7 +52,8 @@ class FacePatch:
         if self.kind=='cylinder':return np.column_stack((u,z))
         if self.kind=='sphere':return np.column_stack((u,np.arctan2(z,np.sqrt(x*x+y*y))))
         if self.kind=='cone':return np.column_stack((u,z/np.cos(d['angle'])))
-        return np.column_stack((u,np.arctan2(z,np.sqrt(x*x+y*y)-d['major'])))
+        v=np.arctan2(z,np.sqrt(x*x+y*y)-d['major'])
+        return np.column_stack((u,np.unwrap(v) if ordered else v))
     def evaluate(self,uv):
         uv=np.asarray(uv,float);d=self.data;u,v=uv.T
         if self.kind=='plane':return d['origin']+u[:,None]*d['x']+v[:,None]*d['y']
@@ -116,6 +117,81 @@ def analytic_candidates(points,normal,boundaries):
         if res.x[6]>0:candidates.append(FacePatch(-1,'cylinder',dict(origin=res.x[:3],axis=a,x=x,y=y,radius=res.x[6]),normal.mean(axis=0),{}))
     return candidates
 
+def _axis_point(points,normals,axis):
+    """Point on the axis: every revolution-surface normal line is coplanar with it."""
+    m=np.cross(normals,axis);rhs=np.einsum('ij,ij->i',m,points)
+    ok=np.linalg.norm(m,axis=1)>1e-3
+    if ok.sum()<3:return points.mean(axis=0)
+    c=np.linalg.lstsq(m[ok],rhs[ok],rcond=None)[0]
+    return c-((c-points.mean(axis=0))@axis)*axis
+
+
+def _profile(points,origin,axis):
+    q=points-origin;z=q@axis;rho=np.linalg.norm(q-z[:,None]*axis,axis=1)
+    return rho,z
+
+
+def revolution_candidates(points,normal,related,boundaries):
+    """Cylinder / cone / torus by joint axis + meridian-profile least squares.
+
+    Axis guesses come from boundary circles and from normal statistics; the
+    profile model is then refined together with the axis.  Boundary samples are
+    weighted higher because shared curves were localized on the e-UDF.
+    """
+    guesses=[]
+    circles=[c for c in related if c.kind=='circle']
+    for c in circles:guesses.append((np.asarray(c.data['center'],float),np.asarray(c.data['normal'],float)))
+    if len(circles)>=2:
+        d=circles[1].data['center']-circles[0].data['center']
+        if np.linalg.norm(d)>1e-4:guesses.append((np.asarray(circles[0].data['center'],float),d/np.linalg.norm(d)))
+    for centered in (True,False):
+        n=normal-normal.mean(axis=0) if centered else normal
+        a=np.linalg.svd(n,full_matrices=False)[2][-1]
+        guesses.append((_axis_point(points,normal,a),a))
+    data=np.vstack((points,boundaries)) if len(boundaries) else points
+    weight=np.r_[np.ones(len(points)),np.full(len(boundaries),3.)]
+    out=[]
+    for kind in ('cylinder','cone','torus'):
+        best=None
+        for c0,a0 in guesses:
+            a0=a0/np.linalg.norm(a0);x0,y0=frame(a0)
+            rho,z=_profile(data,c0,a0)
+            if kind=='cylinder':p0=[np.median(rho)]
+            elif kind=='cone':
+                k,r0=np.polyfit(z,rho,1)
+                if abs(k)<1e-3:continue
+                p0=[r0,k]
+            else:
+                A=np.column_stack((2*rho,2*z,np.ones(len(z))));sol=np.linalg.lstsq(A,rho*rho+z*z,rcond=None)[0]
+                R,zc=sol[:2];r=np.sqrt(max(sol[2]+R*R+zc*zc,0))
+                if not (r>1e-4 and R>r*.5):continue
+                p0=[R,zc,r]
+            def residual(s):
+                a=a0+s[0]*x0+s[1]*y0;a/=np.linalg.norm(a);c=c0+s[2]*x0+s[3]*y0
+                rho,z=_profile(data,c,a);p=s[4:]
+                if kind=='cylinder':r=rho-p[0]
+                elif kind=='cone':r=(rho-p[0]-p[1]*z)/np.sqrt(1+p[1]**2)
+                else:r=np.hypot(rho-p[0],z-p[1])-p[2]
+                return weight*r
+            try:fit=least_squares(residual,np.r_[0,0,0,0,p0],max_nfev=200,x_scale='jac')
+            except ValueError:continue
+            if not np.all(np.isfinite(fit.x)):continue
+            score=float(np.abs(fit.fun).max())
+            if best is None or score<best[0]:best=(score,fit.x,a0,x0,y0,c0)
+        if best is None:continue
+        _,s,a0,x0,y0,c0=best
+        a=a0+s[0]*x0+s[1]*y0;a/=np.linalg.norm(a);c=c0+s[2]*x0+s[3]*y0;x,y=frame(a);p=s[4:]
+        if kind=='cylinder' and p[0]>0:
+            out.append(FacePatch(-1,'cylinder',dict(origin=c,axis=a,x=x,y=y,radius=float(p[0])),normal.mean(axis=0),{}))
+        elif kind=='cone':
+            _,z=_profile(data,c,a);z0=float(np.median(z));radius=float(p[0]+p[1]*z0);angle=float(np.arctan(p[1]))
+            if radius>0 and 1e-3<abs(angle)<np.pi/2-1e-3:
+                out.append(FacePatch(-1,'cone',dict(origin=c+z0*a,axis=a,x=x,y=y,radius=radius,angle=angle),normal.mean(axis=0),{}))
+        elif kind=='torus' and p[0]>0 and p[2]>0:
+            out.append(FacePatch(-1,'torus',dict(origin=c+p[1]*a,axis=a,x=x,y=y,major=float(p[0]),minor=float(p[2])),normal.mean(axis=0),{}))
+    return out
+
+
 def fit_general_spline(face,points,boundaries,normal,cfg,initial=None):
     mean=points.mean(axis=0);_,_,vt=np.linalg.svd(points-mean,full_matrices=False);x,y=vt[:2];axis=np.cross(x,y)
     uv=np.column_stack(((points-mean)@x,(points-mean)@y));bu=np.column_stack(((boundaries-mean)@x,(boundaries-mean)@y))
@@ -166,12 +242,24 @@ def initialize_face_surfaces(mesh,face_labels,graph,curves,provider,cfg,face_mod
                 candidates.insert(0,FacePatch(face,'cylinder',dict(origin=c0.data['center'],axis=axis,x=x,y=y,
                     radius=(c0.data['radius']+c1.data['radius'])/2),n[0],{}))
         accepted=[]
-        for patch in candidates:
-            err=np.linalg.norm(patch.evaluate(patch.uv(p))-p,axis=1)
-            be=np.linalg.norm(patch.evaluate(patch.uv(boundary))-boundary,axis=1) if len(boundary) else np.zeros(1)
-            if err.max()<=cfg.surface_tolerance*2 and be.max()<=cfg.boundary_tolerance:
-                accepted.append((float(err.mean()+be.max()),patch))
-        if accepted:patch=next((v for _,v in accepted if v.kind=='plane'),min(accepted,key=lambda z:z[0])[1]);patch.id=face
+        def screen(options):
+            for patch in options:
+                err=np.linalg.norm(patch.evaluate(patch.uv(p))-p,axis=1)
+                be=np.linalg.norm(patch.evaluate(patch.uv(boundary))-boundary,axis=1) if len(boundary) else np.zeros(1)
+                if err.max()<=cfg.surface_tolerance*2 and be.max()<=cfg.boundary_tolerance:
+                    accepted.append((float(err.mean()+be.max()),patch,float(be.max())))
+        screen(candidates)
+        if cfg.surface_candidates=='revolution':
+            # A plane wins only if the frozen boundary really lies in it; otherwise a
+            # shallow cylinder (small sagitta) would be flattened onto a plane.
+            accepted=[a for a in accepted if a[1].kind!='plane' or a[2]<=cfg.boundary_tolerance*.25] or accepted
+        if not accepted and cfg.surface_candidates=='revolution':
+            screen(revolution_candidates(p,n,related,boundary))
+            # Simplest accepted primitive first; a torus can mimic a cone within tolerance.
+            rank={'cylinder':0,'cone':1,'torus':2}
+            accepted.sort(key=lambda item:(rank.get(item[1].kind,3),item[0]))
+            if accepted:accepted=accepted[:1]
+        if accepted:patch=next((v for _,v,_ in accepted if v.kind=='plane'),min(accepted,key=lambda z:z[0])[1]);patch.id=face
         else:
             require(len(boundary)>0,'surface_initialization_failed','Unbounded nonanalytic face needs explicit UV/model initialization')
             patch=fit_general_spline(face,p,boundary,n,cfg,model_grids.get(face))

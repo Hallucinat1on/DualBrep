@@ -61,8 +61,31 @@ def occ_surface(patch):
     if patch.kind=='cone':return Geom_ConicalSurface(axis,d['angle'],d['radius'])
     return Geom_ToroidalSurface(axis,d['major'],d['minor'])
 
-def make_pcurve(patch,record,first,last,tolerance):
+PERIODIC_KINDS=('cylinder','cone','sphere','torus')
+
+
+def periodic_dims(kind):
+    return (0,1) if kind=='torus' else (0,) if kind in PERIODIC_KINDS else ()
+
+
+def shift_periods(uv,starts,kind):
+    """Move an ordered pcurve by whole periods into [start, start+2*pi) per periodic dim.
+
+    `starts` places each parameter cut inside a boundary gap, so a continuous
+    pcurve that never crosses the cut lands entirely inside one period.
+    """
+    for d in periodic_dims(kind):
+        uv[:,d]-=2*np.pi*np.floor((uv[:,d].mean()-starts[d])/(2*np.pi))
+    return uv
+
+
+def make_pcurve(patch,record,first,last,tolerance,adjust=None):
+    coplanar=False
     if patch.kind=='plane' and record.kind=='circle':
+        d=record.data;axis=np.cross(patch.data['x'],patch.data['y'])
+        full=abs(abs(d['sweep'])-2*np.pi)<1e-9
+        coplanar=full or (abs(abs(np.dot(d['normal'],axis))-1)<1e-9 and abs(np.dot(d['center']-patch.data['origin'],axis))<tolerance*.01)
+    if coplanar:
         d=record.data;c=patch.uv(d['center'][None])[0]
         start=np.cos(d['start'])*d['x']+np.sin(d['start'])*d['y']
         tangent=np.sign(d['sweep'])*(-np.sin(d['start'])*d['x']+np.cos(d['start'])*d['y'])
@@ -73,6 +96,7 @@ def make_pcurve(patch,record,first,last,tolerance):
         return pc,uv,0.
     for count in (65,129,257,513,1025):
         t=np.linspace(0,1,count);points=record.evaluate(t);uv=patch.uv(points,ordered=True)
+        if adjust is not None:uv=adjust(uv)
         # Use piecewise linear UV interpolation, then independently check midpoints.
         middle=(uv[:-1]+uv[1:])*.5;target=record.evaluate((t[:-1]+t[1:])*.5)
         error=np.linalg.norm(patch.evaluate(middle)-target,axis=1).max()
@@ -83,32 +107,115 @@ def make_pcurve(patch,record,first,last,tolerance):
         array1(TColStd_Array1OfInteger,[2]+[1]*(count-2)+[2]),1)
     return curve,uv,float(error)
 
+def plan_periodic_band(patch,cycles,curves,graph,offsets,anchor):
+    """UV layout for a cylinder/cone face bounded by two loops that each wrap once.
+
+    Both loops are shifted so their u-range is [u_a, u_a + 2*pi], where u_a is the
+    meridian through the anchor vertex.  Non-wrapping loops must lie strictly
+    inside that strip (they become holes).  Returns None if the layout fails.
+    """
+    offsets={k:np.array(v,float) for k,v in offsets.items()}
+    u_a=float(patch.uv(anchor[None])[0,0]);wraps=[];holes=[]
+    for cycle in cycles:
+        traced=[]
+        for use in cycle:
+            uv=patch.uv(curves[use.edge].evaluate(np.linspace(0,1,129)),ordered=True)+offsets[use.edge]
+            traced.append(uv if use.forward else uv[::-1])
+        uv=np.vstack(traced);turn=uv[-1,0]-uv[0,0]
+        (wraps if abs(abs(turn)-2*np.pi)<.1 else holes).append((cycle,uv,turn))
+    if len(wraps)!=2 or any(abs(t)>.1 for _,_,t in holes):return None
+    layout=[]
+    for cycle,uv,turn in wraps:
+        shift=2*np.pi*np.round((u_a-uv[:,0].min())/(2*np.pi))
+        if abs(uv[:,0].min()+shift-u_a)>1e-3:return None
+        for use in cycle:offsets[use.edge][0]+=shift
+        start=uv[0]+[shift,0];layout.append(dict(cycle=cycle,turn=turn,v=float(start[1]),u_start=float(start[0])))
+    for cycle,uv,_ in holes:
+        shift=2*np.pi*np.floor((uv[:,0].min()-u_a)/(2*np.pi))
+        if uv[:,0].max()-shift>=u_a+2*np.pi:return None
+        for use in cycle:offsets[use.edge][0]-=shift
+    layout.sort(key=lambda item:item['v'])
+    return dict(offsets=offsets,u_a=u_a,layout=layout,holes=[c for c,_,_ in holes])
+
+
+def make_periodic_band(patch,surface,plan,graph,edges,occ_vertices,cfg,builder,face):
+    """Seam = straight generator through the two loops' anchor vertices."""
+    def anchor_vertex(cycle):
+        use=cycle[0];e=graph.edges[use.edge]
+        if e.closed:return topexp.FirstVertex(edges[use.edge])
+        return occ_vertices[e.vertices[0 if use.forward else 1]]
+    lower,upper=plan['layout'];u_a=plan['u_a']
+    a=anchor_vertex(lower['cycle']);b=anchor_vertex(upper['cycle'])
+    pa,pb=BRep_Tool.Pnt(a),BRep_Tool.Pnt(b)
+    v0,v1=lower['v'],upper['v']
+    require(v1>v0+1e-9,'periodic_band_degenerate','Band loops share one parameter level',face=patch.id)
+    geom=Geom_BSplineCurve(array1(TColgp_Array1OfPnt,[pa,pb]),array1(TColStd_Array1OfReal,[v0,v1]),array1(TColStd_Array1OfInteger,[2,2]),1)
+    make=BRepBuilderAPI_MakeEdge(geom,a,b,v0,v1)
+    require(make.IsDone(),'seam_creation_failed','Cannot create band seam',face=patch.id,kind=patch.kind,error=int(make.Error()))
+    seam=make.Edge()
+    def line(u):
+        return Geom2d_BSplineCurve(array1(TColgp_Array1OfPnt2d,[gp_Pnt2d(u,v0),gp_Pnt2d(u,v1)]),
+            array1(TColStd_Array1OfReal,[v0,v1]),array1(TColStd_Array1OfInteger,[2,2]),1)
+    builder.UpdateEdge(seam,line(u_a+2*np.pi),line(u_a),face,cfg.boundary_tolerance);builder.Range(seam,face,v0,v1)
+    builder.UpdateVertex(a,cfg.boundary_tolerance);builder.UpdateVertex(b,cfg.boundary_tolerance)
+    def uses(item,increasing):
+        cycle=item['cycle'];forward=item['turn']>0
+        if forward==increasing:seq=[(u.edge,u.forward) for u in cycle]
+        else:seq=[(u.edge,not u.forward) for u in reversed(cycle)]
+        return [edges[e] if f else topods.Edge(edges[e].Reversed()) for e,f in seq]
+    wire=TopoDS_Wire();builder.MakeWire(wire)
+    # Counter-clockwise in UV: lower loop +u, seam up at u_a+2pi, upper loop -u, seam down at u_a.
+    for edge in uses(lower,True)+[seam]+uses(upper,False)+[topods.Edge(seam.Reversed())]:builder.Add(wire,edge)
+    wire.Closed(True);builder.Add(face,wire)
+    for cycle in plan['holes']:
+        hole=TopoDS_Wire();builder.MakeWire(hole)
+        for use in cycle:builder.Add(hole,edges[use.edge] if use.forward else topods.Edge(edges[use.edge].Reversed()))
+        hole.Closed(True);builder.Add(face,hole)
+    uv=patch.uv(np.asarray(patch.data['orientation_point'])[None]);h=1e-5;q=patch.evaluate(uv)
+    n=np.cross((patch.evaluate(uv+[h,0])-q)[0],(patch.evaluate(uv+[0,h])-q)[0])
+    if n@patch.normal<0:face=topods.Face(face.Reversed())
+    return face
+
+
 def make_periodic_annulus(patch,surface,incident,curves,edges,ranges,cfg,builder):
     face=TopoDS_Face();builder.MakeFace(face,surface,cfg.cad_tolerance*.1)
-    levels=[]
+    rings=[]
     for e in incident:
         record=curves[e.id];t=np.linspace(0,1,129);uv=patch.uv(record.evaluate(t),ordered=True)
         # Align a whole turn to the common [0,2*pi] domain.
         uv[:,0]-=round(float(uv[:,0].min())/(2*np.pi))*2*np.pi
         uv[:,0]-=uv[:,0].min()
         v=float(np.mean(uv[:,1]));require(np.ptp(uv[:,1])<cfg.boundary_tolerance,'periodic_domain_incompatible','Boundary is not a latitude / cylinder ring')
-        first,last=ranges[e.id]
-        pc=Geom2d_BSplineCurve(array1(TColgp_Array1OfPnt2d,[gp_Pnt2d(float(uv[0,0]),v),gp_Pnt2d(float(uv[-1,0]),v)]),
+        rings.append([v,e.id,bool(uv[-1,0]>uv[0,0]),float(uv[0,0]),float(uv[-1,0])])
+    rings.sort()
+    if patch.kind=='torus':
+        # Two meridian levels split the tube into two arcs; keep the one with the interior.
+        inner=float(patch.uv(np.asarray(patch.data['orientation_point'])[None])[0,1])
+        if rings[0][0]+np.mod(inner-rings[0][0],2*np.pi)>rings[1][0]:
+            rings[0][0]+=2*np.pi;rings=[rings[1],rings[0]]
+    for v,eid,_,ua,ub in rings:
+        first,last=ranges[eid]
+        pc=Geom2d_BSplineCurve(array1(TColgp_Array1OfPnt2d,[gp_Pnt2d(ua,v),gp_Pnt2d(ub,v)]),
              array1(TColStd_Array1OfReal,[first,last]),array1(TColStd_Array1OfInteger,[2,2]),1)
-        builder.UpdateEdge(edges[e.id],pc,face,cfg.boundary_tolerance);builder.Range(edges[e.id],face,first,last)
-        levels.append((v,e.id,uv[-1,0]>uv[0,0]))
-    levels.sort();v0,e0,positive0=levels[0];v1,e1,positive1=levels[1]
+        builder.UpdateEdge(edges[eid],pc,face,cfg.boundary_tolerance);builder.Range(edges[eid],face,first,last)
+    (v0,e0,positive0,_,_),(v1,e1,positive1,_,_)=rings
     a=topexp.FirstVertex(edges[e0]);b=topexp.FirstVertex(edges[e1])
     builder.UpdateVertex(a,cfg.boundary_tolerance);builder.UpdateVertex(b,cfg.boundary_tolerance)
-    if patch.kind=='cylinder':
+    d=patch.data
+    if patch.kind in ('cylinder','cone'):
+        # Generator S(0,v) is linear in v for both cylinders and cones.
         poles=array1(TColgp_Array1OfPnt,[surface.Value(0,v0),surface.Value(0,v1)])
         geom=Geom_BSplineCurve(poles,array1(TColStd_Array1OfReal,[v0,v1]),array1(TColStd_Array1OfInteger,[2,2]),1)
+    elif patch.kind=='torus':
+        # Meridian S(0,v)=O+major*x+minor*(cos(v)*x+sin(v)*axis).
+        center=np.asarray(d['origin'])+d['major']*np.asarray(d['x'])
+        geom=Geom_Circle(gp_Ax2(gp_Pnt(*center),gp_Dir(*np.cross(d['x'],d['axis'])),gp_Dir(*d['x'])),d['minor'])
     else:
-        d=patch.data
         # Meridian S(0,v)=center+R*(cos(v)*x+sin(v)*axis).
         geom=Geom_Circle(gp_Ax2(gp_Pnt(*d['origin']),gp_Dir(*np.cross(d['x'],d['axis'])),gp_Dir(*d['x'])),d['radius'])
     seam=BRepBuilderAPI_MakeEdge(geom,a,b,v0,v1)
-    require(seam.IsDone(),'seam_creation_failed','Cannot create shared-anchor seam')
+    require(seam.IsDone(),'seam_creation_failed','Cannot create shared-anchor seam',face=patch.id,kind=patch.kind,
+            levels=[float(v0),float(v1)],error=int(seam.Error()))
     seam=seam.Edge()
     def line(u):
         return Geom2d_BSplineCurve(array1(TColgp_Array1OfPnt2d,[gp_Pnt2d(u,v0),gp_Pnt2d(u,v1)]),
@@ -193,10 +300,57 @@ def assemble_brep(graph,curves,patches,cfg,out):
     # Plan one common meridian across periodic faces sharing coaxial rings.
     # This changes parameter frames / loop origins, not support or curve geometry.
     curves=copy.deepcopy(curves);patches=copy.deepcopy(patches);planned=set()
-    for fid,patch in sorted(patches.items(),key=lambda item:0 if item[1].kind=='sphere' else 1):
-        if patch.kind not in ('cylinder','sphere'):continue
+    ring_kinds=PERIODIC_KINDS if cfg.periodic_frame_planning else ('cylinder','sphere')
+    def ring_face(fid,patch):
         incident=[e for e in graph.edges if fid in e.faces]
-        if (len(incident)!=2 and not (patch.kind=='sphere' and len(incident)==1)) or not all(e.closed and curves[e.id].kind=='circle' for e in incident):continue
+        ok=patch.kind in ring_kinds and (len(incident)==2 or (patch.kind=='sphere' and len(incident)==1))
+        return ok and all(e.closed and curves[e.id].kind=='circle' for e in incident)
+    def wrap_anchor(fid):
+        # A loop of open edges is cut in UV at its first use's start vertex.
+        for cycle in graph.cycles.get(fid,[]):
+            for use in cycle:
+                e=graph.edges[use.edge]
+                if not e.closed:return np.asarray(graph.vertices[e.vertices[0 if use.forward else 1]].position,float)
+        return None
+    ring_anchor={}
+    if cfg.periodic_frame_planning:
+        for fid,patch in patches.items():
+            if patch.kind not in PERIODIC_KINDS or ring_face(fid,patch):continue
+            incident=[e for e in graph.edges if fid in e.faces]
+            rings=[e for e in incident if e.closed and curves[e.id].kind=='circle']
+            if not rings or len(rings)==len(incident):continue
+            anchor=wrap_anchor(fid)
+            if anchor is None:continue
+            for e in rings:ring_anchor.setdefault(e.id,anchor)
+    if cfg.periodic_frame_planning:
+        # One reference direction per family of coaxial ring faces, so every ring
+        # start (and every seam) lies on one common meridian half-plane.  A family
+        # touching a wrapping face adopts that face's loop vertex as its meridian.
+        members=[f for f,p in patches.items() if ring_face(f,p)];family={f:f for f in members}
+        def root(f):
+            while family[f]!=f:family[f]=family[family[f]];f=family[f]
+            return f
+        for e in graph.edges:
+            a,b=e.faces
+            if a in family and b in family:family[root(a)]=root(b)
+        reference={}
+        for f in members:
+            for e in graph.edges:
+                if f in e.faces and e.id in ring_anchor and root(f) not in reference:
+                    reference[root(f)]=ring_anchor[e.id]-np.asarray(curves[e.id].data['center'],float)
+        for f in members:reference.setdefault(root(f),np.asarray(patches[f].data['x'],float))
+        for f in members:
+            patch=patches[f];axis=np.asarray(patch.data['axis'],float);ref=reference[root(f)]
+            x=ref-(ref@axis)*axis
+            if np.linalg.norm(x)<1e-6:continue
+            x/=np.linalg.norm(x);patch.data['x']=x;patch.data['y']=np.cross(axis,x)
+            for e in graph.edges:
+                if f not in e.faces or e.id in planned:continue
+                d=curves[e.id].data;xr=ref-(ref@d['normal'])*d['normal'];xr/=np.linalg.norm(xr)
+                d['start']=float(np.arctan2(xr@d['y'],xr@d['x']));planned.add(e.id)
+    for fid,patch in sorted(patches.items(),key=lambda item:0 if item[1].kind=='sphere' else 1):
+        if cfg.periodic_frame_planning or not ring_face(fid,patch):continue
+        incident=[e for e in graph.edges if fid in e.faces]
         first=next((e for e in incident if e.id in planned),None)
         if first is not None:
             d=curves[first.id].data;anchor=np.cos(d['start'])*d['x']+np.sin(d['start'])*d['y']
@@ -206,6 +360,67 @@ def assemble_brep(graph,curves,patches,cfg,out):
             if e.id in planned:continue
             d=curves[e.id].data;x=patch.data['x'];x=x-(x@d['normal'])*d['normal'];x/=np.linalg.norm(x)
             d['start']=float(np.arctan2(x@d['y'],x@d['x']));planned.add(e.id)
+    # A periodic face whose boundary leaves an angular gap needs no seam at all:
+    # rotate its parameter frame so the u-cut falls in that gap.  Shared 3D curves
+    # and the support surface are unchanged; only the parameter origin moves.
+    seamless={};chained={};band={}
+    if cfg.periodic_frame_planning:
+        for fid,patch in patches.items():
+            if patch.kind not in PERIODIC_KINDS:continue
+            incident=[e for e in graph.edges if fid in e.faces]
+            if not incident or any(e.closed for e in incident):continue
+            pts=np.vstack([curves[e.id].evaluate(np.linspace(0,1,257)) for e in incident])
+            gaps=[]
+            for dim in periodic_dims(patch.kind):
+                angle=np.sort(np.mod(patch.uv(pts)[:,dim],2*np.pi))
+                gap=np.diff(np.r_[angle,angle[0]+2*np.pi]);i=int(gap.argmax());gaps.append((float(gap[i]),float(angle[i]+gap[i]/2)))
+            if min(g for g,_ in gaps)<.05:continue
+            rotation=gaps[0][1]-np.pi
+            x=patch.data['x'].copy();y=patch.data['y'].copy()
+            patch.data['x']=np.cos(rotation)*x+np.sin(rotation)*y
+            patch.data['y']=-np.sin(rotation)*x+np.cos(rotation)*y
+            # After rotation the u-cut sits at +-pi; a torus v-cut sits mid-gap.
+            seamless[fid]=np.array([-np.pi]+([gaps[1][1]] if len(gaps)>1 else []))
+            mapping.setdefault('frame_planning',[]).append({'face':fid,'kind':patch.kind,'rotation':float(rotation),'gaps':[g for g,_ in gaps]})
+        # Fully wrapping faces still need a seam.  Chain each loop's pcurves by
+        # whole periods so a loop is open in UV only at its first vertex, and start
+        # unplanned closed rings on that vertex's meridian; FixMissingSeam can then
+        # join vertices instead of splitting a shared edge.
+        for fid,patch in patches.items():
+            if patch.kind not in PERIODIC_KINDS or fid in seamless or ring_face(fid,patch):continue
+            incident=[e for e in graph.edges if fid in e.faces]
+            if not incident or all(e.closed for e in incident):continue
+            offsets={};anchor=wrap_anchor(fid)
+            for cycle in graph.cycles.get(fid,[]):
+                previous=None
+                for use in cycle:
+                    uv=patch.uv(curves[use.edge].evaluate(np.linspace(0,1,65)),ordered=True)
+                    start,end=(uv[0],uv[-1]) if use.forward else (uv[-1],uv[0])
+                    offset=np.zeros(2)
+                    if previous is not None:
+                        for d in periodic_dims(patch.kind):offset[d]=2*np.pi*np.round((previous[d]-start[d])/(2*np.pi))
+                    offsets[use.edge]=offset;previous=end+offset
+            aligned=[]
+            if anchor is not None:
+                for e in incident:
+                    if not e.closed or e.id in planned or curves[e.id].kind!='circle':continue
+                    d=curves[e.id].data;r=anchor-d['center'];r=r-(r@d['normal'])*d['normal']
+                    if np.linalg.norm(r)<1e-9:continue
+                    d['start']=float(np.arctan2(r@d['y'],r@d['x']));planned.add(e.id);aligned.append(e.id)
+            # FixMissingSeam joins wires into one rectangle only if every wire sits in
+            # the same period; move each open-edge loop onto the closed rings' period.
+            rings=[e for e in incident if e.closed]
+            if rings:
+                target=np.mean([patch.uv(curves[e.id].evaluate(np.linspace(0,1,65)),ordered=True)[:,0].mean() for e in rings])
+                for cycle in graph.cycles.get(fid,[]):
+                    if len(cycle)==1 and graph.edges[cycle[0].edge].closed:continue
+                    mid=np.mean([(patch.uv(curves[u.edge].evaluate(np.linspace(0,1,65)),ordered=True)[:,0]+offsets[u.edge][0]).mean() for u in cycle])
+                    shift=2*np.pi*np.round((target-mid)/(2*np.pi))
+                    for u in cycle:offsets[u.edge]=offsets[u.edge]+np.array([shift,0.])
+            plan=plan_periodic_band(patch,graph.cycles.get(fid,[]),curves,graph,offsets,anchor) if patch.kind in ('cylinder','cone') and anchor is not None else None
+            if plan is not None:band[fid]=plan;offsets=plan['offsets']
+            chained[fid]=offsets
+            mapping.setdefault('seam_vertex_planning',[]).append({'face':fid,'kind':patch.kind,'aligned_rings':aligned,'chained_edges':len(offsets)})
     for eid,record in curves.items():
         curve,first,last=occ_curve(record);instance=graph.edges[eid]
         if instance.vertices:
@@ -222,7 +437,10 @@ def assemble_brep(graph,curves,patches,cfg,out):
         faces[fid]=face;surfaces[fid]=surface;uv_reports[fid]=[]
         for instance in graph.edges:
             if fid not in instance.faces:continue
-            pcurve,uv,error=make_pcurve(patch,curves[instance.id],*ranges[instance.id],cfg.boundary_tolerance)
+            if fid in seamless:adjust=lambda uv,s=seamless[fid],k=patch.kind:shift_periods(uv,s,k)
+            elif fid in chained and instance.id in chained[fid]:adjust=lambda uv,o=chained[fid][instance.id]:uv+o
+            else:adjust=None
+            pcurve,uv,error=make_pcurve(patch,curves[instance.id],*ranges[instance.id],cfg.boundary_tolerance,adjust)
             builder.UpdateEdge(edges[instance.id],pcurve,face,cfg.boundary_tolerance)
             builder.Range(edges[instance.id],face,*ranges[instance.id]);uv_reports[fid].append({'edge':instance.id,'error':error})
         incident=[e for e in graph.edges if fid in e.faces]
@@ -233,11 +451,15 @@ def assemble_brep(graph,curves,patches,cfg,out):
             q=np.asarray(patch.data['orientation_point'])[None];uv=patch.uv(q);h=1e-5;base=patch.evaluate(uv)
             n=np.cross((patch.evaluate(uv+[h,0])-base)[0],(patch.evaluate(uv+[0,h])-base)[0])
             if n@patch.normal<0:face=topods.Face(face.Reversed());faces[fid]=face
-        explicit_periodic=patch.kind in ('cylinder','sphere') and (len(incident)==2 or (patch.kind=='sphere' and len(incident)==1)) and all(e.closed and curves[e.id].kind=='circle' for e in incident)
+        explicit_periodic=patch.kind in ring_kinds and (len(incident)==2 or (patch.kind=='sphere' and len(incident)==1)) and all(e.closed and curves[e.id].kind=='circle' for e in incident)
         if explicit_periodic:
             face=make_spherical_cap(patch,surface,incident[0],curves,edges,ranges,cfg,builder) if len(incident)==1 else make_periodic_annulus(patch,surface,incident,curves,edges,ranges,cfg,builder)
             faces[fid]=face
             mapping['postprocess_edges'].append({'face':fid,'kind':'explicit_periodic_seam'})
+        elif fid in band:
+            face=make_periodic_band(patch,surface,band[fid],graph,edges,occ_vertices,cfg,builder,face)
+            faces[fid]=face;explicit_periodic=True
+            mapping['postprocess_edges'].append({'face':fid,'kind':'explicit_band_seam'})
         for cycle in ([] if explicit_periodic else graph.cycles[fid]):
             wire=TopoDS_Wire();builder.MakeWire(wire)
             for use in cycle:
@@ -259,7 +481,7 @@ def assemble_brep(graph,curves,patches,cfg,out):
                     from OCC.Core.TopAbs import TopAbs_WIRE
                     for wire in unique(face,TopAbs_WIRE):builder.Add(replacement,wire.Reversed())
                     face=topods.Face(replacement.Reversed());faces[fid]=face
-        if incident and (surface.IsUPeriodic() or surface.IsVPeriodic()) and not explicit_periodic:
+        if incident and (surface.IsUPeriodic() or surface.IsVPeriodic()) and not explicit_periodic and fid not in seamless:
             fixer=ShapeFix_Face(face);fixer.SetPrecision(cfg.boundary_tolerance);fixer.SetMaxTolerance(cfg.cad_tolerance)
             fixer.FixMissingSeam()
             candidate=fixer.Face()

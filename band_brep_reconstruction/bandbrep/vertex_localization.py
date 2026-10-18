@@ -17,7 +17,9 @@ def localize_vertices(provider, bands, topology, cfg):
     """One distance-center fit per instantiated absorbing vertex domain."""
     candidates=[];rng=np.random.default_rng(cfg.seed)
     for domain in topology.vertices:
-        ids=np.asarray(domain['nodes'],int);pts=bands.points[ids];d=bands.values[ids,2]
+        ids=np.asarray(domain.get('support_nodes',domain['nodes']),int)
+        require(len(ids)>0,'vertex_support_insufficient','No distance-supported vertex nodes',vertex=domain['id'])
+        pts=bands.points[ids];d=bands.values[ids,2]
         g,valid=provider.gradient(pts,2);norm=np.linalg.norm(g,axis=1)
         valid &= norm>1e-10
         votes=pts[valid]-d[valid,None]*g[valid]/norm[valid,None]

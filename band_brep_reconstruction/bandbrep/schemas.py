@@ -40,6 +40,9 @@ class BandState:
     report: dict = field(default_factory=dict)
     face_labels: np.ndarray = None
     exclusion_reasons: np.ndarray = None
+    # Optional nearest-candidate vertex domains; None keeps connected-component domains.
+    vertex_labels: np.ndarray = None
+    vertex_centers: np.ndarray = None
 
 @dataclass
 class BandTopology:

@@ -20,7 +20,16 @@ def build_bands(mesh, provider, cfg):
     # A rejected high-distance component is not evidence of an edge.
     eb = np.isin(reasons, [1, 2]) if presence[0] == 'present' else np.zeros(len(points), bool)
     core = labels >= 0
+    if cfg.band_propagation == 'noncore' and presence[0] == 'present':
+        eb = ~core
     vb = eb & (values[:, 2] < cfg.tau_vertex) if presence[1] == 'present' else np.zeros(len(points), bool)
+    vertex_labels = vertex_centers = None
+    vertex_report = {'method': 'global_threshold', 'tau_vertex': cfg.tau_vertex}
+    if cfg.vertex_domains == 'local' and presence[1] == 'present':
+        from .vertex_domains import local_vertex_domains
+        support = np.isin(reasons, [1, 2])
+        vertex_labels, vertex_centers, vertex_report = local_vertex_domains(points, values, eb, support, provider, cfg)
+        vb = vertex_labels >= 0
     segmentation.update(count=count, sizes=np.bincount(labels[core]).tolist(),
         method='dualbrep_two_pass_triangle_components',
         threshold1=cfg.face_threshold1, threshold2=cfg.face_threshold2,
@@ -32,6 +41,7 @@ def build_bands(mesh, provider, cfg):
                   excluded_nodes=int((~core & ~eb).sum()),
                   exclusion_counts={str(i):int((reasons==i).sum()) for i in range(6)},
                   sampling='triangle_centers', vertex_domain='nested_in_edge_band',
+                  vertex_domains=vertex_report,
                   segmentation=segmentation,
                   field_query_points=len(points), strict_topology_guarantee=False)
-    return mesh, BandState(points, values, eb, vb, eb & ~vb, core, report, labels, reasons)
+    return mesh, BandState(points, values, eb, vb, eb & ~vb, core, report, labels, reasons, vertex_labels, vertex_centers)

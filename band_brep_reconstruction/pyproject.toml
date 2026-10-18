@@ -12,6 +12,7 @@ dependencies = ["numpy>=1.24,<3", "scipy>=1.10", "PyMCubes>=0.1.4"]
 [project.optional-dependencies]
 neural = ["torch>=2.0"]
 mesh-oracle = ["libigl>=2.5"]
+benchmarks = ["libigl>=2.5", "threadpoolctl>=3.1"]
 
 [project.scripts]
 band-brep-reconstruct = "bandbrep.cli:main"

@@ -1,7 +1,7 @@
 import argparse
 import json
 from pathlib import Path
-from .config import load_config
+from .config import load_config, PRESETS
 from .field_provider import CadOracleProvider,SampledFieldProvider
 from .reconstruct import reconstruct
 
@@ -18,9 +18,10 @@ def main():
     p.add_argument('--output',type=Path,required=True)
     p.add_argument('--resume',action='store_true')
     p.add_argument('--config',type=Path)
+    p.add_argument('--preset',choices=sorted(PRESETS),help='named configuration; --config and explicit flags override it')
     p.add_argument('--resolution',type=int)
     p.add_argument('--stop-after',choices=('seeds','graph','vertices','curves','surfaces','solid'))
-    args=p.parse_args();cfg=load_config(args.config,{'resolution':args.resolution,'stop_after':args.stop_after})
+    args=p.parse_args();cfg=load_config(args.config,{'resolution':args.resolution,'stop_after':args.stop_after},args.preset)
     if args.provider=='cad':
         metadata=json.loads((args.sample_dir/'metadata.json').read_text()) if args.sample_dir else None
         step=args.step or (Path(metadata['source_path']) if metadata else None)

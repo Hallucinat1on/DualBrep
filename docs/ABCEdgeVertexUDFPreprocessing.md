@@ -586,7 +586,7 @@ cd edge_vertex_preprocessing
 PYTHONPATH=/tmp/evudf-test-deps:. /miniconda/envs/brdf/bin/python -m unittest discover -s tests -v
 ```
 
-本次独立审计脚本和日志保存在 `/tmp/band-reconstruction-audit-20261013/`，关键结果均写入本文。原作者的检查记录见 [VALIDATION.md](../edge_vertex_preprocessing/VALIDATION.md) 和 [原批次报告](ThreeFieldReconstructionExperiments.md#4-预处理与早期验证)。抽样检查与现有测试不构成整个 ABC 数据集或全域连续几何的正确性证明。
+本次独立审计脚本和日志保存在 `/tmp/band-reconstruction-audit-20261013/`，关键结果均写入本文。原作者的检查记录见 [VALIDATION.md](../edge_vertex_preprocessing/VALIDATION.md) 和 [原批次报告](ThreeFieldReconstructionExperiments.md#41-预处理与早期验证)。抽样检查与现有测试不构成整个 ABC 数据集或全域连续几何的正确性证明。
 
 ### 14.2 输出数量与数值检查
 

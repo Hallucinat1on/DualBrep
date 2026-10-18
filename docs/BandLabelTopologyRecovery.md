@@ -1,10 +1,10 @@
 # 隔离带多标签三场 B-rep 重建：方案与代码实施
 
-更新日期：2026-10-15。当前实现为 `band_brep_reconstruction` v0.3.0。本文合并原隔离带方案与旧实施设计中仍适用的 provider、固定端点/边界约束、CAD 装配、缓存和验收内容；数据审查记录移入预处理文档 §14。
+更新日期：2026-10-18。当前实现为 `band_brep_reconstruction` v0.3.0。本文合并原隔离带方案与旧实施设计中仍适用的 provider、固定端点/边界约束、CAD 装配、缓存和验收内容；数据审查记录移入预处理文档 §14。
 
 主流程使用 DualBrep 两阶段面核心提取，在同一三角形中心图上收集全部标签，顶点域吸收但不向普通边带回传。旧版多源竞争、代价下包络、前置 port 验证及递归近带细分不属于当前流程；对应历史设计原文已归档。本文独立包含场定义、目标过滤、关联与几何契约。
 
-当前默认参数的 30 模型结果为 1/30，完整证据见 [实验汇总](ThreeFieldReconstructionExperiments.md)。数学约束、扩展建议与当前已实现的范围在 §16–17 区分说明。
+代码默认参数（65³、边带按共享边连通）的 30 模型结果为 1/30。2026-10-18 起推荐使用 `recommended` 预设：257³、边带/顶点带按共享顶点连通、局部顶点域与短边推断、回转面与圆弧候选、周期面切口规划；它在 S30 上为 9/30，在独立集 H100b 上为 38/100。完整证据见 [实验报告](ThreeFieldReconstructionExperiments.md)。数学约束、扩展建议与当前已实现的范围在 §16–17 区分说明；本文正文 §1–§15 描述的是基础方案，预设新增的选项见 §16。
 
 ## 0. 请优先核对的方案定义
 
@@ -596,11 +596,24 @@ $$
 
 ## 16. 当前实现与验证状态（v0.3.0）
 
-关联与几何完整流程已接入独立模块。42项测试通过，包含完整吸收/禁止回传、晚到标签、同面对多边、分割源码一致性、固定端点/完整边界和缓存恢复。
+关联与几何完整流程已接入独立模块。54 项测试通过，包含完整吸收/禁止回传、晚到标签、同面对多边、分割源码一致性、固定端点/完整边界、缓存恢复，以及 `recommended` 预设下五个解析场的完整 STEP。
 
-v0.2单阶段解析样例5/5完成STEP；v0.3默认0.005/0.01在初始65分辨率下2/5。完整CAD回归测试使用显式较宽0.025/0.05和最小分量1，不意味着默认配置全部成功。真实30模型最新结果1/30。所有次数和失败条件见[统一实验报告](ThreeFieldReconstructionExperiments.md)。
+v0.2单阶段解析样例5/5完成STEP；v0.3默认0.005/0.01在初始65分辨率下2/5，在257³（`recommended` 预设）下5/5。完整CAD回归测试使用显式较宽0.025/0.05和最小分量1，不意味着默认配置全部成功。所有次数和失败条件见[实验报告](ThreeFieldReconstructionExperiments.md)。
 
-主要未完成项是局部稳健带构造、碎核心/面粘连修复、混合/重复顶点域消解、逐实例容错诊断及复杂曲面的普适保证。独立覆盖检查仍可能因探针为空拒绝；本次合并文档不修改算法或声称这些问题已经修复。完整配置和使用命令见[模块README](../band_brep_reconstruction/README.md)。
+### 16.1 在基础方案之上新增的可选功能
+
+以下功能都由 `Config` 开关控制，代码默认关闭，`recommended` 预设全部开启：
+
+| 功能 | 配置项 | 相对正文方案的变化 |
+|---|---|---|
+| 共享顶点连通 | `band_connectivity='vertex'` | §8 伪代码中边带、顶点带的 `connected_components` 改用共享顶点邻接；面核心仍按共享边邻接（与 DualBrep 一致） |
+| 非核心传播 | `band_propagation='noncore'` | 原因码 3/4/5 的点也参与标签传播（恢复 DualBrep 的 `-1` 语义），但不作为几何支撑点 |
+| 局部顶点域 | `vertex_domains='local'` | 不再用全局 `v_udf < tau_vertex`：按 v-UDF 投票聚类得到候选，每个候选用局部半径，带上的点归属最近候选，相邻顶点域不会合并 |
+| 短边推断 | `infer_short_edges=True` | 两个顶点域直接相接、中间没有边带时，补出一条经 e-UDF≈0、SDF≈0 校验且恰好对应两个面的短边 |
+| 回转面与圆弧 | `surface_candidates='revolution'`、`curve_candidates='arcs'` | §12 的解析候选增加圆锥、圆环（轴线与母线截面联合拟合）；两端有顶点的边增加精确过两端点的圆弧 |
+| 周期面规划 | `periodic_frame_planning=True` | §17.5 的 seam 处理：切口放进边界空隙（无需 seam）；同轴环面共用参考方向；双环圆柱/圆锥面显式构造 seam，不再依赖 `FixMissingSeam` |
+
+主要未完成项：窄面的局部 SDF 重提面与核心找回（当前剩余失败的 70% 以上在面分割）、相接顶点共享面多于两个时的判断、边端部追踪、单个无边界非解析面和自由曲面、逐实例容错诊断与局部重试、复杂曲面的普适保证。完整配置和使用命令见[模块README](../band_brep_reconstruction/README.md)。
 
 
 <a id="implementation"></a>
@@ -804,6 +817,8 @@ $$
 
 配置以`bandbrep/config.py::Config`为准，未知键拒绝。surface使用resolution/max_resolution、surface_tolerance及网格预算；核心使用face_threshold1/2、face_filter_size、face_avg_udf_threshold；顶点带使用tau_vertex；定位、曲线、共享边界和内核分别使用localization_tolerance、curve_tolerance、boundary_tolerance、cad_tolerance。候选阈值与最终几何精度分开。
 
-当前没有旧max_refinements/max_band_edge/stability_factors配置。tau_edge仍服务既有几何半径与覆盖检查，不定义传播掩码。save_queries记录查询，未查询通道可能为NaN，不可作为完整三通道训练标签。
+命名预设定义在同一文件的 `PRESETS` 中，命令行用 `--preset recommended` 选择；优先级为代码默认值 < 预设 < `--config` 文件 < 命令行参数。§16.1 各开关在 `vertex_domains='local'` 时另有 `vertex_radius_fraction`（默认 0.45）、`vertex_cut_factor`（1.5）、`vertex_min_votes`（3）三个参数。
+
+当前没有旧max_refinements/max_band_edge/stability_factors配置；`project_face_samples`（面采样点投影到SDF）经实验无效且使部分模型退化，已删除。tau_edge仍服务既有几何半径与覆盖检查，不定义传播掩码。save_queries记录查询，未查询通道可能为NaN，不可作为完整三通道训练标签。
 
 验证须分层报告：场近似与饱和、SDF网格/带覆盖、核心拆分/混合/缺失、实例及E–F/V–E关联、曲线双向覆盖/端点、全边界面残差、UV局部有效性、CAD与读回。局部雅可比有效和OCC IsValid不构成全局自交或连续拓扑正确证明。生成场、离散拟合场和CAD oracle分别评价。

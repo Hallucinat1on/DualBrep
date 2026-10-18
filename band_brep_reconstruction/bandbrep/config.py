@@ -31,8 +31,37 @@ class Config:
     seed: int = 0
     stop_after: str = 'solid'
     save_queries: bool = True
+    band_connectivity: str = 'edge'
+    band_propagation: str = 'distance_only'
+    vertex_domains: str = 'threshold'
+    vertex_radius_fraction: float = .45
+    vertex_cut_factor: float = 1.5
+    vertex_min_votes: int = 3
+    infer_short_edges: bool = False
+    surface_candidates: str = 'basic'
+    curve_candidates: str = 'basic'
+    periodic_frame_planning: bool = False
 
     def validate(self):
+        if self.band_connectivity not in ('edge', 'vertex'):
+            raise ValueError('invalid band_connectivity')
+        if self.curve_candidates not in ('basic', 'arcs'):
+            raise ValueError('invalid curve_candidates')
+        if self.vertex_domains not in ('threshold', 'local'):
+            raise ValueError('invalid vertex_domains')
+        if self.surface_candidates not in ('basic', 'revolution'):
+            raise ValueError('invalid surface_candidates')
+        for key in ('infer_short_edges', 'periodic_frame_planning'):
+            if type(getattr(self, key)) is not bool:
+                raise ValueError(f'{key} must be a boolean')
+        if type(self.vertex_min_votes) is not int or self.vertex_min_votes < 1:
+            raise ValueError('vertex_min_votes must be a positive integer')
+        if not (0 < self.vertex_radius_fraction < .5):
+            raise ValueError('vertex_radius_fraction must lie in (0, 0.5)')
+        if not (math.isfinite(self.vertex_cut_factor) and self.vertex_cut_factor > 0):
+            raise ValueError('invalid vertex_cut_factor')
+        if self.band_propagation not in ('distance_only', 'noncore'):
+            raise ValueError('invalid band_propagation')
         if type(self.allow_surface_residual_exceedance) is not bool:
             raise ValueError('allow_surface_residual_exceedance must be a boolean')
         for key in ('resolution','max_resolution','query_batch_size','max_triangles','max_segments',
@@ -54,8 +83,23 @@ class Config:
 
     def to_dict(self): return asdict(self)
 
-def load_config(path=None, overrides=None):
-    d = json.loads(Path(path).read_text()) if path else {}
+# Named presets.  'recommended' is the configuration evaluated on the fresh
+# holdout H100b on 2026-10-18 (38/100 STEP vs 19/100 for the same settings with
+# the four improvement switches off); see docs/ThreeFieldReconstructionExperiments.md.
+PRESETS = {
+    'recommended': dict(
+        resolution=257, max_resolution=257, query_batch_size=1048576, save_queries=False,
+        band_connectivity='vertex', band_propagation='noncore', tau_vertex=.02,
+        vertex_domains='local', infer_short_edges=True,
+        surface_candidates='revolution', curve_candidates='arcs', periodic_frame_planning=True),
+}
+
+def load_config(path=None, overrides=None, preset=None):
+    """Precedence: dataclass defaults < preset < JSON file < explicit overrides."""
+    if preset is not None and preset not in PRESETS:
+        raise ValueError(f'unknown preset: {preset!r}; choose from {sorted(PRESETS)}')
+    d = dict(PRESETS[preset]) if preset else {}
+    d.update(json.loads(Path(path).read_text()) if path else {})
     d.update({k:v for k,v in (overrides or {}).items() if v is not None})
     unknown = set(d) - {f.name for f in fields(Config)}
     if unknown: raise ValueError(f'unknown configuration keys: {sorted(unknown)}')

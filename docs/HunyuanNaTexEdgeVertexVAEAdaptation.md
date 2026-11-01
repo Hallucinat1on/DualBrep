@@ -641,7 +641,7 @@ VAE 自编码评测中，用 GT field encoder 的 posterior mean/sample 代替 F
 5. 误差报告从独立验证统计得到，`strict_error_bound=False`；不能把样本 p95 声称为全域严格界。
 6. 缓存标识包含模型权重、latent、条件 SDF、编码版本与 normalization。
 
-当前 `CallableFieldProvider(normalized=True)` 只是乘 `clip_values` 的线性反归一化，**不能处理 log 编码**。应在 callable 内完成 log 逆变换后以 metric 模式接入，或新增专门 adapter。
+旧 `CallableFieldProvider(normalized=True)` 只支持线性尺度，现已删除。当前 `CallableUDFProvider` 必须直接返回 metric E/V；log 编码需在 decoder 中逆变换。`ProductionUDFProvider` 可接生产连续适配器，后处理直接使用 condition 网格。
 
 场值接口要求非负，因此要区分对外 value 与用于局部拟合的未裁剪 residual。若发生负值裁剪，该点不能再无条件返回“裁剪值有效、梯度也有效”；需设置有效性／裁剪标记，并对细化路径作相应适配。
 

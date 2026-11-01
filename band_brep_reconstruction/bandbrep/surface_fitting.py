@@ -1,10 +1,10 @@
 """Analytic initialization and hard-equality tensor-spline fitting; edges stay frozen."""
+from .surface_mesh import evaluate_batched
 from dataclasses import dataclass
 import numpy as np
 from scipy import linalg
 from scipy.interpolate import BSpline
 from scipy.optimize import least_squares
-from scipy.spatial import cKDTree
 from .schemas import require,ReconstructionError
 from .surface_mesh import normals
 
@@ -33,12 +33,9 @@ class FacePatch:
     def uv(self,points,ordered=False):
         p=np.asarray(points,float);d=self.data
         if self.kind in ('plane','bspline'):
-            if self.kind=='bspline' and 'projection_xyz' in d:
-                ids=cKDTree(d['projection_xyz']).query(p)[1]
-                uv=d['projection_uv'][ids].copy()
-            else:uv=np.column_stack(((p-d['origin'])@d['x'],(p-d['origin'])@d['y']))
+            uv=np.column_stack(((p-d['origin'])@d['x'],(p-d['origin'])@d['y']))
             if self.kind=='bspline':
-                if 'projection_xyz' not in d:uv=(uv-d['uv_lo'])/d['uv_extent']
+                uv=(uv-d['uv_lo'])/d['uv_extent']
                 uv=np.clip(uv,0,1)
                 for _ in range(5):
                     base=self.evaluate(uv);h=1e-4
@@ -192,22 +189,15 @@ def revolution_candidates(points,normal,related,boundaries):
     return out
 
 
-def fit_general_spline(face,points,boundaries,normal,cfg,initial=None):
+def fit_general_spline(face,points,boundaries,normal,cfg):
     mean=points.mean(axis=0);_,_,vt=np.linalg.svd(points-mean,full_matrices=False);x,y=vt[:2];axis=np.cross(x,y)
     uv=np.column_stack(((points-mean)@x,(points-mean)@y));bu=np.column_stack(((boundaries-mean)@x,(boundaries-mean)@y))
     lo=np.minimum(uv.min(axis=0),bu.min(axis=0));hi=np.maximum(uv.max(axis=0),bu.max(axis=0));extent=np.maximum(hi-lo,1e-8)
     uv=(uv-lo)/extent;bu=(bu-lo)/extent
-    projection=None
-    if initial is not None:
-        grid=np.asarray(initial,float);nu,nv=grid.shape[:2]
-        gu,gv=np.meshgrid(np.linspace(0,1,nu),np.linspace(0,1,nv),indexing='ij')
-        projection=(grid.reshape(-1,3),np.column_stack((gu.ravel(),gv.ravel())))
-        tree=cKDTree(projection[0]);uv=projection[1][tree.query(points)[1]];bu=projection[1][tree.query(boundaries)[1]]
     last=None
     for n in range(cfg.spline_controls,cfg.max_spline_controls+1,2):
         knots=np.r_[np.zeros(4),np.linspace(0,1,n-2)[1:-1],np.ones(4)]
         data=dict(origin=mean,x=x,y=y,axis=axis,uv_lo=lo,uv_extent=extent,knots=knots,degree=3)
-        if projection is not None:data.update(projection_xyz=projection[0],projection_uv=projection[1])
         try:
             for _ in range(cfg.uv_iterations):
                 A=tensor_basis(uv,knots);B=tensor_basis(bu,knots)
@@ -220,16 +210,15 @@ def fit_general_spline(face,points,boundaries,normal,cfg,initial=None):
         except ReconstructionError as exc:last=exc
     raise ReconstructionError('surface_boundary_incompatible','Spline budget cannot satisfy fixed boundary',{'face':face,'cause':str(last)})
 
-def initialize_face_surfaces(mesh,face_labels,graph,curves,provider,cfg,face_model=None):
+def initialize_face_surfaces(mesh,face_labels,graph,curves,provider,cfg):
     regions=sample_face_regions(mesh,face_labels,cfg);patches={}
-    model_grids=face_model.predict(regions) if face_model is not None else {}
     for face in range(graph.face_count):
         require(face in regions,'missing_face_region','No sampled region for face',face=face)
         p,n=regions[face]
         # Core triangles provide face-interior samples; shared curves supply boundaries.
         # Initialize from trustworthy interior samples, with frozen boundaries
         # supplying the full trim extent; never fit leaked points across a sharp edge.
-        fv=provider.evaluate(p).values
+        fv=evaluate_batched(provider,p)
         safe=fv[:,1]>cfg.tau_edge*.5 if provider.presence()[0]=='present' else np.ones(len(p),bool)
         if np.sum(safe)>=20:p,n=p[safe],n[safe]
         related=[curves[e.id] for e in graph.edges if face in e.faces]
@@ -261,8 +250,8 @@ def initialize_face_surfaces(mesh,face_labels,graph,curves,provider,cfg,face_mod
             if accepted:accepted=accepted[:1]
         if accepted:patch=next((v for _,v,_ in accepted if v.kind=='plane'),min(accepted,key=lambda z:z[0])[1]);patch.id=face
         else:
-            require(len(boundary)>0,'surface_initialization_failed','Unbounded nonanalytic face needs explicit UV/model initialization')
-            patch=fit_general_spline(face,p,boundary,n,cfg,model_grids.get(face))
+            require(len(boundary)>0,'surface_initialization_failed','Unbounded nonanalytic face needs explicit UV initialization')
+            patch=fit_general_spline(face,p,boundary,n,cfg)
         patch.normal=n[0].copy();patch.data['orientation_point']=p[0].copy()
         maximum=0.
         for curve in related:

@@ -1,3 +1,4 @@
+from .surface_mesh import evaluate_batched
 import numpy as np
 from scipy.optimize import least_squares
 from .schemas import VertexNode,require
@@ -26,16 +27,19 @@ def localize_vertices(provider, bands, topology, cfg):
         require(len(votes)>0,'vertex_gradient_invalid','No usable vertex votes',vertex=domain['id'])
         v=np.median(votes,axis=0)
         radius=max(cfg.localization_tolerance*8,min(cfg.tau_vertex*.2,.01))
-        for _ in range(4):
+        center=v.copy();residual=1e100
+        for _ in range(8):
             direction=rng.normal(size=(120,3));direction/=np.linalg.norm(direction,axis=1)[:,None]
             shell=v+direction*radius*rng.uniform(.5,1,(len(direction),1))
-            ds=provider.evaluate(shell).values[:,2]
+            if hasattr(provider,"domain_mask") and not provider.domain_mask(shell).all():
+                radius*=.5;continue
+            ds=evaluate_batched(provider,shell)[:,2]
             center,residual,rank=distance_center(shell,ds,v)
             if residual<=cfg.localization_tolerance and np.linalg.norm(center-v)<radius:break
             radius*=.5;v=center
         require(residual<=cfg.localization_tolerance,'vertex_mixed_support',
                 'Vertex domain does not support a single distance center',vertex=domain['id'],residual=residual)
-        values=provider.evaluate(center[None]).values[0]
+        values=evaluate_batched(provider,center[None])[0]
         require(values[2]<=cfg.localization_tolerance and values[1]<=cfg.localization_tolerance and abs(values[0])<=cfg.feature_sdf_limit,
                 'vertex_geometry_invalid','Localized vertex fails field checks',vertex=domain['id'],values=values.tolist())
         candidates.append(VertexNode(domain['id'],center,residual,radius))

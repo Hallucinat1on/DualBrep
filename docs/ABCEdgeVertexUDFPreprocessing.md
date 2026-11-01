@@ -130,7 +130,6 @@ manifest 按 ABC 源文档分组、处理字节重复并固定 split。构建逐
 
 - 原 `edge_vertex_preprocessing/evudf` 的 `fields.npz / metadata.json / quality.json`、配置和命令已退役；数据不原地转换，历史输出保留。
 - 根目录 `prepare_implicit.py` 的 Voronoi UDF 仅服务原 DualBrep 模型复现，不用于新 E/V 数据。
-- `band_brep_reconstruction/bandbrep/vendor/oracle` 是旧版本冻结查询代码，供历史重建和实验使用，不是新的生产数据生成器；来源见[记录](../band_brep_reconstruction/PROVENANCE.md)。
-- 当前重建 CLI 的 `sampled` provider 仍读取历史 NPZ 输入，生产点池没有自动接入；生产预测场的 provider 适配须单独开发，不能只重命名通道或文件假装兼容。
-
+- 后处理现直接接收生产 condition 网格与连续预测 E/V，内部网格 SDF 复用生产 `MeshSDFOracle`，默认 L5 加密。`vendor/oracle`、旧 NPZ 插值与 MC 输入已删除，见[后处理入口](../band_brep_reconstruction/README.md)。
+- `ProductionUDFProvider` 接入外部生产模型适配器；点池和离散预测交换文件用于训练/评估，不能替代任意新位置的连续 E/V 查询。
 回归与使用入口见[模块 README](../veudf/README.md#入口与验证)。历史数据和实验范围继续见[实验主文档](ThreeFieldReconstructionExperiments.md#data-and-metrics)，旧设计与 EMAP 核查原文仍可从[文档归档](archive/20261031_document_sources.json.gz)追溯。

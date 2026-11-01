@@ -14,9 +14,9 @@
 
 使用入口：[重建模块 README](../band_brep_reconstruction/README.md)、[生产数据模块 README](../veudf/README.md)。
 
-生产目录为 `/opt/data/private/yihengxu/Hunyuan3D/veudf`，本仓库 `veudf/` 按源码哈希同步；新功能先在生产目录开发，使用 `python scripts/sync_veudf.py --check / --apply` 核对或同步（两参数择一）。历史数据和冻结重建 oracle 保留各自版本，不作为新生成入口。
+生产目录为 `/opt/data/private/yihengxu/Hunyuan3D/veudf`，本仓库 `veudf/` 按源码哈希同步；新功能先在生产目录开发，使用 `python scripts/sync_veudf.py --check / --apply` 核对或同步（两参数择一）。历史数据保留各自版本；旧重建 oracle 与 MC 实验入口已移除，新后处理直接使用网格、连续 E/V 和默认 L5。
 
-建议先读[当前重建阶段](BandLabelTopologyRecovery.md#2-阶段代码与产物)与[当前数据字段](ABCEdgeVertexUDFPreprocessing.md#6-当前文件与字段)，再按需查[F30 结果](ThreeFieldReconstructionExperiments.md#f30-results)、[网格加密结果](MeshDensificationUDFExperimentReport.md)、[面分割分析](ThreeFieldReconstructionExperiments.md#segmentation-failures)和[后续实验](ThreeFieldReconstructionExperiments.md#next-experiments)。原 GVD-UDF、真实有限边／顶点距离、直接 CAD SDF 和条件网格插值 SDF 的语义不能互换。
+建议先读[当前重建阶段](BandLabelTopologyRecovery.md#2-阶段代码与产物)与[当前数据字段](ABCEdgeVertexUDFPreprocessing.md#6-当前文件与字段)，再按需查[F30 结果](ThreeFieldReconstructionExperiments.md#f30-results)、[网格加密结果](MeshDensificationUDFExperimentReport.md)、[面分割分析](ThreeFieldReconstructionExperiments.md#segmentation-failures)和[后续实验](ThreeFieldReconstructionExperiments.md#next-experiments)。原 GVD-UDF、真实有限边/顶点距离、直接 CAD SDF 和当前 mesh SDF 的语义不能互换。
 
 2026-10-31 整理将原重建详解合并到隔离带文档，原面分割分析合并到实验主文档，原加密计划合并到加密报告。合并前 11 份 docs 文档及两个模块 README 的完整原文保存在[归档](archive/20261031_document_sources.json.gz)，[清单](archive/20261031_document_sources.manifest.json)记录路径、字节数和 SHA-256。归档中的日期、计划和旧接口保留历史语义，不作为当前使用指南。
 

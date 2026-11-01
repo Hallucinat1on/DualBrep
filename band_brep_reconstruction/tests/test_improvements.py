@@ -2,7 +2,7 @@ import unittest
 import numpy as np
 from bandbrep.config import Config
 from bandbrep.curve_fitting import fit_fixed_arc, CurveRecord
-from bandbrep.field_provider import CallableFieldProvider
+from helpers import AnalyticFields
 from bandbrep.vertex_domains import local_vertex_domains
 from bandbrep.surface_fitting import revolution_candidates, frame
 from bandbrep.occ_assembly import shift_periods
@@ -22,7 +22,7 @@ class ImprovementTests(unittest.TestCase):
         v=np.array([[0.,0.,0.],[.02,0.,0.]])
         fn=lambda p:np.column_stack((np.zeros(len(p)),np.abs(p[:,1])+np.abs(p[:,2]),
                                      np.linalg.norm(p[:,None]-v[None],axis=2).min(axis=1)))
-        provider=CallableFieldProvider(fn,('present','present'))
+        provider=AnalyticFields(fn,('present','present'))
         x=np.linspace(-.03,.05,161);points=np.column_stack((x,np.zeros_like(x),np.zeros_like(x)))
         values=fn(points);band=np.ones(len(points),bool)
         labels,centers,report=local_vertex_domains(points,values,band,band,provider,Config(tau_vertex=.02))

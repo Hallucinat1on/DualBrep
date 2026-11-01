@@ -16,6 +16,8 @@ python -m pip install -e './veudf[jobs,postprocess,test]'
 python -m veudf.cli.build_dataset --help
 ```
 
+新 E/V 后处理入口见 [band_brep_reconstruction](band_brep_reconstruction/README.md)：直接读取预处理网格与连续两个 UDF，默认 L5 加密，模型无需输出 SDF。
+
 下文原 DualBrep 的安装、模型、`prepare_implicit.py` 和 Voronoi 数据命令保留论文复现用途，不能生成当前生产 E/V 点池。新数据规范、筛选和迁移边界见[生产数据处理](docs/ABCEdgeVertexUDFPreprocessing.md)。
 
 Boundary Representation (B-rep) is the dominant data format in Computer-Aided Design (CAD), prized

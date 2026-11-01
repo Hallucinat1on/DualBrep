@@ -5,7 +5,9 @@ from pathlib import Path
 import numpy as np
 from . import __version__
 from .schemas import write_json,jsonable,require,SurfaceMesh,BandState,VertexNode
-from .surface_mesh import extract_surface
+from .surface_mesh import validate_mesh
+from .field_provider import MeshFieldProvider
+from .mesh_densification import RefinementConfig, densify_surface_mesh
 from .bands import build_bands
 from .face_seeds import extract_face_seeds
 from .topology import recover_topology
@@ -17,10 +19,11 @@ from .postprocess import orient_boundaries
 from .surface_fitting import initialize_face_surfaces
 
 
-def reconstruct(provider,cfg,output_dir,face_model=None,resume=False):
+def reconstruct(mesh,udf,cfg,output_dir,resume=False):
+    """Recover B-rep from a closed normalized mesh and continuous metric E/V."""
     cfg.validate();out=Path(output_dir);out.mkdir(parents=True,exist_ok=True)
     from .cache import cache_key,file_hash,load_graph,load_records,load_topology
-    key,cache_input=cache_key(provider,cfg,face_model)
+    key,cache_input=cache_key(mesh,udf,cfg)
     prior=None
     if (out/'run.json').exists():
         require(resume,'output_exists','Use --resume for matching immutable caches or a new directory')
@@ -31,15 +34,14 @@ def reconstruct(provider,cfg,output_dir,face_model=None,resume=False):
         if prior['status']=='solid_validated':return prior
     accepted={v['stage']:v['report'] for v in (prior or {}).get('stages',[])}
     artifacts=dict((prior or {}).get('artifacts',{}))
-    run={'version':__version__,'config':cfg.to_dict(),'provider':provider.fingerprint,'presence':provider.presence(),
-         'status':'running','stages':[],'cache_key':key,'cache_inputs':cache_input,'artifacts':artifacts,'field_error':provider.error,'strict_field_error_bound':provider.strict_error_bound}
-    if cfg.save_queries:
-        from .query_recording import RecordingProvider
-        provider=RecordingProvider(provider,out/'queries',cfg.query_batch_size)
+    run={'version':__version__,'config':cfg.to_dict(),'udf':udf.fingerprint,
+         'status':'running','stages':[],'cache_key':key,'cache_inputs':cache_input,'artifacts':artifacts}
+    provider=None
     start=time.monotonic();stage='initialization';write_json(out/'run.json',run)
     def finish(status,objects=None):
         if hasattr(provider,'flush'):provider.flush()
-        run.update(status=status,elapsed_seconds=time.monotonic()-start);write_json(out/'run.json',run)
+        run.update(status=status,elapsed_seconds=time.monotonic()-start,query_report=provider.query_report)
+        write_json(out/'run.json',run)
         write_json(out/'quality.json',{'status':status,'stages':run['stages'],'complete_solid':status=='solid_validated'})
         return objects or run
     def mark(name,report):
@@ -50,18 +52,27 @@ def reconstruct(provider,cfg,output_dir,face_model=None,resume=False):
         run['stages'].append({'stage':name,'elapsed_seconds':time.monotonic()-start,'report':report});write_json(out/'run.json',run)
         print(f'[{name}] {json.dumps(jsonable(report),ensure_ascii=False)}',flush=True)
     try:
-        base=getattr(provider,'provider',provider)
-        if getattr(base,'normalized',False):
-            for channel,tau,present in ((1,max(cfg.tau_edge,cfg.face_threshold2),provider.presence()[0]),(2,cfg.tau_vertex,provider.presence()[1])):
-                if present=='present':require(tau+cfg.field_error<base.clips[channel],
-                    'saturated_band_threshold','Band threshold reaches a clipped UDF plateau; reduce threshold / supply metric unsaturated field')
-        if hasattr(provider,'validation'):write_json(out/'field_validation.json',provider.validation)
-        stage='surface'
-        if stage in accepted:
-            a=np.load(out/'sdf_surface.npz');mesh=SurfaceMesh(a['vertices'],a['triangles'],accepted[stage])
-        else:mesh=extract_surface(provider,cfg)
-        np.savez_compressed(out/'sdf_surface.npz',vertices=mesh.vertices,triangles=mesh.triangles)
+        stage='mesh'
+        mesh=validate_mesh(mesh,cfg)
+        provider=MeshFieldProvider(mesh,udf,cfg)
+        run.update(provider=provider.fingerprint,presence=provider.presence(),
+                   presence_support=provider.presence_support,normalization=provider.normalization)
+        if cfg.save_queries:
+            from .query_recording import RecordingProvider
+            provider=RecordingProvider(provider,out/'queries',cfg.query_batch_size)
+        np.savez_compressed(out/'input_mesh.npz',vertices=mesh.vertices,triangles=mesh.triangles)
         mark(stage,mesh.report)
+        stage='refinement'
+        if stage in accepted:
+            a=np.load(out/'working_mesh.npz')
+            mesh=SurfaceMesh(a['vertices'],a['triangles'],{'refinement':accepted[stage]})
+        else:
+            settings=RefinementConfig(target_edge=cfg.refinement_target_edge,
+                rho_edge=cfg.refinement_rho_edge,rho_vertex=cfg.refinement_rho_vertex,
+                max_rounds=cfg.refinement_max_rounds,max_triangles=cfg.max_triangles,query_batch=cfg.query_batch_size)
+            mesh,parent,report=densify_surface_mesh(mesh,provider,settings)
+            np.savez_compressed(out/'working_mesh.npz',vertices=mesh.vertices,triangles=mesh.triangles,parent_triangles=parent)
+        mark(stage,mesh.report['refinement'])
         stage='bands'
         if stage in accepted:
             a=np.load(out/'bands.npz')
@@ -114,7 +125,7 @@ def reconstruct(provider,cfg,output_dir,face_model=None,resume=False):
         write_json(out/'cad_graph.json',graph);mark(stage,{'face_cycles':{f:len(c) for f,c in graph.cycles.items()}})
         stage='surfaces'
         if stage in accepted:patches=load_records(out/'face_patches.json','patch')
-        else:patches=initialize_face_surfaces(mesh,seeds,graph,curves,provider,cfg,face_model)
+        else:patches=initialize_face_surfaces(mesh,seeds,graph,curves,provider,cfg)
         write_json(out/'face_patches.json',patches);mark(stage,{i:p.report for i,p in patches.items()})
         if cfg.stop_after=='surfaces':return finish('surfaces_ready')
         stage='cad'

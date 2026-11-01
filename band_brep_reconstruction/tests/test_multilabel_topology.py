@@ -5,7 +5,7 @@ from bandbrep.schemas import BandState, SurfaceMesh
 from bandbrep.bands import build_bands
 from bandbrep.config import Config,load_config
 from bandbrep.face_seeds import extract_face_seeds
-from bandbrep.field_provider import CallableFieldProvider
+from helpers import AnalyticFields
 from bandbrep.topology import collect_labels
 
 
@@ -61,7 +61,7 @@ class MultilabelTests(unittest.TestCase):
         self.assertEqual(t.node_labels(4),({0,1,2},{0}))
     def test_nested_vertex_mask_and_triangle_center_core(self):
         mesh=SurfaceMesh(np.array([[0.,0,0],[1,0,0],[0,1,0]]),np.array([[0,1,2]]))
-        p=CallableFieldProvider(lambda x:np.column_stack((x[:,2],np.full(len(x),.1),np.zeros(len(x)))),presence=('present','present'))
+        p=AnalyticFields(lambda x:np.column_stack((x[:,2],np.full(len(x),.1),np.zeros(len(x)))),presence=('present','present'))
         _,b=build_bands(mesh,p,Config(face_filter_size=1));self.assertFalse(b.vertex_band.any())
         labels,_=extract_face_seeds(mesh,b,p,Config());np.testing.assert_array_equal(labels,[0])
         self.assertEqual(b.points.shape,(1,3));np.testing.assert_allclose(b.points,[[1/3,1/3,0]])

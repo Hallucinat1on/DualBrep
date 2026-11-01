@@ -234,15 +234,8 @@ L5剩余13个失败分为：准备5例（超三角形3、原输入退化2）；�
 
 必报指标包括网格边长／面积分位数与几何不变性、全部查询与重复请求、面缺失／拆分／混合、E–F/V–E 关联、几何及 STEP、配对新增／退化、准备与重建时间和峰值内存。有限采样距离不是严格 Hausdorff 或连续拓扑认证。
 
-### 当前脚本与复查命令
+### 历史驱动与当前入口
 
-主 CLI `reconstruct.py` 没有加密参数；实验由 `benchmarks/run_mesh_density_experiments.py` 独立准备、缓存并调用重建阶段。与原生条件场相关的 `alignment_grid.py / alignment_fields.py` 也是 benchmarks 辅助模块。
+本批次使用的 `benchmarks/run_mesh_density_experiments.py`、`alignment_grid.py`、`alignment_fields.py` 随 0.4.0 的旧 MC 输入退役而删除。历史驱动从对应 Git 版本或批次保存的源码快照获取，使用冻结环境与缓存；不能用当前主库续跑旧结果。
 
-在 `band_brep_reconstruction/` 中复查已有批次：
-
-```bash
-python benchmarks/run_mesh_density_experiments.py --status --output outputs/mesh_density_20261028_v2
-python benchmarks/run_mesh_density_experiments.py --report --output outputs/mesh_density_20261028_v2
-```
-
-`--status` 读取状态；`--report` 重新生成输出目录内的 `REPORT.md / metrics.csv / analysis.json`，不自动覆盖本文的人工补充分析。新实验使用新目录，并按脚本的 `--initialize / --run` 流程重新冻结输入与代码身份；不能在旧目录修改策略后续跑。初始化依赖旧 F30 参考缓存，缺失时不能仅凭源 STEP 命令假定可完整复现。
+当前主 CLI 直接读取预处理网格，默认执行上述 L5 规则；配置使用 `refinement_*`，详见[新入口](../band_brep_reconstruction/README.md)。既有 `outputs/mesh_density_20261028_v2/` 及其中报告未修改，新输入与学习场必须另建输出并重新验证。

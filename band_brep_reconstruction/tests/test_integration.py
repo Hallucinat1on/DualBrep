@@ -1,67 +1,62 @@
-import importlib.util
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
+import numpy as np
 from bandbrep.config import Config
-from bandbrep.demo_fields import cylinder,box,sphere_with_bore
 from bandbrep.reconstruct import reconstruct
+from bandbrep.schemas import ReconstructionError
+from helpers import box,cylinder,hollow_sphere,sphere_with_bore
 
-@unittest.skipUnless(importlib.util.find_spec('OCC') and importlib.util.find_spec('mcubes'),'OCC/PyMCubes required')
+
 class PipelineTests(unittest.TestCase):
-    def check_shape(self,provider,expected,resolution=49):
+    def test_box_resume_vertices_to_step(self):
+        mesh,udf=box()
+        # A native twelve-triangle cube needs more than L5's four default rounds.
+        cfg=Config(refinement_max_rounds=12,face_samples=400,save_queries=False,stop_after='vertices')
         with tempfile.TemporaryDirectory() as tmp:
-            # These fixtures isolate unchanged geometry/CAD stages with resolved bands.
-            # Default narrow-threshold behavior is tested separately below.
-            cfg=Config(resolution=resolution,face_samples=400,save_queries=False,
-                       face_threshold1=.025,face_threshold2=.05,face_filter_size=1)
-            result=reconstruct(provider,cfg,tmp);g=result['graph']
-            self.assertEqual((g.face_count,len(g.edges),len(g.vertices)),expected)
-            self.assertEqual(json.loads((Path(tmp)/'run.json').read_text())['status'],'solid_validated')
+            result=reconstruct(mesh,udf,cfg,tmp)
+            self.assertEqual(result['status'],'vertices_ready')
+            result=reconstruct(mesh,udf,replace(cfg,stop_after='solid'),tmp,resume=True)
+            g=result['graph']
+            self.assertEqual((g.face_count,len(g.edges),len(g.vertices)),(6,12,8))
+            self.assertEqual(result['report']['status'],'solid_validated')
             self.assertTrue((Path(tmp)/'reconstruction.step').exists())
-            return g
-    def test_cylinder_full_step(self):self.check_shape(cylinder(),(3,2,0))
-    def test_box_shared_vertices_full_step(self):self.check_shape(box(),(6,12,8),65)
-    def test_sphere_bore_same_pair_two_loops_full_step(self):
-        graph=self.check_shape(sphere_with_bore(),(2,2,0),65)
-        self.assertEqual(graph.edges[0].faces,graph.edges[1].faces)
-    def test_cavity_shells_without_edges(self):
-        from bandbrep.demo_fields import hollow_sphere
-        self.check_shape(hollow_sphere(),(2,0,0),65)
-    def test_smooth_split_sphere_retains_boundary(self):
-        from bandbrep.demo_fields import split_sphere
-        self.check_shape(split_sphere(),(2,1,0),65)
-    def test_resume_seeds_to_graph_without_hidden_topology(self):
-        from bandbrep.demo_fields import hollow_sphere
-        from dataclasses import replace
-        with tempfile.TemporaryDirectory() as tmp:
-            provider=hollow_sphere();cfg=Config(resolution=33,stop_after='seeds',save_queries=False)
-            reconstruct(provider,cfg,tmp)
-            result=reconstruct(provider,replace(cfg,stop_after='graph'),tmp,resume=True)
-            self.assertEqual(result['status'],'logical_graph_ready')
-            graph=json.loads((Path(tmp)/'incidence.json').read_text());self.assertEqual(graph['face_count'],2);self.assertEqual(graph['edges'],[])
+            a=np.load(Path(tmp)/'input_mesh.npz');np.testing.assert_array_equal(a['vertices'],mesh.vertices)
+            self.assertFalse((Path(tmp)/'sdf_surface.npz').exists())
+            self.assertEqual(json.loads((Path(tmp)/'run.json').read_text())['stages'][0]['stage'],'mesh')
+            # Refinement preserves the original geometry, with each child tied to a parent.
+            a=np.load(Path(tmp)/'working_mesh.npz');self.assertEqual(len(a['triangles']),len(a['parent_triangles']))
 
-    def test_coarse_segmentation_errors_are_recorded_not_repaired(self):
+    def test_cylinder_full_step(self):
+        mesh,udf=cylinder()
         with tempfile.TemporaryDirectory() as tmp:
-            result=reconstruct(box(),Config(resolution=49,stop_after='graph',save_queries=False),tmp)
-            data=json.loads((Path(tmp)/'incidence.json').read_text())
-            self.assertEqual(result['status'],'logical_graph_ready')
-            self.assertEqual(data['face_count'],6)
-            self.assertEqual(result['stages'][1]['report']['segmentation']['method'],'dualbrep_two_pass_triangle_components')
-            self.assertFalse((Path(tmp)/'arrivals.npz').exists())
-            self.assertFalse((Path(tmp)/'interfaces.npz').exists())
+            result=reconstruct(mesh,udf,Config(refinement_max_rounds=12,face_samples=400,save_queries=False),tmp)
+            g=result['graph'];self.assertEqual((g.face_count,len(g.edges),len(g.vertices)),(3,2,0))
+            self.assertEqual(result['report']['status'],'solid_validated')
+
+    def test_cavity_absent_fields_and_resume(self):
+        mesh,udf=hollow_sphere();cfg=Config(stop_after='seeds',save_queries=False)
+        with tempfile.TemporaryDirectory() as tmp:
+            reconstruct(mesh,udf,cfg,tmp)
+            result=reconstruct(mesh,udf,replace(cfg,stop_after='solid'),tmp,resume=True)
+            g=result['graph'];self.assertEqual((g.face_count,len(g.edges),len(g.vertices)),(2,0,0))
+            self.assertEqual(result['report']['status'],'solid_validated')
+
+    def test_l5_round_limit_writes_failure(self):
+        mesh,udf=box()
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(ReconstructionError) as ctx:reconstruct(mesh,udf,Config(save_queries=False),tmp)
+            self.assertEqual(ctx.exception.code,'refinement_target_unmet')
+            report=json.loads((Path(tmp)/'quality.json').read_text())
+            self.assertEqual(report['failed_stage'],'refinement');self.assertEqual(report['status'],'failed')
             self.assertFalse((Path(tmp)/'reconstruction.step').exists())
 
-    def test_resume_localized_vertices_to_full_step(self):
-        from dataclasses import replace
+    def test_same_face_pair_two_loops_step(self):
+        mesh,udf=sphere_with_bore()
         with tempfile.TemporaryDirectory() as tmp:
-            cfg=Config(resolution=65,face_samples=400,stop_after='vertices',save_queries=False,
-                       face_threshold1=.025,face_threshold2=.05,face_filter_size=1)
-            provider=box();result=reconstruct(provider,cfg,tmp)
-            self.assertEqual(result['status'],'vertices_ready')
-            self.assertFalse((Path(tmp)/'curves.json').exists())
-            self.assertFalse((Path(tmp)/'cad_graph.json').exists())
-            result=reconstruct(provider,replace(cfg,stop_after='curves'),tmp,resume=True)
-            self.assertEqual(result['status'],'curves_ready')
-            result=reconstruct(provider,replace(cfg,stop_after='solid'),tmp,resume=True)
+            result=reconstruct(mesh,udf,Config(refinement_max_rounds=12,face_samples=400,save_queries=False),tmp)
+            g=result['graph'];self.assertEqual((g.face_count,len(g.edges),len(g.vertices)),(2,2,0))
+            self.assertEqual(g.edges[0].faces,g.edges[1].faces)
             self.assertEqual(result['report']['status'],'solid_validated')

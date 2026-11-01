@@ -1,166 +1,93 @@
-# 独立三场 B-rep 重建模块
+# 网格与 E/V 场的 B-rep 后处理
 
-版本 0.3.0，文档与代码核对：2026-10-31。算法和阶段说明见[隔离带重建文档](../docs/BandLabelTopologyRecovery.md)。复制本目录即可迁移；运行时不导入上级 DualBrep 或预处理项目的代码。复用代码位于 `bandbrep/vendor/`，来源见 [PROVENANCE.md](PROVENANCE.md)。
-
-数据生产已切换到 [veudf](../veudf/README.md)，以外部生产目录为唯一来源。本模块内部 `vendor/oracle` 是历史实验的冻结查询副本，不再承担新数据生产。当前 `--provider sampled` 仍读取旧 NPZ，生产 `.npy` 点池和预测场尚需单独 provider 适配；本次迁移不改变历史重建算法或缓存身份。
-
-## 当前流程
-
-1. SDF 提取固定表面网格，在三角形中心查询 `[sdf, dE, dV]`。
-2. 复制 DualBrep 两阶段核心提取：第一阶段保留 `dE >= 0.005`，过滤小于 10 个三角形或平均 UDF 不大于 0.003 的分量；第二阶段在父分量内用 `dE >= 0.01` 拆分，仅当至少两个子分量满足大小条件时替换父核心。
-3. 最终核心仅作标签来源。基础 `distance_only` 配置只将第一阶段低距离点、成功拆分时排除的低距离点组成边带，大小/均值过滤区不传播；推荐的 `noncore` 配置将全部非核心用于传播，但过滤原因 3/4/5 仍不作几何支撑。阈值顶点带为 `V = E & (dV < tau_vertex)`；推荐配置改用局部候选顶点域。普通带为 `E & ~V`。
-4. 普通带组件收集所有相邻面标签，得到独立 edge_id。相同邻面的一对孔口圆环仍是两条独立边。
-5. 顶点域收集实际接触的 edge_id 和所有面标签，域内所有节点读取完整集合。禁止顶点域向普通带反向转发；后来标签不会丢失。
-6. 输出无方向 E–F、V–E、V–F 关联；此时不要求端点使用次数、面环或方向。
-7. v-UDF 距离中心拟合共享顶点；e-UDF 定位各边支持点，按几何组织曲线并固定共享端点拟合。
-8. 曲线阶段开始确定闭合/自环与端点使用，后处理补齐边界方向和面环；面内部从面核心采样，以 SDF 校验，在固定共享曲线约束下拟合曲面。
-9. 补建 seam/pcurve，装配共享 OCC 实体，导出并读回 STEP。
-
-`recommended` 预设在第 3、4、7、8、9 步启用了局部顶点域、短边推断、圆弧与回转面候选、周期面切口规划；各项见下文"配置与预设"。
-
-多标签以组件引用存储：`BandTopology.node_labels(node)` 返回每个图节点完整的面/边集合，无需复制稠密 face×node 矩阵。`topology_labels.npz` 与 `incidence.json` 一起定义全部标签和成员支持。
-
-已删除旧最短路竞争、等代价界线提取、前置端口实例化、近带反复细分和多阈值核心审计。旧模式与旧配置项不兼容，新配置中不再接受 `max_band_edge`、`max_refinements`、`band_refinement`、`face_seed_sampling`、`stability_factors`、`require_stability`、`verify_band_stability`。历史统计和成功结果保留，部分旧缓存已清理，不能作为新版 resume 缓存。
+版本 0.4.0，2026-11-01。输入为**预处理得到的闭合网格，以及可连续查询的两个 metric UDF**。默认先在低 UDF 区域执行 L5 加密，然后恢复面核心、拓扑关联、共享顶点和曲线，拟合曲面并装配 STEP。[算法与产物](../docs/BandLabelTopologyRecovery.md)、[代码来源](PROVENANCE.md)。
 
 ## 安装
 
-```bash
-cd band_brep_reconstruction
-python -m pip install -e .
-```
-
-完整 CAD 装配需要 `pythonocc-core`；可使用包含它的 conda 环境。可选 `libigl` 用于 mesh_fast CAD SDF，`torch` 用于三场网络与 DualBrep 面初始化器。
+在仓库根目录、Python 3.10+ 环境中执行：
 
 ```bash
+python -m pip install -e ./veudf -e './band_brep_reconstruction[models,test]'
+# 完整 STEP 装配还需要 OCC；图阶段不需要。
 conda install -c conda-forge pythonocc-core=7.7
-python -m pip install -r requirements.txt
 ```
+
+`veudf` 是[生产源码同步副本](../veudf/README.md)，提供与预处理相同的网格 AABB 距离和绕数符号。无需 PyMCubes。生产模型 bundle 推理另外需要生产环境中的 `hy3dshape`。
 
 ## 输入与运行
 
-通道顺序固定 `[sdf, dE, dV]`。坐标和距离采用一致 metric 尺度；截断归一化由 provider 还原。SDF 内负外正。seam 从生成目标排除；不同面之间的相切/共面边仍保留。无生成顶点的闭合边是正常输入。
+网格可传 `condition/`、包含它的资产目录，或已处于模型坐标系的三角网格文件。condition 包含 `vertices.npy`、`triangles.npy`、`meta.json`；读取时检查版本、dtype 和 mesh hash。坐标范围为 `[-1,1]`，不自动重新归一化；网格必须闭合、方向一致、没有零面积面，腔体内壳方向相反。
+
+模型应在同一坐标系及距离尺度上查询 `[dE,dV]`。固定顶点的预测数组不足以支持加密、顶点壳层和曲线连续检查。截断归一化的模型需要在 decoder 中还原 metric 距离；负值、无效值和饱和平台不能作为有效零距离。
+
+```python
+from bandbrep import Config, CallableUDFProvider
+from bandbrep.surface_mesh import load_mesh
+from bandbrep.reconstruct import reconstruct
+
+mesh = load_mesh('/data/asset/condition')
+udf = CallableUDFProvider(
+    decode_metric_ev,                  # [N,3] -> [N,2]，也可返回带有效/饱和 mask 的对象
+    fingerprint='weights-and-latent-sha256',
+    gradient=metric_ev_gradient,        # 可省略；省略后采用中心差分
+    band_width=.02,                    # 必须与模型训练带一致
+)
+result = reconstruct(mesh, udf, Config(), '/data/new_output')
+```
+
+`gradient(xyz, channel)` 接收 `0=E, 1=V`，返回 `[N,3]` 梯度和 `[N]` 有效 mask。调用者负责让指纹覆盖权重、latent、条件几何及编码策略。省略 presence 时，在默认 393216 个确定性网格表面样本上，以距离低于 0.005 的支撑数至少 16 推断；它不需要独立预测头，也不读取 GT 拓扑。
+
+生产 `hy3dshape.inference.pipeline.FieldProviderAdapter` 可用 `ProductionUDFProvider(adapter)` 接入；只使用其 E/V 及梯度，验证其 condition 与输入网格完全一致。adapter 必须选择 `sdf_source='condition'`。
+
+CLI 支持两种连续模型来源：
 
 ```bash
-# 推荐：使用经独立集验证的配置预设
-python reconstruct.py --provider cad --step /path/model.step \
-  --sdf-backend mesh_fast --preset recommended --output outputs/model_solid
+# 已冻结 latent/条件的 TorchScript decoder：[N,3] -> metric [N,2]
+python band_brep_reconstruction/reconstruct.py \
+  --mesh /data/asset/condition --udf-model /models/ev_decoder.pt \
+  --band-width .02 --output /data/run --stop-after graph
 
-# 仅恢复无方向实例关联
-python reconstruct.py --provider cad --step /path/model.step \
-  --sdf-backend mesh_fast --preset recommended --output outputs/model_graph --stop-after graph
+# 生产 Flow：只读取 condition 几何，不读取 E/V 真值
+python band_brep_reconstruction/reconstruct.py \
+  --mesh /data/asset/condition --vae-bundle /models/vae --flow-bundle /models/flow \
+  --device cuda --flow-steps 5 --output /data/generated_brep
 
-# 固定位置采样三场的插值输入
-python reconstruct.py --provider sampled --sample-dir /path/fields \
-  --output outputs/sampled_model --stop-after graph
-
-# 解析场验证样例
-python demo.py --shape sphere_bore --preset recommended --output outputs/sphere_bore
+# 显式 VAE 重建评估：编码已知资产的 E/V 真值，再后处理解码结果
+python band_brep_reconstruction/reconstruct.py \
+  --mesh /data/pools/assets/id/condition --vae-bundle /models/vae \
+  --asset /data/pools/assets/id --output /data/vae_reconstruction
 ```
 
-`--provider neural --field-model /path/model.pt` 接入三场网络；可通过 `--face-checkpoint` 和 `--face-config` 使用面网络初值。点云面网络仅提供初值，不预测边拓扑，也不替代共享边界约束。
+后两个入口调用外部生产 pipeline；本仓库测试覆盖 adapter 契约，未使用真实训练权重进行端到端验证。VAE 单独不能从网格确定 E/V latent，condition-only 生成需要 Flow 或调用者提供 latent 的 decoder。
 
-`--stop-after` 支持 `seeds / graph / vertices / curves / surfaces / solid`。`--resume` 只接受相同输入、配置（除停止阶段外）与代码哈希，且验证已保存文件哈希。
+## 默认流程与配置
 
-### 配置与预设
+1. 验证原始网格，建立网格距离查询；输入网格始终是几何基准。
+2. 在现有顶点与三角形中心查询 E/V，近边/顶点区域做共享边一致剖分。新增顶点、最终中心重新查询模型，不插值旧 UDF 或复制父标签。
+3. 最终三角形中心执行 DualBrep 两阶段面核心提取；非核心传播、局部顶点域恢复 E–F、V–E、V–F。
+4. 由两个 UDF 的梯度定位顶点和边，拟合固定共享端点的曲线，再拟合曲面并构建面环、seam 和 pcurve。
+5. OCC 装配、导出并读回 STEP；仅 `solid_validated` 表示全部验收完成。
 
-**`Config` 的代码默认值仍是 v0.3.0 的历史配置**（分辨率 65、边带按共享边连通、下列改进全部关闭），保证历史实验可以原样复现。实际使用请加 `--preset recommended`。优先级为：代码默认值 < 预设 < `--config` 文件 < 命令行参数（`--resolution`、`--stop-after`）。
+L5 默认：目标最长边 `0.005`，近边/顶点选区半径 `0.02/0.03`，最多四轮，最多 150 万三角形。线性细分保持原表面、面积和有向体积，不恢复网格缺失的曲率。细长扇形三角形也可能导致细分超过预算。**非常粗的原生 CAD 网格可能四轮仍未达标**，此时报告 `refinement_target_unmet`；可通过 JSON 增加轮数，例如 `{"refinement_max_rounds": 12}`，三角形预算仍生效。加密默认必经，没有关闭入口。
 
-`recommended` 预设（`bandbrep/config.py` 中的 `PRESETS`）：
+配置见 [default.json](configs/default.json) 和 [Config](bandbrep/config.py)。优先级为默认值 < `--config` JSON < 显式 CLI 参数。已删除 `--preset`、分辨率、MC、旧 CAD/离散 NPZ/三场 MLP 输入和面网络初始化接口；旧配置和缓存不能续用。旧实验脚本随旧入口删除，历史报告和输出保留。
 
-| 配置项 | 预设值 | 代码默认值 | 作用 |
-|---|---|---|---|
-| `resolution` / `max_resolution` | 257 / 257 | 65 / 129 | 与 DualBrep 两阶段阈值 0.005/0.01 相称的分辨率 |
-| `query_batch_size` / `save_queries` | 1048576 / false | 8192 / true | 257³ 下的查询批量与存储 |
-| `band_connectivity` | `vertex` | `edge` | 边带、顶点带按共享顶点求连通分量，避免窄带碎成大量片段 |
-| `band_propagation` | `noncore` | `distance_only` | 全部非核心点参与标签传播；原因码 3/4/5 的点仍不作为几何支撑 |
-| `tau_vertex` | 0.02 | 0.04 | 顶点带阈值；`vertex_domains='local'` 时为局部半径上限 |
-| `vertex_domains` | `local` | `threshold` | 按 v-UDF 投票得到候选顶点，每个候选用局部半径，点归属最近候选；参数 `vertex_radius_fraction`=0.45、`vertex_cut_factor`=1.5、`vertex_min_votes`=3 |
-| `infer_short_edges` | true | false | 两个顶点域直接相接时补出短边，需沿线 e-UDF/SDF 校验且恰好对应两个面 |
-| `surface_candidates` | `revolution` | `basic` | 基础候选失败时再试圆柱、圆锥、圆环 |
-| `curve_candidates` | `arcs` | `basic` | 两端有顶点的边额外尝试精确过两端点的圆弧 |
-| `periodic_frame_planning` | true | false | 周期面参数切口放进边界空隙；同轴环面共用参考方向；双环圆柱/圆锥面显式构造 seam |
+SDF 无需模型预测：内部按需计算到原始网格的距离，用于特征与曲面相容性检查、查询带判定和方向探测。E/V 在训练带与坐标域内查询；带外梯度更新回退，顶点壳层缩小，仍无有效支撑则失败。
 
-`surface_candidates='revolution'` / `curve_candidates='arcs'` 必须与 `periodic_frame_planning=true` 一起使用；单独打开时，新的周期 pcurve 会让 `FixMissingSeam` 失败，部分原本能成功的模型会失败。
+## 输出与续跑
 
-预设的验证范围见[历史实验](../docs/ThreeFieldReconstructionExperiments.md#historical-results)；原生条件网格接入需另核对[F30实验](../docs/ThreeFieldReconstructionExperiments.md#f30-results)，不能直接外推旧oracle成绩。`project_face_samples` 已删除，含该键的旧配置文件需移除这一项。
+`input_mesh.npz` 保存原网格；`working_mesh.npz` 保存加密网格及原始父三角形；其余阶段产物见[阶段表](../docs/BandLabelTopologyRecovery.md#2-阶段代码与产物)。`run.json` 保存配置、输入身份、加密历史、阶段与失败信息，`quality.json` 保存完成状态。默认记录查询点、metric 场值及有效/饱和 mask。
 
-JSON 配置示例（在预设之上覆盖个别项）：
+`--stop-after` 可选 `seeds / graph / vertices / curves / surfaces / solid`，默认 `solid`。相同输入、配置和源码可用 `--resume` 从早期阶段继续，仅 `stop_after` 可变化。缓存键覆盖原网格数组与归一化信息、模型指纹、查询带与 presence、配置及实现哈希；每个阶段产物另验 SHA-256。
 
-```json
-{
-  "tau_edge": 0.025,
-  "face_threshold1": 0.005,
-  "face_threshold2": 0.01,
-  "face_filter_size": 10,
-  "face_avg_udf_threshold": 0.003,
-  "face_samples": 1200,
-  "stop_after": "solid"
-}
-```
-
-`tau_edge=0.025` 用于几何定位半径、覆盖探针及曲面可信内部点筛选，不定义传播边带。分割由 `face_threshold1/2` 控制。两阶段是在 `bands` 阶段计算并缓存，`seeds` 阶段验收标签，避免重复分割。
-
-`feature_sdf_tolerance` 单独控制顶点、边支撑、短边、曲线和覆盖探针的 SDF 相容性。默认 `null`，通过 `feature_sdf_limit` 回退到 `surface_tolerance=0.003`；JSON 可显式设置有限正值。F30 的 `0.004` 是实验候选，未写入默认值或 `recommended`，也不放宽曲面内部、共享边界和 CAD 容差。
-
-阈值与网格分辨率需要共同评估，默认值不是任意模型的保证。`allow_surface_residual_exceedance=true` 允许最终 SDF 分辨率的残差告警，不绕过闭合与流形检查。仅执行上述两阶段过滤，不追加平面合并、标签回填或将零核心强制改成一个面：关联阶段保存多标签/无源组件和诊断；参数化遇到无法确认的邻面或顶点关联会明确报告，不伪造有效 STEP。
-
-## 输出
-
-| 文件 | 内容 |
-|---|---|
-| `sdf_surface.npz` | 固定 SDF 网格 |
-| `bands.npz` | 三角形中心、三场值、嵌套 E/V 掩码、核心标签与 `exclusion_reasons` |
-| `face_seeds.npz` | 面核心标签 |
-| `topology_labels.npz` | 图节点到面/边/顶点实例的映射和原始区域接触 |
-| `incidence.json` | 独立实例、完整标签集合、无方向关联、未解释区域 |
-| `vertices.json` | v-UDF 定位结果 |
-| `logical_graph.json` / `curves.json` | 几何阶段的共享顶点、端点使用与拟合曲线 |
-| `cad_graph.json` | 后处理补齐的方向和面环 |
-| `face_patches.json` | 固定边界的参数曲面 |
-| `logical_to_cad.json` | 逻辑实例与 CAD 实体映射 |
-| `reconstruction.step` | CAD 导出文件；最终验收是否通过以 `run.json` 的 `solid_validated` 为准 |
-| `run.json` / `quality.json` | 阶段、配置、耗时、缓存哈希和失败诊断 |
-
-`logical_graph_ready` 仅表示无方向关联输出完成，可能包含 `unresolved_edges`；不是 CAD 有效性结论。只有 `solid_validated` 表示完整装配与读回检查通过，也不是对连续生成场全域正确性的数学证明。
+有限查询、几何采样和内核有效性不证明所有真实边均已恢复。窄面核心缺失、无边界非解析面和复杂自由曲面仍可能失败。
 
 ## 测试与验证
 
 ```bash
-PYTHONPATH=. python -m unittest discover -s tests -q
-python benchmarks/validate_multilabel.py --output outputs/multilabel_validation
+PYTHONPATH="$PWD/veudf/src:$PWD/band_brep_reconstruction" \
+  python -m pytest band_brep_reconstruction/tests -q
+python scripts/sync_veudf.py --check
 ```
 
-测试包含：顶点域完整吸收且不回传、后到标签、同面对多边、嵌套掩码、实际 edge_id 关联、固定端点/边界约束、断点续跑，以及方盒、圆柱、球体通孔、分割球面、空心球的 STEP 读回。验证脚本保存 STEP 和 `REPORT.md`。
-
-测试区分分割一致性与下游几何回归：与原 DualBrep 函数比较 100 组随机图标签；验证拆分回退、排除区及缓存恢复。完整 CAD 回归显式使用较宽分割阈值 `0.025/0.05` 和最小分量 1，以保持解析样例的已解析边带；默认 `0.005/0.01` 在低分辨率样例上仍可能缺边，不能将 CAD 回归通过视为默认参数全通过。`tests/test_presets.py` 另用 `recommended` 预设（默认阈值、257³）对上述五个解析场跑完整流程，要求全部得到通过读回的 STEP，约 30 秒。理想解析场成功不代表 ABC 或生成场的批量成功率，仍需单独运行数据集评估。
-
-旧 `segmentation_ablation`、`refinement_comparison` 运行脚本及空目录已删除；原始统计和诊断保留在 `outputs/`，部分中间数组已清理。
-
-### 数据集实验脚本（`benchmarks/`，不属于重建模块）
-
-| 文件 | 作用 |
-|---|---|
-| `run_reconstruction_experiments.py` | 主实验驱动：多进程、单模型限时、`--variant` 选择配置变体（`all` 即 `recommended` 预设，`base` 为关闭四项改进的 10-16 基线，另有逐项去除组）、逐模型落盘 |
-| `experiment_fields.py` | 由 CAD 生成三场的查询接口、离线真值、可复现的相关扰动场 |
-| `experiment_scoring.py` | 离线拓扑诊断（面/边/顶点实例与关联）和几何保真度评分 |
-| `run_plan_20261017.sh` / `summarize_plan_20261017.py` | 10-18 批量实验与结果汇总 |
-| `validate_plan_neural.py` | 单模型三通道 MLP 神经场拟合后的重建 |
-| `validate_multilabel.py` / `evaluate_multilabel_batch.py` | v0.2 多标签验证与批次评估 |
-| `alignment_grid.py` / `alignment_fields.py` / `run_alignment_experiments.py` | 原生条件 SDF 插值、精确 E/V 输入和 F30 配对实验；不是主 CLI 的 provider 选项 |
-| `run_mesh_density_experiments.py` / `validate_mesh_density.py` | 固定表面全局/局部加密、重新查询三场、过滤对照与解析验证 |
-
-这些脚本需要 `libigl` 和 `threadpoolctl`（`pip install -e .[benchmarks]`）。10-16 的一次性实验脚本（切口重试、曲面自由度、噪声补测、审计、报告生成、513³ 代理）已删除，原样副本在 `outputs/plan_20261016/source_snapshot/benchmarks/` 和 `outputs/plan_20261017/source_snapshot/benchmarks/`。
-
-## 两阶段分割诊断
-
-`bands.npz/exclusion_reasons`：0=保留核心，1=第一阶段低距离，2=已成功拆分父域中的第二阶段低距离，3=第一阶段大小过滤，4=第一阶段均值过滤，5=第二阶段子分量大小过滤。默认只有 1/2 进入边带；`band_propagation='noncore'` 时全部非核心点参与传播，但 3/4/5 仍不作为几何支撑点。`run.json` 的 bands 报告记录各原因计数和分割参数、成功拆分父分量；无核心仍明确失败，不把整张表面伪装成一个面。
-
-## 实验与验证
-
-历次结果、数据范围和计划统一见[实验主文档](../docs/ThreeFieldReconstructionExperiments.md)：[迁移与解析验证](../docs/ThreeFieldReconstructionExperiments.md#early-validation)、[历史消融](../docs/ThreeFieldReconstructionExperiments.md#historical-results)、[F30条件场对照](../docs/ThreeFieldReconstructionExperiments.md#f30-results)、[证据与复现](../docs/ThreeFieldReconstructionExperiments.md#artifacts)。本README只维护使用说明，不重复维护实验成绩。
-
-网格密度实验使用 `bandbrep/mesh_densification.py` 的共享边中点一致细分，保持原分片线性表面不变，再查询最终中心三场；方法、预注册与结果统一见[加密实验报告](../docs/MeshDensificationUDFExperimentReport.md#method)。主 `reconstruct()` 和 `Config` 没有加密开关；批处理由 `benchmarks/run_mesh_density_experiments.py` 独立准备和接入，支持 `--initialize / --run / --status / --report`。10-28—10-29 批次已结束，复查其保存状态：
-
-```bash
-python benchmarks/run_mesh_density_experiments.py --status --output outputs/mesh_density_20261028_v2
-```
+测试包含闭合剖分、域与 mask、梯度、生产 adapter、输入/缓存身份、分割/拓扑及网格起步的立方体、圆柱、腔体球与球体贯通孔 STEP 读回。外部真实权重和真实生产批次需单独评估，历史实验成绩不作为新流程成绩。

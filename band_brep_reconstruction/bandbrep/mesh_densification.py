@@ -8,7 +8,6 @@ from .surface_mesh import mesh_edges, face_adjacency, components, evaluate_batch
 
 @dataclass(frozen=True)
 class RefinementConfig:
-    method: str = 'none'
     target_edge: float = .005
     rho_edge: float = .02
     rho_vertex: float = .03
@@ -107,7 +106,6 @@ def local_selection(mesh, vertex_values, center_values, presence, cfg):
 
 def densify_surface_mesh(mesh, provider, cfg, progress=None):
     """Return mesh, original parent-triangle IDs, and a complete refinement report."""
-    require(cfg.method in ('none', 'uniform', 'local'), 'refinement_method', 'Unknown refinement method')
     require(cfg.max_rounds > 0 and cfg.target_edge > 0, 'refinement_config', 'Invalid refinement settings')
     started = time.monotonic()
     original = mesh_metrics(mesh)
@@ -115,24 +113,20 @@ def densify_surface_mesh(mesh, provider, cfg, progress=None):
     parent = np.arange(len(mesh.triangles), dtype=np.int64)
     history = []
     vertex_values = None
-    rounds = 0 if cfg.method == 'none' else 1 if cfg.method == 'uniform' else cfg.max_rounds+1
-    for level in range(rounds):
+    for level in range(cfg.max_rounds+1):
         if progress: progress('refine_select_'+str(level))
         edges, inv, _ = mesh_edges(mesh.triangles)
-        if cfg.method == 'uniform':
-            selected = np.ones(len(mesh.triangles), bool)
-        else:
-            if vertex_values is None:
-                vertex_values = evaluate_batched(provider, mesh.vertices, cfg.query_batch)
-            centers = mesh.vertices[mesh.triangles].mean(axis=1)
-            cv = evaluate_batched(provider, centers, cfg.query_batch)
-            selected, near, length = local_selection(mesh, vertex_values, cv, provider.presence(), cfg)
-            if not selected.any():
-                history.append(dict(level=level, triangles=len(mesh.triangles), selected=0,
-                                    local_max_edge=float(length[near].max()) if near.any() else 0.))
-                break
-            require(level < cfg.max_rounds, 'refinement_target_unmet', 'Local target remains unmet after maximum rounds',
-                    remaining=int(selected.sum()), target=cfg.target_edge, history=history)
+        if vertex_values is None:
+            vertex_values = evaluate_batched(provider, mesh.vertices, cfg.query_batch)
+        centers = mesh.vertices[mesh.triangles].mean(axis=1)
+        cv = evaluate_batched(provider, centers, cfg.query_batch)
+        selected, near, length = local_selection(mesh, vertex_values, cv, provider.presence(), cfg)
+        if not selected.any():
+            history.append(dict(level=level, triangles=len(mesh.triangles), selected=0,
+                                local_max_edge=float(length[near].max()) if near.any() else 0.))
+            break
+        require(level < cfg.max_rounds, 'refinement_target_unmet', 'Local target remains unmet after maximum rounds',
+                remaining=int(selected.sum()), target=cfg.target_edge, history=history)
         marked = np.zeros(len(edges), bool)
         marked[inv[selected].ravel()] = True
         old_vertices = len(mesh.vertices)
@@ -141,9 +135,8 @@ def densify_surface_mesh(mesh, provider, cfg, progress=None):
         history.append(dict(level=level, before=len(mesh.triangles), after=len(refined.triangles),
                             selected=int(selected.sum()), transition_faces=int((marked[inv].any(1)&~selected).sum()), **info))
         mesh = refined
-        if vertex_values is not None:
-            new_values = evaluate_batched(provider, mesh.vertices[old_vertices:], cfg.query_batch)
-            vertex_values = np.vstack((vertex_values, new_values))
+        new_values = evaluate_batched(provider, mesh.vertices[old_vertices:], cfg.query_batch)
+        vertex_values = np.vstack((vertex_values, new_values))
         if progress: progress('refine_finished_'+str(level))
     final = mesh_metrics(mesh)
     require((original['components'], original['euler']) == (final['components'], final['euler']),

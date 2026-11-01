@@ -1,3 +1,4 @@
+from .surface_mesh import evaluate_batched
 """Set-valued flood on fixed domains; vertex domains never transfer labels back."""
 import numpy as np
 from scipy.spatial import cKDTree
@@ -72,7 +73,11 @@ def infer_short_edges(topology, bands, provider, cfg):
         if (va,vb) in joined:continue
         faces=sorted(set(topology.vertices[va]['faces'])&set(topology.vertices[vb]['faces']))
         p0,p1=bands.vertex_centers[va],bands.vertex_centers[vb]
-        q=(1-t[:,None])*p0+t[:,None]*p1;v=provider.evaluate(q).values
+        q=(1-t[:,None])*p0+t[:,None]*p1
+        if hasattr(provider,'domain_mask') and not provider.domain_mask(q).all():
+            report['rejected'].append({'vertices':[va,vb],'reason':'outside_model_domain'})
+            continue
+        v=evaluate_batched(provider,q)
         entry={'vertices':[va,vb],'shared_faces':faces,'length':float(np.linalg.norm(p1-p0)),
                'max_edge_udf':float(v[:,1].max()),'max_abs_sdf':float(np.abs(v[:,0]).max())}
         if len(faces)>2:

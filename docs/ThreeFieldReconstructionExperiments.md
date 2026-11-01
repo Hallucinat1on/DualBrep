@@ -2,7 +2,7 @@
 
 文档更新：2026-11-01；实测记录覆盖 2026-10-12—10-29。本文统一维护历史验证、消融、F30 条件场对照和后续实验，已合并原面分割失败分析。当前接口见[预处理规范](ABCEdgeVertexUDFPreprocessing.md)、[隔离带算法与实现](BandLabelTopologyRecovery.md)及模块 README；网格加密的详细方法和结果见[独立报告](MeshDensificationUDFExperimentReport.md)。
 
-2026-10-31 整理不重新运行实验或修改数据。10-19 合并前五份原文见[历史归档](../band_brep_reconstruction/outputs/document_consolidation_20261019/sources.json.gz)；本次整理前的完整文档及 SHA-256 见[新归档](archive/20261031_document_sources.json.gz)及[清单](archive/20261031_document_sources.manifest.json)。下文分日期保留既有成绩，不用新版本代码检查代替原批次验证。2026-11-01 的生产迁移使用 `veudf/` 与新 mesh 点池，不修改这里已冻结的历史 NPZ／条件网格实验；后续验证需重新登记输入表示和配置。
+2026-10-31 整理不重新运行实验或修改数据。10-19 合并前五份原文见[历史归档](../band_brep_reconstruction/outputs/document_consolidation_20261019/sources.json.gz)；本次整理前的完整文档及 SHA-256 见[新归档](archive/20261031_document_sources.json.gz)及[清单](archive/20261031_document_sources.manifest.json)。下文分日期保留既有成绩，不用新版本代码检查代替原批次验证。0.4.0 已改为网格起步、默认 L5 与连续 E/V，旧 MC/CAD/NPZ 实验驱动已删除；下文旧命令需使用历史 Git 版本或批次源码快照，不能在当前主库执行。2026-11-01 的生产迁移使用 `veudf/` 与新 mesh 点池，不修改这里已冻结的历史 NPZ／条件网格实验；后续验证需重新登记输入表示和配置。
 
 ## 1. 当前结论
 

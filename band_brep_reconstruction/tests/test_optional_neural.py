@@ -1,5 +1,4 @@
 import importlib.util
-import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -7,27 +6,34 @@ import numpy as np
 
 @unittest.skipUnless(importlib.util.find_spec('torch'),'optional torch missing')
 class NeuralTests(unittest.TestCase):
-    def test_training_checkpoint_and_metric_autograd(self):
+    def test_two_channel_metric_script_and_autograd(self):
         import torch
-        from bandbrep.neural_fields import fit_fields,NeuralFieldProvider
-        torch.set_num_threads(2)
+        from bandbrep.udf_model import TorchScriptUDFProvider
+        class Decoder(torch.nn.Module):
+            def forward(self,x):return torch.stack((2*x[:,0].abs(),3*x[:,1].abs()),dim=1)
         with tempfile.TemporaryDirectory() as tmp:
-            p=Path(tmp);xyz=np.random.default_rng(2).uniform(-.5,.5,(160,3)).astype(np.float32)
-            v=np.column_stack((xyz[:,0],np.abs(xyz[:,1]),np.abs(xyz[:,2])))
-            (p/'metadata.json').write_text(json.dumps({'channel_names':['sdf','dE','dV']}))
-            np.savez(p/'fields.npz',query_points=np.vstack((xyz,xyz)),query_fields=np.vstack((v,v)),has_edges=True,has_vertices=True)
-            report=fit_fields(p,p/'model.pt',steps=2,batch_size=32,width=16,layers=2,frequencies=1)
-            self.assertEqual(report['unique_positions'],160)
-            provider=NeuralFieldProvider(p/'model.pt');out=provider.evaluate(xyz[:3]);self.assertEqual(out.values.shape,(3,3));self.assertTrue((out.values[:,1:]>=0).all())
-            gradient,valid=provider.gradient(xyz[:3],1);self.assertEqual(gradient.shape,(3,3));self.assertTrue(valid.all())
-    def test_face_adapter_calls_only_face_decoder(self):
+            path=Path(tmp)/'udf.pt';torch.jit.script(Decoder()).save(str(path))
+            p=TorchScriptUDFProvider(path,presence=('present','present'))
+            q=np.array([[.1,.2,.3]])
+            np.testing.assert_allclose(p.evaluate(q).values,[[.2,.6]],atol=1e-7)
+            g,valid=p.gradient(q,1);self.assertTrue(valid[0]);np.testing.assert_allclose(g,[[0,3,0]])
+
+    def test_mesh_cli_without_sdf_model(self):
         import torch
-        from bandbrep.model_adapter import DualBrepFaceInitializer
-        class Model:
-            def encode(self,data,test):return data
-            def decode_face(self,data,uv):
-                return {'face_norm':torch.zeros((1,4,4,3)),'face_bbox':data['face_input_bbox']}
-            def inference(self,*args):raise AssertionError('edge inference must not be used')
-        adapter=object.__new__(DualBrepFaceInitializer);adapter.device='cpu';adapter.model=Model()
-        p=np.random.default_rng(1).random((20,3));n=np.tile([0.,0.,1.],(20,1))
-        grids=adapter.predict({0:(p,n)});self.assertEqual(grids[0].shape,(4,4,3))
+        import subprocess,sys,json
+        from helpers import hollow_sphere
+        from veudf.io.condition import write_condition
+        class Empty(torch.nn.Module):
+            def forward(self,x):return x[:,:2]*0+3.
+        mesh,_=hollow_sphere()
+        with tempfile.TemporaryDirectory() as tmp:
+            path=Path(tmp);write_condition(path/'condition',(mesh.vertices,mesh.triangles),count=64)
+            torch.jit.script(Empty()).save(str(path/'ev.pt'))
+            cmd=[sys.executable,str(Path(__file__).resolve().parents[1]/'reconstruct.py'),
+                 '--mesh',str(path/'condition'),'--udf-model',str(path/'ev.pt'),
+                 '--output',str(path/'out'),'--stop-after','graph']
+            subprocess.run(cmd,check=True,capture_output=True,text=True)
+            run=json.loads((path/'out/run.json').read_text())
+            self.assertEqual(run['status'],'logical_graph_ready');self.assertEqual(run['presence'],['absent','absent'])
+            self.assertTrue((path/'out/working_mesh.npz').exists())
+            self.assertFalse((path/'out/sdf_surface.npz').exists())

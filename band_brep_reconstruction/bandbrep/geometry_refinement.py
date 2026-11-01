@@ -1,3 +1,5 @@
+from .field_provider import bounded_update
+from .surface_mesh import evaluate_batched
 import numpy as np
 from .schemas import require
 
@@ -10,10 +12,12 @@ def validate_structure_coverage(mesh,bands,curves,provider,cfg):
     if len(ids)>2048:ids=ids[np.linspace(0,len(ids)-1,2048).astype(int)]
     points=bands.points[ids].copy()
     for _ in range(8):
-        v=provider.evaluate(points).values;g,valid=provider.gradient(points,1)
+        v=evaluate_batched(provider,points);g,valid=provider.gradient(points,1)
         norm=np.linalg.norm(g,axis=1);active=valid&(v[:,1]>cfg.curve_tolerance*.05)
-        points[active]-=.8*v[active,1,None]*g[active]/np.maximum(norm[active,None],1e-12)
-    v=provider.evaluate(points).values;valid=(v[:,1]<=cfg.curve_tolerance)&(np.abs(v[:,0])<=cfg.feature_sdf_limit)
+        proposed=points.copy()
+        proposed[active]-=.8*v[active,1,None]*g[active]/np.maximum(norm[active,None],1e-12)
+        points=bounded_update(provider,points,proposed)
+    v=evaluate_batched(provider,points);valid=(v[:,1]<=cfg.curve_tolerance)&(np.abs(v[:,0])<=cfg.feature_sdf_limit)
     require(valid.any(),'edge_coverage_unlocalized','Cannot localize independent edge-field probes')
     samples=np.vstack([c.evaluate(np.linspace(0,1,4097)) for c in curves.values()]) if curves else np.empty((0,3))
     require(len(samples)>0,'edge_coverage_missing','Edge field present but no curves recovered')

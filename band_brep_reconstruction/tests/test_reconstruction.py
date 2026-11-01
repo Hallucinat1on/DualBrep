@@ -1,37 +1,12 @@
-import json
-from pathlib import Path
-import tempfile
 import unittest
 import numpy as np
-from bandbrep.config import Config
-from bandbrep.schemas import SurfaceMesh,ReconstructionError
-from bandbrep.field_provider import CallableFieldProvider,SampledFieldProvider
-from bandbrep.surface_mesh import extract_surface
 from bandbrep.face_seeds import core_components
 from bandbrep.vertex_localization import distance_center
 from bandbrep.curve_fitting import fit_cubic_fixed_ends,fit_circle
 from bandbrep.surface_fitting import constrained_lstsq,fit_four_sided_bezier
-from bandbrep.reconstruct import reconstruct
+from bandbrep.schemas import ReconstructionError
 
 class CoreTests(unittest.TestCase):
-    def test_surface_residual_warning_keeps_resolution_retry(self):
-        p=CallableFieldProvider(lambda x:np.column_stack((np.linalg.norm(x,axis=1)-.63,np.ones(len(x)),np.ones(len(x)))),presence=('absent','absent'))
-        cfg=Config(resolution=9,max_resolution=17,surface_tolerance=1e-6)
-        with self.assertRaises(ReconstructionError) as failure:extract_surface(p,cfg)
-        self.assertEqual(failure.exception.code,'surface_error')
-        cfg.allow_surface_residual_exceedance=True
-        m=extract_surface(p,cfg)
-        self.assertEqual(m.report['resolution'],17)
-        self.assertEqual(m.report['resolution_attempts'][0]['reason'],'surface_error')
-        self.assertTrue(m.report['surface_residual_warning'])
-        self.assertEqual(m.report['boundary_edges'],0)
-        self.assertGreater(m.report['sdf_residual_exceedance_fraction'],0)
-    def test_channel_scale_gradient(self):
-        p=CallableFieldProvider(lambda x:np.column_stack((x[:,0],np.abs(x[:,1]),np.abs(x[:,2]))),normalized=True,clip_values=[2,3,4],presence=('present','present'))
-        x=np.array([[.1,.2,.3]]);np.testing.assert_allclose(p.evaluate(x).values,[[.2,.6,1.2]])
-        np.testing.assert_allclose(p.gradient(x,1)[0],[[0,3,0]],atol=1e-8)
-    def test_negative_udf_rejected(self):
-        with self.assertRaises(ReconstructionError):CallableFieldProvider(lambda x:np.full((len(x),3),-1.)).evaluate([[0,0,0]])
     def test_isolated_core_preserved(self):
         r=core_components(np.array([[0,1]]),np.array([True,True,False,True]));self.assertEqual(r[0],r[1]);self.assertNotEqual(r[0],r[3]);self.assertEqual(r[2],-1)
     def test_distance_center_not_centroid(self):
@@ -51,43 +26,6 @@ class CoreTests(unittest.TestCase):
         u=np.linspace(0,1,4);bottom=np.column_stack((u,0*u,.2*np.sin(np.pi*u)));top=bottom+[0,1,0];left=np.column_stack((0*u,u,0*u));right=left+[1,0,0]
         uv=np.random.default_rng(1).random((40,2));net=fit_four_sided_bezier(uv,np.column_stack((uv,np.zeros(40))),bottom,right,top,left)
         np.testing.assert_allclose(net[:,0],bottom,atol=1e-15);np.testing.assert_allclose(net[:,-1],top,atol=1e-15)
-    def test_unknown_presence_is_not_absence(self):
-        from bandbrep.bands import build_bands
-        with self.assertRaises(ReconstructionError):build_bands(SurfaceMesh(np.zeros((3,3)),np.array([[0,1,2]])),CallableFieldProvider(lambda x:np.zeros_like(x)),Config())
-    def test_sampled_reader_ignores_hidden_truth(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            p=Path(tmp);xyz=np.random.default_rng(1).random((300,3));v=np.column_stack((xyz[:,0]-.5,xyz[:,1],xyz[:,2]));(p/'metadata.json').write_text(json.dumps({'channel_names':['sdf','dE','dV']}))
-            np.savez(p/'fields.npz',query_points=xyz,query_fields=v,has_edges=True,has_vertices=True,vertex_points=[[999,999,999]])
-            provider=SampledFieldProvider(p);np.testing.assert_allclose(provider.evaluate([[.3,.4,.5]]).values,[[-.2,.4,.5]],atol=1e-5)
-    def test_failure_report_no_false_step(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            provider=CallableFieldProvider(lambda x:np.column_stack((np.ones(len(x)),np.zeros((len(x),2)))),('absent','absent'))
-            with self.assertRaises(ReconstructionError):reconstruct(provider,Config(resolution=9),tmp)
-            report=json.loads((Path(tmp)/'quality.json').read_text());self.assertEqual(report['status'],'failed');self.assertFalse((Path(tmp)/'reconstruction.step').exists())
-
-if __name__=='__main__':unittest.main()
-
-class ExtendedTests(unittest.TestCase):
     def test_face_scoring_handles_label_permutation(self):
         from bandbrep.evaluation import match_face_regions
         result=match_face_regions([1,1,0,0],[0,0,1,1]);self.assertEqual(result['mapping'],{0:1,1:0});self.assertEqual(result['merged_predictions'],[])
-    def test_query_recording_keeps_metric_values(self):
-        from bandbrep.query_recording import RecordingProvider
-        with tempfile.TemporaryDirectory() as tmp:
-            p=RecordingProvider(CallableFieldProvider(lambda x:np.column_stack((x[:,0],abs(x[:,1]),abs(x[:,2])))),tmp)
-            p.evaluate(np.array([[.1,.2,.3]]));p.sdf(np.array([[.4,0,0]]));p.flush()
-            data=np.load(Path(tmp)/'000000.npz');self.assertEqual(data['query_fields'][0,1],.2);self.assertTrue(np.isnan(data['query_fields'][1,1]))
-    def test_cache_key_changes_for_field_and_config(self):
-        from bandbrep.cache import cache_key
-        p=CallableFieldProvider(lambda x:np.zeros_like(x),fingerprint='field-one')
-        a,_=cache_key(p,Config(stop_after='seeds'));b,_=cache_key(p,Config(stop_after='solid'));self.assertEqual(a,b)
-        c,_=cache_key(p,Config(tau_edge=.03));self.assertNotEqual(a,c)
-    def test_corrupted_cache_rejected(self):
-        from bandbrep.demo_fields import hollow_sphere
-        # A tiny manually authored manifest exercises hash checking before any geometry call.
-        from bandbrep.cache import cache_key
-        with tempfile.TemporaryDirectory() as tmp:
-            p=Path(tmp);provider=hollow_sphere();cfg=Config(resolution=9);key,_=cache_key(provider,cfg)
-            (p/'run.json').write_text(json.dumps({'cache_key':key,'status':'failed','artifacts':{'x.json':'incorrect'}}));(p/'x.json').write_text('{}')
-            with self.assertRaises(ReconstructionError) as ctx:reconstruct(provider,cfg,p,resume=True)
-            self.assertEqual(ctx.exception.code,'cache_corrupt')

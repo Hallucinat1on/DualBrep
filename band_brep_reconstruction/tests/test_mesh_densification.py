@@ -7,7 +7,7 @@ from bandbrep.mesh_densification import (RefinementConfig, split_edges, mesh_met
                                          densify_surface_mesh, local_selection)
 from bandbrep.schemas import SurfaceMesh, ReconstructionError
 from bandbrep.surface_mesh import mesh_edges
-from bandbrep.field_provider import CallableFieldProvider
+from helpers import AnalyticFields
 
 
 def tetrahedron():
@@ -34,7 +34,7 @@ class DensificationTests(unittest.TestCase):
 
     def test_uniform_shared_midpoints_and_parent_multiplicity(self):
         mesh=tetrahedron();provider=Mock()
-        refined,parent,report=densify_surface_mesh(mesh,provider,RefinementConfig(method='uniform'))
+        refined,parent,report=split_edges(mesh,np.ones(6,bool),1500000)
         self.assertEqual(len(refined.vertices),10)
         self.assertEqual(len(refined.triangles),16)
         np.testing.assert_array_equal(np.bincount(parent),[4,4,4,4])
@@ -42,7 +42,7 @@ class DensificationTests(unittest.TestCase):
 
     def test_budget_rejects_before_allocating_children(self):
         with self.assertRaises(ReconstructionError) as error:
-            densify_surface_mesh(tetrahedron(),Mock(),RefinementConfig(method='uniform',max_triangles=15))
+            split_edges(tetrahedron(),np.ones(6,bool),15)
         self.assertEqual(error.exception.code,'mesh_resource_limit')
 
     def test_local_queries_new_positions_and_reaches_target(self):
@@ -50,19 +50,19 @@ class DensificationTests(unittest.TestCase):
         def values(x):
             positions.append(x.copy())
             return np.column_stack((np.zeros(len(x)),np.zeros(len(x)),np.ones(len(x))))
-        provider=CallableFieldProvider(values,presence=('present','absent'))
+        provider=AnalyticFields(values,presence=('present','absent'))
         refined,parent,report=densify_surface_mesh(tetrahedron(),provider,
-            RefinementConfig(method='local',target_edge=.4,max_rounds=3))
+            RefinementConfig(target_edge=.4,max_rounds=3))
         self.assertTrue(any(len(p)>4 for p in positions))
         edges=mesh_edges(refined.triangles)[0]
         self.assertLessEqual(np.linalg.norm(refined.vertices[edges[:,0]]-refined.vertices[edges[:,1]],axis=1).max(),.4)
         self.assertEqual(len(parent),len(refined.triangles))
 
     def test_target_unmet_does_not_claim_success(self):
-        provider=CallableFieldProvider(lambda x:np.column_stack((np.zeros(len(x)),np.zeros(len(x)),np.ones(len(x)))),
+        provider=AnalyticFields(lambda x:np.column_stack((np.zeros(len(x)),np.zeros(len(x)),np.ones(len(x)))),
                                        presence=('present','absent'))
         with self.assertRaises(ReconstructionError) as error:
-            densify_surface_mesh(tetrahedron(),provider,RefinementConfig(method='local',target_edge=.001,max_rounds=1))
+            densify_surface_mesh(tetrahedron(),provider,RefinementConfig(target_edge=.001,max_rounds=1))
         self.assertEqual(error.exception.code,'refinement_target_unmet')
 
     def test_lipschitz_selector_catches_center_miss_and_absence(self):

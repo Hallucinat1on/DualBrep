@@ -3,6 +3,8 @@
 No arrival-cost interface or vertex port is used to create edge identities.
 Closed/self-loop handling here belongs to geometric postprocessing, not incidence.
 """
+from .field_provider import bounded_update
+from .surface_mesh import evaluate_batched
 import numpy as np
 from scipy.spatial import cKDTree
 from scipy.sparse import coo_matrix
@@ -14,13 +16,14 @@ from .curve_fitting import fit_circle
 def project_support(points, provider, radius, cfg):
     original=np.asarray(points,float);q=original.copy()
     for _ in range(32):
-        d=provider.evaluate(q).values[:,1];g,valid=provider.gradient(q,1)
+        d=evaluate_batched(provider,q)[:,1];g,valid=provider.gradient(q,1)
         norm=np.linalg.norm(g,axis=1);active=valid&(norm>1e-10)&(d>cfg.curve_tolerance*.02)
         if not active.any():break
         proposed=q-.8*np.minimum(d,radius*.3)[:,None]*g/np.maximum(norm[:,None],1e-12)
+        proposed=bounded_update(provider,q,proposed)
         safe=np.linalg.norm(proposed-original,axis=1)<=radius
         q[active&safe]=proposed[active&safe]
-    v=provider.evaluate(q).values
+    v=evaluate_batched(provider,q)
     valid=(v[:,1]<=cfg.curve_tolerance)&(np.abs(v[:,0])<=cfg.feature_sdf_limit)
     require(valid.sum()>=3 and valid.mean()>=.8,'edge_localization_failed',
             'Band samples do not consistently localize to an edge',localized=int(valid.sum()),total=len(q))

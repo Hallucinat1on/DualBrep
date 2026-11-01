@@ -10,7 +10,7 @@ from bandbrep.vendor.dualbrep_segmentation import hierarchical_segmentation
 from bandbrep.bands import build_bands
 from bandbrep.config import Config
 from bandbrep.schemas import SurfaceMesh
-from bandbrep.field_provider import CallableFieldProvider
+from helpers import AnalyticFields
 from bandbrep.topology import recover_topology
 
 
@@ -45,8 +45,8 @@ class TwoPassTests(unittest.TestCase):
     def test_band_partition_and_rejected_nodes_do_not_propagate(self):
         # Disconnected single triangles are size-rejected, not invented edges.
         mesh=SurfaceMesh(np.array([[0.,0,0],[1,0,0],[0,1,0]]),np.array([[0,1,2]]))
-        p=CallableFieldProvider(lambda x:np.tile([0.,.008,0.],(len(x),1)),presence=('present','present'))
-        _,b=build_bands(mesh,p,Config())
+        p=AnalyticFields(lambda x:np.tile([0.,.008,0.],(len(x),1)),presence=('present','present'))
+        _,b=build_bands(mesh,p,Config(band_propagation="distance_only"))
         self.assertEqual(b.exclusion_reasons.tolist(),[3])
         self.assertFalse((b.core_mask|b.edge_band|b.vertex_band).any())
         t=recover_topology(mesh,b,b.face_labels)

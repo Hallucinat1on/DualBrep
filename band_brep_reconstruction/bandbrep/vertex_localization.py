@@ -36,7 +36,7 @@ def localize_vertices(provider, bands, topology, cfg):
         require(residual<=cfg.localization_tolerance,'vertex_mixed_support',
                 'Vertex domain does not support a single distance center',vertex=domain['id'],residual=residual)
         values=provider.evaluate(center[None]).values[0]
-        require(values[2]<=cfg.localization_tolerance and values[1]<=cfg.localization_tolerance and abs(values[0])<=cfg.surface_tolerance,
+        require(values[2]<=cfg.localization_tolerance and values[1]<=cfg.localization_tolerance and abs(values[0])<=cfg.feature_sdf_limit,
                 'vertex_geometry_invalid','Localized vertex fails field checks',vertex=domain['id'],values=values.tolist())
         candidates.append(VertexNode(domain['id'],center,residual,radius))
     return candidates

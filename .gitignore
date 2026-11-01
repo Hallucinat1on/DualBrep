@@ -20,3 +20,5 @@ output*/
 !sample/*.ply
 !sample_imgs/
 !sample_imgs/*.png
+
+demo

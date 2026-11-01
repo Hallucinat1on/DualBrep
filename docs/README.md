@@ -1,18 +1,36 @@
 # 文档导航
 
-更新日期：2026-10-18。按原理、数据、重建路线、生成模型和实验阅读。
+更新：2026-11-01。当前主目录保留 8 份文档，按背景、数据、重建、生成设计和实验组织。安装与命令行维护在各模块 README，算法与字段规范维护在技术文档，成绩与样本口径维护在实验文档。
 
-| 文档 | 范围 |
+| 文档 | 内容与状态 |
 |---|---|
-| [DualBrep UDF与拓扑](DualBrepUDFAndTopology.md) | GVD-UDF、监督/网络/推理、两阶段面分割、学习式拓扑及seam |
-| [ABC三场预处理](ABCEdgeVertexUDFPreprocessing.md) | 目标过滤、同位置三通道、采样/查询/存储、EMAP参考和独立数据审查 |
-| [直接边图提取方案](EdgeVertexDistanceFields.md) | 距离场定位、分支追踪或网格局部提取、共享几何约束；独立备选路线 |
-| [隔离带重建方案与实施](BandLabelTopologyRecovery.md) | 当前v0.3.0两阶段核心、多标签吸收、实例化、固定边界参数化和CAD |
-| [Hunyuan/NaTex场VAE方案](HunyuanNaTexEdgeVertexVAEAdaptation.md) | 生成侧双分支、场编码、采样和损失；与确定性后处理分开 |
-| [实验报告](ThreeFieldReconstructionExperiments.md) | 10-12—10-18 全部实验：早期批次与消融、失败归因、257 基线与阶段隔离、独立评估、场误差、局部顶点域/回转面/周期面 CAD 改进 |
+| [DualBrep UDF 与拓扑](DualBrepUDFAndTopology.md) | 原 DualBrep 的 GVD-UDF、网络、两阶段分割及学习式 CAD 重建；与三场路线分开阅读 |
+| [ABC 三场预处理](ABCEdgeVertexUDFPreprocessing.md) | 当前生产 `veudf` 的网格 SDF／CAD E/V、四点池、NPY 字段、筛选与发布；旧 evudf 已退役 |
+| [隔离带算法与实现](BandLabelTopologyRecovery.md) | 当前 `bandbrep` 的多标签关联、局部顶点域、共享几何、曲面、CAD、配置和缓存；已合并原重建代码详解 |
+| [直接边图提取备选方案](EdgeVertexDistanceFields.md) | 分支追踪／网格局部提取的研究设计；完整方案未作为主库模式实现 |
+| [Hunyuan／NaTex 场 VAE 设计](HunyuanNaTexEdgeVertexVAEAdaptation.md) | 2026-10-14 的外部模型改造设计快照，涵盖场编码、联合 E/V latent、Flow 与验收；不代表本次已实施训练 |
+| [实验主文档](ThreeFieldReconstructionExperiments.md) | 历史验证、消融、F30 条件场对照、面分割失败分析和待验证改进 |
+| [网格加密方法与报告](MeshDensificationUDFExperimentReport.md) | 10-28—10-29 的 20 例×7组结果、方法、预注册预算和选型门槛；已合并原计划 |
 
-直接边图提取与隔离带恢复保留为两个可独立阅读的计划，共用物理目标契约。原DualBrep的GVD-UDF与新到真实有限边/顶点的距离场不混用。实施状态与一般数学约束目标分开阅读。
+使用入口：[重建模块 README](../band_brep_reconstruction/README.md)、[生产数据模块 README](../veudf/README.md)。
 
-本次将UDF/拓扑两份背景说明合一；旧实施设计的现行接口和几何约束并入隔离带文档，实测数据审查移到预处理§14。旧竞争代价/端口总流程仅为历史设计，不作为当前实现说明。合并前8份原文压缩保存在`band_brep_reconstruction/outputs/experiment_archive_20261015/document_merge_sources.json.gz`，迁移记录为同目录`document_merge.json`。
+生产目录为 `/opt/data/private/yihengxu/Hunyuan3D/veudf`，本仓库 `veudf/` 按源码哈希同步；新功能先在生产目录开发，使用 `python scripts/sync_veudf.py --check / --apply` 核对或同步（两参数择一）。历史数据和冻结重建 oracle 保留各自版本，不作为新生成入口。
 
-2026-10-18 将实验汇总、失败原因与改进建议、后续实验报告、改进实验报告四份合并为一份实验报告；原文压缩保存在 `band_brep_reconstruction/outputs/experiment_archive_20261018/report_merge_sources.json.gz`，哈希记录为同目录 `report_merge.json`。
+建议先读[当前重建阶段](BandLabelTopologyRecovery.md#2-阶段代码与产物)与[当前数据字段](ABCEdgeVertexUDFPreprocessing.md#6-当前文件与字段)，再按需查[F30 结果](ThreeFieldReconstructionExperiments.md#f30-results)、[网格加密结果](MeshDensificationUDFExperimentReport.md)、[面分割分析](ThreeFieldReconstructionExperiments.md#segmentation-failures)和[后续实验](ThreeFieldReconstructionExperiments.md#next-experiments)。原 GVD-UDF、真实有限边／顶点距离、直接 CAD SDF 和条件网格插值 SDF 的语义不能互换。
+
+2026-10-31 整理将原重建详解合并到隔离带文档，原面分割分析合并到实验主文档，原加密计划合并到加密报告。合并前 11 份 docs 文档及两个模块 README 的完整原文保存在[归档](archive/20261031_document_sources.json.gz)，[清单](archive/20261031_document_sources.manifest.json)记录路径、字节数和 SHA-256。归档中的日期、计划和旧接口保留历史语义，不作为当前使用指南。
+
+读取归档（在仓库根目录运行）：
+
+```python
+import gzip
+import json
+from pathlib import Path
+
+path = Path("docs/archive/20261031_document_sources.json.gz")
+records = json.loads(gzip.decompress(path.read_bytes()))["files"]
+original_plan = next(r["text"] for r in records
+                     if r["path"] == "docs/MeshDensificationUDFExperimentPlan.md")
+```
+
+10-19 及更早的原始结果、源码快照和文档归档入口仍见[实验证据](ThreeFieldReconstructionExperiments.md#artifacts)。历史成绩保留原批次版本、配置及分母，不能据文档更新视为新代码已经重跑通过。

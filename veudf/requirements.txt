@@ -1,0 +1,6 @@
+numpy>=1.24,<2
+scipy>=1.10
+libigl==2.6.3
+trimesh>=4
+networkx>=3
+# pythonocc-core is installed via conda-forge, not this pip requirements file.

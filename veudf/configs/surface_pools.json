@@ -1,0 +1,13 @@
+{
+  "geometry_surface_pool_count": 393216,
+  "pool_count": 1572864,
+  "pool_weights": [
+    0.25,
+    0.35,
+    0.25,
+    0.15
+  ],
+  "volume_pool_count": 0,
+  "evaluation_volume_count": 4096,
+  "feature_curve_spacing": 0.002
+}

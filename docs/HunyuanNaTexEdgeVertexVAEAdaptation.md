@@ -1,10 +1,10 @@
 # 将 Hunyuan3D / NaTex VAE 改造为边、顶点距离场 VAE 的方案
 
-日期：2026-10-14。状态：代码检查后的设计方案，尚未实施或训练。本次仅新增本文档。
+设计与外部代码核查日期：2026-10-14；文档整理：2026-10-31。本文保留当时的 VAE/Flow 改造设计，未在本次文档工作中实施或训练，也未重新审计外部 Hunyuan3D 工作区。下文文件映射与“待实施”均指该设计快照，当前重建侧接口以[隔离带算法](BandLabelTopologyRecovery.md)为准。
 
 目标代码目录：`/opt/data/private/yihengxu/Hunyuan3D/hy3dshape`。本文中的 `H/` 指该目录，其 Python 包位于 `H/hy3dshape/natex/`。检查的是本地 NaTex 贴图实现及当前工作区，不将其等同于 NaTex 作者的官方实现；仓库 HEAD 为 `08ae0e4`，工作区另有实验相关修改。
 
-数据来源：本仓库 `edge_vertex_preprocessing` 生成的 ABC 三场样本。重建目标遵循 [BandLabelTopologyRecovery.md](BandLabelTopologyRecovery.md)，数据契约参考 [ABCEdgeVertexUDFPreprocessing.md](ABCEdgeVertexUDFPreprocessing.md)。
+当前数据入口已于 2026-11-01 替换为生产 [veudf](../veudf/README.md)，规范是 `edge_vertex_mesh_pools_v1`。本文为旧模型改造设计快照，涉及旧采样、接口和训练状态的段落只保留历史语义，不能用作当前生产配置。数据来源现为 CAD mesh SDF／CAD E/V 点池。重建目标遵循 [BandLabelTopologyRecovery.md](BandLabelTopologyRecovery.md)，数据契约参考 [ABCEdgeVertexUDFPreprocessing.md](ABCEdgeVertexUDFPreprocessing.md)。
 
 ## 1. 推荐的整体改造
 
@@ -103,22 +103,9 @@ $$
 
 ### 3.2 读取原始数据，不走旧截断分支
 
-现有 schema 为 `edge_vertex_udf_v1`，**固定通道顺序 `[sdf,dE,dV]`**。输入点与三个值同位置保存：
+当前生产 schema 为 `edge_vertex_mesh_pools_v1`，各池以 `.npy` 保存 `points[N,3]` 与 `fields[N,3]=[s_mesh,dE,dV]`，从已发布 `index.json` 选择资产。E/V 不截断，空通道为 float32 `2√3` 并有显式 presence；没有旧 `evudf.io.load_fields()` 或梯度 NPZ 字段。读取规范与迁移边界见[当前数据规范](ABCEdgeVertexUDFPreprocessing.md#6-当前文件与字段)。
 
-```text
-query_points       [Q,3]
-query_fields       [Q,3] = [sdf,dE,dV]
-surface_points     [Ns,6] = [xyz,normal]
-edge_points        [Ne,6] = [xyz,tangent]
-vertex_points      [Nv,3]
-has_edges / has_vertices
-gradient_E/V, gradient_valid_E/V, nearest_tie_E/V
-nearest_E/V_id, closest_E/V_points, query_source
-```
-
-使用 `evudf.io.load_fields(..., normalize=False)` 或等价的 schema 检查。非空场原始距离没有截断；`normalize=True` 才按 `.02` 截断并归一化，不能作为本方案的 loader 主路径。
-
-此次复查 ABC10 已有结果，非空 V 的两个样本在 `.02` 截断下会分别有 **89.03% 与 88.91%** 的 query 饱和。该比例来自现有混合采样分布，不代表整个空间的体积比例。原始距离场本身是稠密标量函数，稀疏的是零集及硬截断后仍有变化的区域。
+旧 ABC10 `.02` 截断饱和统计来自另一套采样和 schema，不作为当前点池覆盖结论。模型可逆距离编码、posterior 和后处理误差分析仍需基于实际训练工程验证，不能用本历史方案覆盖现有生产配置。
 
 ### 3.3 统一坐标：避免再次归一化
 
@@ -768,12 +755,12 @@ dataset/split identity, model fingerprint, cache/statistics identity
 
 ## 16. 核查依据与参考范围
 
-本方案的模块映射来自2026-10-14的本地代码检查。以下保留核查位置；两处目前已不存在的外部文件以历史路径记录。主要位置：
+本方案的模块映射来自2026-10-14的本地代码检查。原 NaTex 路径在生产工程重组后已失效，以下按历史路径记录，不作为当前可执行入口。当前数据入口统一为本仓库 `veudf/`，旧模型设计的主要核查位置：
 
-- [双分支 VAE](../../Hunyuan3D/hy3dshape/hy3dshape/natex/models/autoencoders/model.py)、[query decoder](../../Hunyuan3D/hy3dshape/hy3dshape/natex/models/autoencoders/query_decoders.py)、[契约](../../Hunyuan3D/hy3dshape/hy3dshape/natex/contracts.py)。
-- [现有损失](../../Hunyuan3D/hy3dshape/hy3dshape/natex/training/losses.py)、表面颜色 Dataset（历史路径 `H/hy3dshape/natex/data/surface_color.py`）、[anchors](../../Hunyuan3D/hy3dshape/hy3dshape/natex/models/anchors.py)。
-- [Flow](../../Hunyuan3D/hy3dshape/hy3dshape/natex/models/diffusion/flow_matching.py)、[latent cache](../../Hunyuan3D/hy3dshape/hy3dshape/natex/data/latent_cache.py)、几何条件 Flow 配置（历史路径 `H/configs/natex_flow_unconditional.yaml`）。
-- [ABC 数据读取](../edge_vertex_preprocessing/evudf/io.py)、[采样](../edge_vertex_preprocessing/evudf/sampling.py)、[现有重建 FieldProvider](../band_brep_reconstruction/bandbrep/field_provider.py)。
+- 双分支 VAE（历史路径 `../../Hunyuan3D/hy3dshape/hy3dshape/natex/models/autoencoders/model.py`）、query decoder（历史路径 `../../Hunyuan3D/hy3dshape/hy3dshape/natex/models/autoencoders/query_decoders.py`）、契约（历史路径 `../../Hunyuan3D/hy3dshape/hy3dshape/natex/contracts.py`）。
+- 现有损失（历史路径 `../../Hunyuan3D/hy3dshape/hy3dshape/natex/training/losses.py`）、表面颜色 Dataset（历史路径 `H/hy3dshape/natex/data/surface_color.py`）、anchors（历史路径 `../../Hunyuan3D/hy3dshape/hy3dshape/natex/models/anchors.py`）。
+- Flow（历史路径 `../../Hunyuan3D/hy3dshape/hy3dshape/natex/models/diffusion/flow_matching.py`）、latent cache（历史路径 `../../Hunyuan3D/hy3dshape/hy3dshape/natex/data/latent_cache.py`）、几何条件 Flow 配置（历史路径 `H/configs/natex_flow_unconditional.yaml`）。
+- [生产数据读取](../veudf/src/veudf/io/dataset.py)、[采样](../veudf/src/veudf/preprocess/sampling.py)、[现有重建 FieldProvider](../band_brep_reconstruction/bandbrep/field_provider.py)。
 
 概念参考：NaTex 提供几何条件下连续颜色场的双分支 latent 生成思路；3DShape2VecSet 提供以向量集合和 attention 表达神经场的相关基础。[NaTex 原文](https://arxiv.org/html/2511.16317v1)、[3DShape2VecSet 原文](https://arxiv.org/abs/2301.11445)。
 

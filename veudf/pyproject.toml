@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "veudf"
+version = "2.0.0"
+description = "Data preparation and geometry processing for edge/vertex distance fields"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24,<2", "scipy>=1.10", "libigl==2.6.3", "trimesh>=4", "networkx>=3"]
+
+[project.optional-dependencies]
+jobs = ["psutil>=6"]
+postprocess = ["pymeshlab==2022.2.post3"]
+test = ["pytest>=8", "psutil>=6"]
+
+[project.scripts]
+veudf-build-dataset = "veudf.cli.build_dataset:main"
+veudf-prepare-condition = "veudf.cli.prepare_condition:main"
+veudf-prepare-remaining = "veudf.cli.prepare_remaining_run:main"
+veudf-guarded-build = "veudf.cli.run_guarded_build:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.data-files]
+"share/veudf/configs" = ["configs/*.json"]

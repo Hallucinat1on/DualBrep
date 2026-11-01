@@ -125,7 +125,7 @@ def fit_shared_curves(graph,provider,cfg):
         test=record.evaluate(np.linspace(0,1,count))
         values=evaluate_batched(provider,test,cfg.query_batch_size)
         require(values[:,1].max()<=cfg.curve_tolerance*2,'curve_field_failed','Fitted curve violates edge UDF',edge=edge.id,error=float(values[:,1].max()))
-        require(np.abs(values[:,0]).max()<=cfg.surface_tolerance,'curve_surface_failed','Fitted curve violates SDF',edge=edge.id)
+        require(np.abs(values[:,0]).max()<=cfg.feature_sdf_limit,'curve_surface_failed','Fitted curve violates SDF',edge=edge.id)
         cover=cKDTree(test).query(p)[0].max()
         require(cover<=cfg.curve_tolerance*2,'curve_coverage_failed','Fitted curve loses branch coverage',edge=edge.id,error=float(cover))
         if edge.vertices:

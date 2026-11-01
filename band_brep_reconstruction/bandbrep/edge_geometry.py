@@ -21,7 +21,7 @@ def project_support(points, provider, radius, cfg):
         safe=np.linalg.norm(proposed-original,axis=1)<=radius
         q[active&safe]=proposed[active&safe]
     v=provider.evaluate(q).values
-    valid=(v[:,1]<=cfg.curve_tolerance)&(np.abs(v[:,0])<=cfg.surface_tolerance)
+    valid=(v[:,1]<=cfg.curve_tolerance)&(np.abs(v[:,0])<=cfg.feature_sdf_limit)
     require(valid.sum()>=3 and valid.mean()>=.8,'edge_localization_failed',
             'Band samples do not consistently localize to an edge',localized=int(valid.sum()),total=len(q))
     return q[valid]

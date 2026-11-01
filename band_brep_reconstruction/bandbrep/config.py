@@ -41,8 +41,16 @@ class Config:
     surface_candidates: str = 'basic'
     curve_candidates: str = 'basic'
     periodic_frame_planning: bool = False
+    feature_sdf_tolerance: float = None
+
+    @property
+    def feature_sdf_limit(self):
+        return self.surface_tolerance if self.feature_sdf_tolerance is None else self.feature_sdf_tolerance
 
     def validate(self):
+        if self.feature_sdf_tolerance is not None:
+            if isinstance(self.feature_sdf_tolerance, bool) or not math.isfinite(self.feature_sdf_tolerance) or self.feature_sdf_tolerance <= 0:
+                raise ValueError('invalid feature_sdf_tolerance')
         if self.band_connectivity not in ('edge', 'vertex'):
             raise ValueError('invalid band_connectivity')
         if self.curve_candidates not in ('basic', 'arcs'):

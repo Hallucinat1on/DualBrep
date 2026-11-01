@@ -2,6 +2,8 @@
 
 本目录不依赖上级项目的 Python 导入。下列文件直接复制，便于迁移。日期：2026-10-13。
 
+2026-11-01 数据生产已迁移到 [veudf](../veudf/README.md)，以外部生产目录为准。表内 `edge_vertex_preprocessing/evudf` 是原始复制时的历史路径，现已退役；这里的 oracle 保留冻结实现与哈希，供既有重建及实验复现，不同步替换为生产包，也不作为新的数据生成入口。
+
 | 本地副本 | 原仓库来源 | SHA-256 |
 |---|---|---|
 | `bandbrep/vendor/oracle/__init__.py` | `../edge_vertex_preprocessing/evudf/__init__.py` | `7e5b48636d3e8be2d82e13fee5f4d21409bbd77ffbeb6355f95994adc1d57bcd` |

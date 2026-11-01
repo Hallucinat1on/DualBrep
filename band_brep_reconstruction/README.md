@@ -1,17 +1,19 @@
 # 独立三场 B-rep 重建模块
 
-版本 0.3.0，按 `docs/BandLabelTopologyRecovery.md` 的多标签方案实现。复制本目录即可迁移；运行时不导入上级 DualBrep 或预处理项目的代码。复用代码位于 `bandbrep/vendor/`，来源见 [PROVENANCE.md](PROVENANCE.md)。
+版本 0.3.0，文档与代码核对：2026-10-31。算法和阶段说明见[隔离带重建文档](../docs/BandLabelTopologyRecovery.md)。复制本目录即可迁移；运行时不导入上级 DualBrep 或预处理项目的代码。复用代码位于 `bandbrep/vendor/`，来源见 [PROVENANCE.md](PROVENANCE.md)。
+
+数据生产已切换到 [veudf](../veudf/README.md)，以外部生产目录为唯一来源。本模块内部 `vendor/oracle` 是历史实验的冻结查询副本，不再承担新数据生产。当前 `--provider sampled` 仍读取旧 NPZ，生产 `.npy` 点池和预测场尚需单独 provider 适配；本次迁移不改变历史重建算法或缓存身份。
 
 ## 当前流程
 
 1. SDF 提取固定表面网格，在三角形中心查询 `[sdf, dE, dV]`。
 2. 复制 DualBrep 两阶段核心提取：第一阶段保留 `dE >= 0.005`，过滤小于 10 个三角形或平均 UDF 不大于 0.003 的分量；第二阶段在父分量内用 `dE >= 0.01` 拆分，仅当至少两个子分量满足大小条件时替换父核心。
-3. 最终核心仅作标签来源。第一阶段低距离点、成功拆分时排除的低距离点组成 E；大小/均值过滤掉的分量单独标记，不传播、不作为边。`V = E & (dV < tau_vertex)`，普通带为 `E & ~V`。因此核心不再等于 `~E`，还存在排除区。
+3. 最终核心仅作标签来源。基础 `distance_only` 配置只将第一阶段低距离点、成功拆分时排除的低距离点组成边带，大小/均值过滤区不传播；推荐的 `noncore` 配置将全部非核心用于传播，但过滤原因 3/4/5 仍不作几何支撑。阈值顶点带为 `V = E & (dV < tau_vertex)`；推荐配置改用局部候选顶点域。普通带为 `E & ~V`。
 4. 普通带组件收集所有相邻面标签，得到独立 edge_id。相同邻面的一对孔口圆环仍是两条独立边。
 5. 顶点域收集实际接触的 edge_id 和所有面标签，域内所有节点读取完整集合。禁止顶点域向普通带反向转发；后来标签不会丢失。
 6. 输出无方向 E–F、V–E、V–F 关联；此时不要求端点使用次数、面环或方向。
 7. v-UDF 距离中心拟合共享顶点；e-UDF 定位各边支持点，按几何组织曲线并固定共享端点拟合。
-8. 几何后处理确定闭合/自环及边界方向和环；面内部从面核心采样，以 SDF 校验，在固定共享曲线约束下拟合曲面。
+8. 曲线阶段开始确定闭合/自环与端点使用，后处理补齐边界方向和面环；面内部从面核心采样，以 SDF 校验，在固定共享曲线约束下拟合曲面。
 9. 补建 seam/pcurve，装配共享 OCC 实体，导出并读回 STEP。
 
 `recommended` 预设在第 3、4、7、8、9 步启用了局部顶点域、短边推断、圆弧与回转面候选、周期面切口规划；各项见下文"配置与预设"。
@@ -80,7 +82,7 @@ python demo.py --shape sphere_bore --preset recommended --output outputs/sphere_
 
 `surface_candidates='revolution'` / `curve_candidates='arcs'` 必须与 `periodic_frame_planning=true` 一起使用；单独打开时，新的周期 pcurve 会让 `FixMissingSeam` 失败，部分原本能成功的模型会失败。
 
-预设在新独立集 H100b（100 个 ABC 模型）上 STEP 通过 38/100；关闭四项改进的同一配置为 19/100（详见 `../docs/ThreeFieldReconstructionExperiments.md` §7）。`project_face_samples` 选项已删除（实验表明无效且会让部分模型退化），含该键的旧配置文件需删掉这一项。
+预设的验证范围见[历史实验](../docs/ThreeFieldReconstructionExperiments.md#historical-results)；原生条件网格接入需另核对[F30实验](../docs/ThreeFieldReconstructionExperiments.md#f30-results)，不能直接外推旧oracle成绩。`project_face_samples` 已删除，含该键的旧配置文件需移除这一项。
 
 JSON 配置示例（在预设之上覆盖个别项）：
 
@@ -96,7 +98,9 @@ JSON 配置示例（在预设之上覆盖个别项）：
 }
 ```
 
-`tau_edge=0.025` 只保留给原有几何定位半径和覆盖探针检查，不再定义传播边带。分割单独由 `face_threshold1/2` 控制。两阶段是在 `bands` 阶段计算并缓存，`seeds` 阶段验收标签，避免重复分割。
+`tau_edge=0.025` 用于几何定位半径、覆盖探针及曲面可信内部点筛选，不定义传播边带。分割由 `face_threshold1/2` 控制。两阶段是在 `bands` 阶段计算并缓存，`seeds` 阶段验收标签，避免重复分割。
+
+`feature_sdf_tolerance` 单独控制顶点、边支撑、短边、曲线和覆盖探针的 SDF 相容性。默认 `null`，通过 `feature_sdf_limit` 回退到 `surface_tolerance=0.003`；JSON 可显式设置有限正值。F30 的 `0.004` 是实验候选，未写入默认值或 `recommended`，也不放宽曲面内部、共享边界和 CAD 容差。
 
 阈值与网格分辨率需要共同评估，默认值不是任意模型的保证。`allow_surface_residual_exceedance=true` 允许最终 SDF 分辨率的残差告警，不绕过闭合与流形检查。仅执行上述两阶段过滤，不追加平面合并、标签回填或将零核心强制改成一个面：关联阶段保存多标签/无源组件和诊断；参数化遇到无法确认的邻面或顶点关联会明确报告，不伪造有效 STEP。
 
@@ -114,7 +118,7 @@ JSON 配置示例（在预设之上覆盖个别项）：
 | `cad_graph.json` | 后处理补齐的方向和面环 |
 | `face_patches.json` | 固定边界的参数曲面 |
 | `logical_to_cad.json` | 逻辑实例与 CAD 实体映射 |
-| `reconstruction.step` | 通过内核和 STEP 读回验收的结果 |
+| `reconstruction.step` | CAD 导出文件；最终验收是否通过以 `run.json` 的 `solid_validated` 为准 |
 | `run.json` / `quality.json` | 阶段、配置、耗时、缓存哈希和失败诊断 |
 
 `logical_graph_ready` 仅表示无方向关联输出完成，可能包含 `unresolved_edges`；不是 CAD 有效性结论。只有 `solid_validated` 表示完整装配与读回检查通过，也不是对连续生成场全域正确性的数学证明。
@@ -142,6 +146,8 @@ python benchmarks/validate_multilabel.py --output outputs/multilabel_validation
 | `run_plan_20261017.sh` / `summarize_plan_20261017.py` | 10-18 批量实验与结果汇总 |
 | `validate_plan_neural.py` | 单模型三通道 MLP 神经场拟合后的重建 |
 | `validate_multilabel.py` / `evaluate_multilabel_batch.py` | v0.2 多标签验证与批次评估 |
+| `alignment_grid.py` / `alignment_fields.py` / `run_alignment_experiments.py` | 原生条件 SDF 插值、精确 E/V 输入和 F30 配对实验；不是主 CLI 的 provider 选项 |
+| `run_mesh_density_experiments.py` / `validate_mesh_density.py` | 固定表面全局/局部加密、重新查询三场、过滤对照与解析验证 |
 
 这些脚本需要 `libigl` 和 `threadpoolctl`（`pip install -e .[benchmarks]`）。10-16 的一次性实验脚本（切口重试、曲面自由度、噪声补测、审计、报告生成、513³ 代理）已删除，原样副本在 `outputs/plan_20261016/source_snapshot/benchmarks/` 和 `outputs/plan_20261017/source_snapshot/benchmarks/`。
 
@@ -149,12 +155,12 @@ python benchmarks/validate_multilabel.py --output outputs/multilabel_validation
 
 `bands.npz/exclusion_reasons`：0=保留核心，1=第一阶段低距离，2=已成功拆分父域中的第二阶段低距离，3=第一阶段大小过滤，4=第一阶段均值过滤，5=第二阶段子分量大小过滤。默认只有 1/2 进入边带；`band_propagation='noncore'` 时全部非核心点参与传播，但 3/4/5 仍不作为几何支撑点。`run.json` 的 bands 报告记录各原因计数和分割参数、成功拆分父分量；无核心仍明确失败，不把整张表面伪装成一个面。
 
-## 实验结果
+## 实验与验证
 
-| 日期 | 配置 | S30 STEP | 独立集 STEP |
-|---|---|---:|---|
-| 10-15 | 代码默认值（65³） | 1/30 | — |
-| 10-16 | 257³、共享顶点连通、τ_V=0.02 | 5/30 | H100：19/100 |
-| 10-18 | `recommended` 预设 | 9/30 | H100b：38/100（同配置关闭四项改进为 19/100） |
+历次结果、数据范围和计划统一见[实验主文档](../docs/ThreeFieldReconstructionExperiments.md)：[迁移与解析验证](../docs/ThreeFieldReconstructionExperiments.md#early-validation)、[历史消融](../docs/ThreeFieldReconstructionExperiments.md#historical-results)、[F30条件场对照](../docs/ThreeFieldReconstructionExperiments.md#f30-results)、[证据与复现](../docs/ThreeFieldReconstructionExperiments.md#artifacts)。本README只维护使用说明，不重复维护实验成绩。
 
-剩余失败主要出在面分割（窄面被边带吞掉或碎成多个核心）。历次实验、逐模型结果与清理范围统一见 [三场重建实验报告](../docs/ThreeFieldReconstructionExperiments.md)。原始统计与成功 STEP 保留；10-15 归并前的报告原文压缩存放于 `outputs/experiment_archive_20261015/`，10-18 合并前的四份原文存放于 `outputs/experiment_archive_20261018/`。
+网格密度实验使用 `bandbrep/mesh_densification.py` 的共享边中点一致细分，保持原分片线性表面不变，再查询最终中心三场；方法、预注册与结果统一见[加密实验报告](../docs/MeshDensificationUDFExperimentReport.md#method)。主 `reconstruct()` 和 `Config` 没有加密开关；批处理由 `benchmarks/run_mesh_density_experiments.py` 独立准备和接入，支持 `--initialize / --run / --status / --report`。10-28—10-29 批次已结束，复查其保存状态：
+
+```bash
+python benchmarks/run_mesh_density_experiments.py --status --output outputs/mesh_density_20261028_v2
+```

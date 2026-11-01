@@ -7,6 +7,17 @@ please [cite it](#citation).
 
 本仓库的原理说明、三场预处理、独立重建方案及实验汇总见 [文档导航](docs/README.md)。
 
+后续 E/V-UDF 数据开发以生产目录 `/opt/data/private/yihengxu/Hunyuan3D/veudf` 为准；本仓库同步副本与运行入口见 [veudf/README.md](veudf/README.md)。旧 `edge_vertex_preprocessing/evudf` 已退役，使用 `edge_vertex_mesh_pools_v1` 的网格 SDF／CAD E/V 和 `.npy` 点池：
+
+```bash
+python scripts/sync_veudf.py --check
+# 在 veudf 所需的 OCC 7.7 / Python 3.10+ 数据环境中安装和运行。
+python -m pip install -e './veudf[jobs,postprocess,test]'
+python -m veudf.cli.build_dataset --help
+```
+
+下文原 DualBrep 的安装、模型、`prepare_implicit.py` 和 Voronoi 数据命令保留论文复现用途，不能生成当前生产 E/V 点池。新数据规范、筛选和迁移边界见[生产数据处理](docs/ABCEdgeVertexUDFPreprocessing.md)。
+
 Boundary Representation (B-rep) is the dominant data format in Computer-Aided Design (CAD), prized
 for its analytical precision and native support for parametric editing. Its heterogeneous
 structure, however — continuous parametric geometry coupled with a discrete topological graph —
@@ -217,7 +228,7 @@ cd ..
 Voronoi/build/calculate_voronoi/calculate_voronoi 00000164.step out/00000164/
 ```
 
-**2) Collect implicit samples (`prepare_implicit.py`).** Turns the STEP + `voronoi.ply` into the
+**2) Collect legacy GVD samples (`prepare_implicit.py`, original DualBrep only).** For current E/V production use [veudf](veudf/README.md). This legacy command turns the STEP + `voronoi.ply` into the
 `.npz` the VAE consumes (surface/edge/voronoi point clouds + SDF/UDF query fields):
 
 ```bash

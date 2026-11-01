@@ -108,6 +108,8 @@ def fidelity_score(solid, source, deflection=5e-4):
     return {'volume': float(props.Mass()), 'truth_volume': truth, 'volume_rel_error': float(abs(props.Mass()-truth)/truth),
             'recon_to_truth_max': float(d_rg.max()), 'truth_to_recon_max': float(d_gr.max()),
             'recon_to_truth_mean': float(d_rg.mean()), 'truth_to_recon_mean': float(d_gr.mean()),
+            'recon_to_truth_quantiles': dict(zip(('median', 'p95', 'p99', 'max'), map(float, np.quantile(d_rg, [.5, .95, .99, 1])))),
+            'truth_to_recon_quantiles': dict(zip(('median', 'p95', 'p99', 'max'), map(float, np.quantile(d_gr, [.5, .95, .99, 1])))),
             'method': f'20k area-weighted samples per side; OCC mesh deflection {deflection}; truth = CAD oracle triangulation'}
 
 

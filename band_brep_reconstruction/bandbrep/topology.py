@@ -85,7 +85,7 @@ def infer_short_edges(topology, bands, provider, cfg):
             order=np.argsort(distance);entry['core_distances']=dict(zip(map(int,faces),distance))
             if distance[order[2]]>=1.5*distance[order[1]]:faces=sorted(int(faces[i]) for i in order[:2])
         entry['faces']=faces
-        ok=len(faces)==2 and entry['max_edge_udf']<=2*cfg.localization_tolerance and entry['max_abs_sdf']<=cfg.surface_tolerance
+        ok=len(faces)==2 and entry['max_edge_udf']<=2*cfg.localization_tolerance and entry['max_abs_sdf']<=cfg.feature_sdf_limit
         if not ok:report['rejected'].append(entry);continue
         eid=len(topology.edges)
         topology.edges.append(dict(id=eid,faces=faces,vertices=[va,vb],nodes=[],support_nodes=[],status='inferred_short'))

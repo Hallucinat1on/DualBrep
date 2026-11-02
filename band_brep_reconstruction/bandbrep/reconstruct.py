@@ -4,10 +4,11 @@ import time
 from pathlib import Path
 import numpy as np
 from . import __version__
+from .deadline import checkpoint, timed_reconstruction
 from .schemas import write_json,jsonable,require,SurfaceMesh,BandState,VertexNode
 from .surface_mesh import validate_mesh
 from .field_provider import MeshFieldProvider
-from .mesh_densification import RefinementConfig, densify_surface_mesh
+from .mesh_densification import coarse_refine_surface, fine_refine_surface
 from .bands import build_bands
 from .face_seeds import extract_face_seeds
 from .topology import recover_topology
@@ -19,10 +20,11 @@ from .postprocess import orient_boundaries
 from .surface_fitting import initialize_face_surfaces
 
 
+@timed_reconstruction
 def reconstruct(mesh,udf,cfg,output_dir,resume=False):
     """Recover B-rep from a closed normalized mesh and continuous metric E/V."""
     cfg.validate();out=Path(output_dir);out.mkdir(parents=True,exist_ok=True)
-    from .cache import cache_key,file_hash,load_graph,load_records,load_topology
+    from .cache import cache_key,file_hash,load_graph,load_records,load_topology,load_center_fields
     key,cache_input=cache_key(mesh,udf,cfg)
     prior=None
     if (out/'run.json').exists():
@@ -39,57 +41,91 @@ def reconstruct(mesh,udf,cfg,output_dir,resume=False):
     provider=None
     start=time.monotonic();stage='initialization';write_json(out/'run.json',run)
     def finish(status,objects=None):
+        checkpoint(stage)
         if hasattr(provider,'flush'):provider.flush()
         run.update(status=status,elapsed_seconds=time.monotonic()-start,query_report=provider.query_report)
         write_json(out/'run.json',run)
         write_json(out/'quality.json',{'status':status,'stages':run['stages'],'complete_solid':status=='solid_validated'})
         return objects or run
+    stage_files = {
+        'mesh': ('input_mesh.npz',),
+        'coarse_refinement': ('coarse_mesh.npz',),
+        'fine_refinement': ('working_mesh.npz', 'center_fields.npz'),
+        'bands': ('bands.npz',), 'seeds': ('face_seeds.npz',),
+        'graph': ('topology_labels.npz', 'incidence.json'), 'vertices': ('vertices.json',),
+        'curves': ('logical_graph.json', 'curves.json', 'refined_geometry.npz'),
+        'postprocess': ('cad_graph.json',), 'surfaces': ('face_patches.json',),
+        'cad': ('logical_to_cad.json', 'curves_and_faces.brep', 'reconstruction.step'),
+    }
     def mark(name,report):
-        for path in out.iterdir():
-            if path.suffix in ('.json','.npz','.brep') and path.name not in ('run.json','quality.json'):
-                artifacts[path.name]=file_hash(path)
+        checkpoint(name)
+        for filename in stage_files[name]:
+            artifacts[filename] = file_hash(out / filename)
         run['artifacts']=artifacts
         run['stages'].append({'stage':name,'elapsed_seconds':time.monotonic()-start,'report':report});write_json(out/'run.json',run)
         print(f'[{name}] {json.dumps(jsonable(report),ensure_ascii=False)}',flush=True)
     try:
         stage='mesh'
+        checkpoint(stage)
         mesh=validate_mesh(mesh,cfg)
-        provider=MeshFieldProvider(mesh,udf,cfg)
+        input_mesh = mesh
+        np.savez_compressed(out/'input_mesh.npz',vertices=mesh.vertices,triangles=mesh.triangles)
+        mark(stage,mesh.report)
+        stage='coarse_refinement'
+        checkpoint(stage)
+        if stage in accepted:
+            with np.load(out/'coarse_mesh.npz', allow_pickle=False) as a:
+                mesh=SurfaceMesh(a['vertices'],a['triangles'])
+                coarse_parent=a['parent_triangles']
+            report=accepted[stage]
+        else:
+            mesh,coarse_parent,report=coarse_refine_surface(mesh,cfg.refinement_coarse_edge,
+                lambda data:write_json(out/'coarse_refinement_progress.json',data))
+            np.savez_compressed(out/'coarse_mesh.npz',vertices=mesh.vertices,triangles=mesh.triangles,
+                                parent_triangles=coarse_parent)
+        mark(stage,report)
+        stage='fine_refinement'
+        checkpoint(stage)
+        provider=MeshFieldProvider(input_mesh,udf,cfg)
         run.update(provider=provider.fingerprint,presence=provider.presence(),
                    presence_support=provider.presence_support,normalization=provider.normalization)
         if cfg.save_queries:
             from .query_recording import RecordingProvider
             provider=RecordingProvider(provider,out/'queries',cfg.query_batch_size)
-        np.savez_compressed(out/'input_mesh.npz',vertices=mesh.vertices,triangles=mesh.triangles)
-        mark(stage,mesh.report)
-        stage='refinement'
         if stage in accepted:
-            a=np.load(out/'working_mesh.npz')
-            mesh=SurfaceMesh(a['vertices'],a['triangles'],{'refinement':accepted[stage]})
+            with np.load(out/'working_mesh.npz', allow_pickle=False) as a:
+                mesh=SurfaceMesh(a['vertices'],a['triangles'])
+            center_fields=load_center_fields(out/'center_fields.npz')
+            center_fields.validate(mesh.vertices[mesh.triangles].mean(axis=1),provider)
+            report=accepted[stage]
         else:
-            settings=RefinementConfig(target_edge=cfg.refinement_target_edge,
-                rho_edge=cfg.refinement_rho_edge,rho_vertex=cfg.refinement_rho_vertex,
-                max_rounds=cfg.refinement_max_rounds,max_triangles=cfg.max_triangles,query_batch=cfg.query_batch_size)
-            mesh,parent,report=densify_surface_mesh(mesh,provider,settings)
-            np.savez_compressed(out/'working_mesh.npz',vertices=mesh.vertices,triangles=mesh.triangles,parent_triangles=parent)
-        mark(stage,mesh.report['refinement'])
+            mesh,fine_parent,report,center_fields=fine_refine_surface(mesh,provider,cfg,
+                lambda data:write_json(out/'fine_refinement_progress.json',data))
+            np.savez_compressed(out/'working_mesh.npz',vertices=mesh.vertices,triangles=mesh.triangles,
+                                parent_triangles=coarse_parent[fine_parent])
+            np.savez_compressed(out/'center_fields.npz',points=center_fields.points,values=center_fields.values,
+                                provider_fingerprint=np.asarray(center_fields.provider_fingerprint))
+        mark(stage,report)
         stage='bands'
+        checkpoint(stage)
         if stage in accepted:
             a=np.load(out/'bands.npz')
             optional=[a[k] if k in a.files else None for k in ('vertex_labels','vertex_centers')]
             bands=BandState(*(a[k] for k in ('points','values','edge_band','vertex_band','edge_region','core_mask')),accepted[stage], a['face_labels'], a['exclusion_reasons'],*optional)
-        else:mesh,bands=build_bands(mesh,provider,cfg)
+        else:mesh,bands=build_bands(mesh,provider,cfg,center_fields)
         extra={k:getattr(bands,k) for k in ('vertex_labels','vertex_centers') if getattr(bands,k) is not None}
         np.savez_compressed(out/'bands.npz',points=bands.points,values=bands.values,
             edge_band=bands.edge_band,vertex_band=bands.vertex_band,edge_region=bands.edge_region,core_mask=bands.core_mask,
             face_labels=bands.face_labels,exclusion_reasons=bands.exclusion_reasons,**extra)
         mark(stage,bands.report)
         stage='seeds'
+        checkpoint(stage)
         if stage in accepted:seeds=np.load(out/'face_seeds.npz')['labels'];report=accepted[stage]
         else:seeds,report=extract_face_seeds(mesh,bands,provider,cfg)
         np.savez_compressed(out/'face_seeds.npz',labels=seeds);mark(stage,report)
         if cfg.stop_after=='seeds':return finish('face_seeds_ready')
         stage='graph'
+        checkpoint(stage)
         topology=load_topology(out) if stage in accepted else recover_topology(mesh,bands,seeds,cfg,provider)
         np.savez_compressed(out/'topology_labels.npz',face_labels=topology.face_labels,
             edge_labels=topology.edge_labels,vertex_labels=topology.vertex_labels,contacts=topology.contacts)
@@ -100,6 +136,7 @@ def reconstruct(mesh,udf,cfg,output_dir,resume=False):
         mark(stage,topology.report)
         if cfg.stop_after=='graph':return finish('logical_graph_ready')
         stage='vertices'
+        checkpoint(stage)
         if stage in accepted:
             vertices=[VertexNode(**{**v,'position':np.asarray(v['position'])}) for v in json.loads((out/'vertices.json').read_text())]
         else:vertices=localize_vertices(provider,bands,topology,cfg)
@@ -107,6 +144,7 @@ def reconstruct(mesh,udf,cfg,output_dir,resume=False):
         mark(stage,{'count':len(vertices),'max_distance_residual':max((v.residual for v in vertices),default=0.)})
         if cfg.stop_after=='vertices':return finish('vertices_ready')
         stage='curves'
+        checkpoint(stage)
         if stage in accepted:
             graph=load_graph(out/'logical_graph.json');curves=load_records(out/'curves.json','curve')
         else:
@@ -120,15 +158,18 @@ def reconstruct(mesh,udf,cfg,output_dir,resume=False):
             'max_fit_error':max((c.residual for c in curves.values()),default=0.)})
         if cfg.stop_after=='curves':return finish('curves_ready')
         stage='postprocess'
+        checkpoint(stage)
         if stage in accepted:graph=load_graph(out/'cad_graph.json')
         else:orient_boundaries(mesh,topology,graph,curves)
         write_json(out/'cad_graph.json',graph);mark(stage,{'face_cycles':{f:len(c) for f,c in graph.cycles.items()}})
         stage='surfaces'
+        checkpoint(stage)
         if stage in accepted:patches=load_records(out/'face_patches.json','patch')
         else:patches=initialize_face_surfaces(mesh,seeds,graph,curves,provider,cfg)
         write_json(out/'face_patches.json',patches);mark(stage,{i:p.report for i,p in patches.items()})
         if cfg.stop_after=='surfaces':return finish('surfaces_ready')
         stage='cad'
+        checkpoint(stage)
         from .occ_assembly import assemble_brep,verify_export_and_roundtrip
         solid,mapping=assemble_brep(graph,curves,patches,cfg,out)
         report=verify_export_and_roundtrip(solid,graph,curves,patches,mapping,cfg,out)

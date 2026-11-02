@@ -5,7 +5,7 @@ from bandbrep.schemas import SurfaceMesh
 
 class AnalyticFields:
     """Internal three-channel fixture for geometry unit tests."""
-    def __init__(self,fn,presence=('present','present')):self.fn=fn;self._presence=presence
+    def __init__(self,fn,presence=('present','present')):self.fn=fn;self._presence=presence;self.fingerprint="analytic-test-field"
     def presence(self):return self._presence
     def evaluate(self,q):
         v=np.asarray(self.fn(np.asarray(q,float)),float)

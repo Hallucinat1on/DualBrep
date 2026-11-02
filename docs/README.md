@@ -1,6 +1,6 @@
 # 文档导航
 
-更新：2026-11-01。当前主目录保留 8 份文档，按背景、数据、重建、生成设计和实验组织。安装与命令行维护在各模块 README，算法与字段规范维护在技术文档，成绩与样本口径维护在实验文档。
+更新：2026-11-01。当前主目录保留 10 份文档，按背景、数据、重建、生成设计和实验组织。安装与命令行维护在各模块 README，算法与字段规范维护在技术文档，成绩与样本口径维护在实验文档。
 
 | 文档 | 内容与状态 |
 |---|---|
@@ -11,10 +11,12 @@
 | [Hunyuan／NaTex 场 VAE 设计](HunyuanNaTexEdgeVertexVAEAdaptation.md) | 2026-10-14 的外部模型改造设计快照，涵盖场编码、联合 E/V latent、Flow 与验收；不代表本次已实施训练 |
 | [实验主文档](ThreeFieldReconstructionExperiments.md) | 历史验证、消融、F30 条件场对照、面分割失败分析和待验证改进 |
 | [网格加密方法与报告](MeshDensificationUDFExperimentReport.md) | 10-28—10-29 的 20 例×7组结果、方法、预注册预算和选型门槛；已合并原计划 |
+| [原生网格 L5 配对实验](NativeMeshL5Experiment.md) | 同源 20 dev 已完成：四轮 L5 全部未达标；与旧 M0/L5 配对，解释原生网格起始尺度差异 |
+| [网格粗细加密实施与验收](CoarseFineMeshRefinementPlan.md) | 已实现：纯几何粗加密至 0.02、近场细化至 0.005、超长边剪枝及字段复用；完整新批次待运行 |
 
 使用入口：[重建模块 README](../band_brep_reconstruction/README.md)、[生产数据模块 README](../veudf/README.md)。
 
-生产目录为 `/opt/data/private/yihengxu/Hunyuan3D/veudf`，本仓库 `veudf/` 按源码哈希同步；新功能先在生产目录开发，使用 `python scripts/sync_veudf.py --check / --apply` 核对或同步（两参数择一）。历史数据保留各自版本；旧重建 oracle 与 MC 实验入口已移除，新后处理直接使用网格、连续 E/V 和默认 L5。
+生产目录为 `/opt/data/private/yihengxu/Hunyuan3D/veudf`，本仓库 `veudf/` 按源码哈希同步；新功能先在生产目录开发，使用 `python scripts/sync_veudf.py --check / --apply` 核对或同步（两参数择一）。历史数据保留各自版本；旧重建 oracle 与 MC 实验入口已移除，新后处理直接使用网格、连续 E/V 和默认粗／细两级加密。
 
 建议先读[当前重建阶段](BandLabelTopologyRecovery.md#2-阶段代码与产物)与[当前数据字段](ABCEdgeVertexUDFPreprocessing.md#6-当前文件与字段)，再按需查[F30 结果](ThreeFieldReconstructionExperiments.md#f30-results)、[网格加密结果](MeshDensificationUDFExperimentReport.md)、[面分割分析](ThreeFieldReconstructionExperiments.md#segmentation-failures)和[后续实验](ThreeFieldReconstructionExperiments.md#next-experiments)。原 GVD-UDF、真实有限边/顶点距离、直接 CAD SDF 和当前 mesh SDF 的语义不能互换。
 

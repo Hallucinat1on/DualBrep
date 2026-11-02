@@ -6,10 +6,11 @@ from pathlib import Path
 @dataclass
 class Config:
     query_batch_size: int = 8192
+    refinement_coarse_edge: float = .02
     refinement_target_edge: float = .005
     refinement_rho_edge: float = .02
     refinement_rho_vertex: float = .03
-    refinement_max_rounds: int = 4
+    sample_timeout_seconds: float = 10800.
     presence_samples: int = 393216
     presence_tau: float = .005
     presence_min_points: int = 16
@@ -19,7 +20,6 @@ class Config:
     face_threshold2: float = .01
     face_filter_size: int = 10
     face_avg_udf_threshold: float = .003
-    max_triangles: int = 1500000
     field_error: float = .0002
     surface_tolerance: float = .003
     localization_tolerance: float = .001
@@ -51,6 +51,7 @@ class Config:
         return self.surface_tolerance if self.feature_sdf_tolerance is None else self.feature_sdf_tolerance
 
     def validate(self):
+        if isinstance(self.sample_timeout_seconds,bool):raise ValueError("invalid sample_timeout_seconds")
         if self.feature_sdf_tolerance is not None:
             if isinstance(self.feature_sdf_tolerance, bool) or not math.isfinite(self.feature_sdf_tolerance) or self.feature_sdf_tolerance <= 0:
                 raise ValueError('invalid feature_sdf_tolerance')
@@ -73,7 +74,7 @@ class Config:
             raise ValueError('invalid vertex_cut_factor')
         if self.band_propagation not in ('distance_only', 'noncore'):
             raise ValueError('invalid band_propagation')
-        for key in ('refinement_max_rounds','presence_samples','presence_min_points','query_batch_size','max_triangles','max_segments',
+        for key in ('presence_samples','presence_min_points','query_batch_size','max_segments',
                     'face_samples','spline_controls','max_spline_controls','uv_iterations','face_filter_size'):
             v = getattr(self,key)
             if type(v) is not int or v < 1: raise ValueError(f'{key} must be a positive integer')
@@ -81,10 +82,12 @@ class Config:
             raise ValueError('invalid spline controls')
         if self.face_threshold2 < self.face_threshold1:
             raise ValueError('face_threshold2 must be >= face_threshold1')
-        for key in ('refinement_target_edge','refinement_rho_edge','refinement_rho_vertex','presence_tau','tau_edge','tau_vertex','face_threshold1','face_threshold2','face_avg_udf_threshold','field_error','surface_tolerance',
+        for key in ('sample_timeout_seconds','refinement_coarse_edge','refinement_target_edge','refinement_rho_edge','refinement_rho_vertex','presence_tau','tau_edge','tau_vertex','face_threshold1','face_threshold2','face_avg_udf_threshold','field_error','surface_tolerance',
                     'localization_tolerance','curve_tolerance','boundary_tolerance','cad_tolerance'):
             v = getattr(self,key)
-            if not math.isfinite(v) or v <= 0: raise ValueError(f'invalid {key}')
+            if isinstance(v,bool) or not math.isfinite(v) or v <= 0: raise ValueError(f'invalid {key}')
+        if self.refinement_target_edge > self.refinement_coarse_edge:
+            raise ValueError('refinement_target_edge must not exceed refinement_coarse_edge')
         if self.stop_after not in ('seeds','graph','vertices','curves','surfaces','solid'): raise ValueError('invalid stop_after')
         return self
 

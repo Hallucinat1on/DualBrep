@@ -6,12 +6,13 @@ from types import SimpleNamespace
 from .vendor.dualbrep_segmentation import hierarchical_segmentation
 
 
-def build_bands(mesh, provider, cfg):
+def build_bands(mesh, provider, cfg, center_fields=None):
     presence = provider.presence()
     require(all(p != 'unknown' for p in presence), 'presence_unknown',
             'Supply edge/vertex existence; missed minima do not imply absence')
     points = mesh.vertices[mesh.triangles].mean(axis=1)
-    values = evaluate_batched(provider, points, cfg.query_batch_size)
+    values = (evaluate_batched(provider, points, cfg.query_batch_size) if center_fields is None
+              else center_fields.validate(points, provider))
     udf = values[:, 1] if presence[0] == 'present' else np.full(len(points), max(cfg.face_threshold2, cfg.face_avg_udf_threshold)+1.)
     count, labels, reasons, segmentation = hierarchical_segmentation(
         SimpleNamespace(face_adjacency=face_adjacency(mesh.triangles)), udf,
@@ -43,5 +44,6 @@ def build_bands(mesh, provider, cfg):
                   sampling='triangle_centers', vertex_domain='nested_in_edge_band',
                   vertex_domains=vertex_report,
                   segmentation=segmentation,
-                  field_query_points=len(points), strict_topology_guarantee=False)
+                  field_query_points=len(points) if center_fields is None else 0,
+                  reused_center_queries=center_fields is not None, strict_topology_guarantee=False)
     return mesh, BandState(points, values, eb, vb, eb & ~vb, core, report, labels, reasons, vertex_labels, vertex_centers)

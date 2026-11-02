@@ -1,6 +1,6 @@
 # 网格与 E/V 场的 B-rep 后处理
 
-版本 0.4.0，2026-11-01。输入为**预处理得到的闭合网格，以及可连续查询的两个 metric UDF**。默认先在低 UDF 区域执行 L5 加密，然后恢复面核心、拓扑关联、共享顶点和曲线，拟合曲面并装配 STEP。[算法与产物](../docs/BandLabelTopologyRecovery.md)、[代码来源](PROVENANCE.md)。
+版本 0.5.0，2026-11-01。输入为**预处理得到的闭合网格，以及可连续查询的两个 metric UDF**。默认先纯几何粗加密至 0.02，再按 E/V 近场细化至 0.005，然后恢复面核心、拓扑关联、共享顶点和曲线，拟合曲面并装配 STEP。[算法与产物](../docs/BandLabelTopologyRecovery.md)、[代码来源](PROVENANCE.md)。
 
 ## 安装
 
@@ -62,13 +62,16 @@ python band_brep_reconstruction/reconstruct.py \
 
 ## 默认流程与配置
 
-1. 验证原始网格，建立网格距离查询；输入网格始终是几何基准。
-2. 在现有顶点与三角形中心查询 E/V，近边/顶点区域做共享边一致剖分。新增顶点、最终中心重新查询模型，不插值旧 UDF 或复制父标签。
-3. 最终三角形中心执行 DualBrep 两阶段面核心提取；非核心传播、局部顶点域恢复 E–F、V–E、V–F。
-4. 由两个 UDF 的梯度定位顶点和边，拟合固定共享端点的曲线，再拟合曲面并构建面环、seam 和 pcurve。
-5. OCC 装配、导出并读回 STEP；仅 `solid_validated` 表示全部验收完成。
+1. 验证并保存原始网格，保留为模型 condition 和 SDF 基准。
+2. 不查询任何场，仅对超过 `0.02` 的共享边做粗加密，直到全局达标。
+3. 基于原始网格建立场接口；在粗网格顶点与中心查询 E/V，仅对近场中仍超过 `0.005` 的边做细加密。新增点重新查询，不插值 UDF 或复制父标签。
+4. 将最终中心字段直接交给 DualBrep 两阶段面核心提取；非核心传播、局部顶点域恢复 E–F、V–E、V–F。
+5. 由两个 UDF 的梯度定位顶点和边，拟合固定共享端点的曲线，再拟合曲面并构建面环、seam 和 pcurve。
+6. OCC 装配、导出并读回 STEP；仅 `solid_validated` 表示全部验收完成。
 
-L5 默认：目标最长边 `0.005`，近边/顶点选区半径 `0.02/0.03`，最多四轮，最多 150 万三角形。线性细分保持原表面、面积和有向体积，不恢复网格缺失的曲率。细长扇形三角形也可能导致细分超过预算。**非常粗的原生 CAD 网格可能四轮仍未达标**，此时报告 `refinement_target_unmet`；可通过 JSON 增加轮数，例如 `{"refinement_max_rounds": 12}`，三角形预算仍生效。加密默认必经，没有关闭入口。
+默认 `refinement_coarse_edge=0.02`、`refinement_target_edge=0.005`，校验 `0 < fine <= coarse`；近边/顶点选区半径保持 `0.02/0.03`。两级均只切超长边，邻面作必要共享边过渡。不设轮数、三角形数量或 RSS 硬上限；每例 `sample_timeout_seconds` 默认 `10800` 秒，超时报 `sample_timeout`。两级加密保持原分片线性表面、面积与有向体积，不恢复网格缺失的曲率。
+
+库接口在重建和场查询检查点执行时间预算；实验 runner 另用独立进程监控，从 worker 启动起覆盖源准备、condition、两级加密、重建及离线评分，也能终止阻塞的原生几何调用。`coarse_refinement_progress.json`、`fine_refinement_progress.json` 分别保存两级进度。
 
 配置见 [default.json](configs/default.json) 和 [Config](bandbrep/config.py)。优先级为默认值 < `--config` JSON < 显式 CLI 参数。已删除 `--preset`、分辨率、MC、旧 CAD/离散 NPZ/三场 MLP 输入和面网络初始化接口；旧配置和缓存不能续用。旧实验脚本随旧入口删除，历史报告和输出保留。
 
@@ -76,7 +79,7 @@ SDF 无需模型预测：内部按需计算到原始网格的距离，用于特�
 
 ## 输出与续跑
 
-`input_mesh.npz` 保存原网格；`working_mesh.npz` 保存加密网格及原始父三角形；其余阶段产物见[阶段表](../docs/BandLabelTopologyRecovery.md#2-阶段代码与产物)。`run.json` 保存配置、输入身份、加密历史、阶段与失败信息，`quality.json` 保存完成状态。默认记录查询点、metric 场值及有效/饱和 mask。
+`input_mesh.npz` 保存原网格；`coarse_mesh.npz` 保存粗网格及原父三角形；`working_mesh.npz` 保存最终细网格及组合后的原父三角形；`center_fields.npz` 保存最终中心坐标、字段与 provider 身份，复用前严格校验坐标顺序和身份；其余阶段产物见[阶段表](../docs/BandLabelTopologyRecovery.md#2-阶段代码与产物)。`run.json` 保存配置、输入身份、加密历史、阶段与失败信息，`quality.json` 保存完成状态。默认记录查询点、metric 场值及有效/饱和 mask。
 
 `--stop-after` 可选 `seeds / graph / vertices / curves / surfaces / solid`，默认 `solid`。相同输入、配置和源码可用 `--resume` 从早期阶段继续，仅 `stop_after` 可变化。缓存键覆盖原网格数组与归一化信息、模型指纹、查询带与 presence、配置及实现哈希；每个阶段产物另验 SHA-256。
 
@@ -91,3 +94,7 @@ python scripts/sync_veudf.py --check
 ```
 
 测试包含闭合剖分、域与 mask、梯度、生产 adapter、输入/缓存身份、分割/拓扑及网格起步的立方体、圆柱、腔体球与球体贯通孔 STEP 读回。外部真实权重和真实生产批次需单独评估，历史实验成绩不作为新流程成绩。
+
+2026-11-01 已用同源 20 个 dev 完成[原生网格 L5 配对实验](../docs/NativeMeshL5Experiment.md)：精确 CAD E/V 下，默认四轮均未达到 0.005，尚未进入拓扑/STEP；旧 MC 的 M0/L5 图+STEP 分别为 5/20 和 7/20。该批原生网格的起始边长远大于 MC，四轮参数需要重新评估，不能用解析回归测试代替真实输入验证。
+
+仅限时的单级重跑已终止，相关产物和专用文档已清理。[粗加密＋近场细加密方案](../docs/CoarseFineMeshRefinementPlan.md)已实现并通过回归；同源 20 dev 的完整新批次尚未重跑。

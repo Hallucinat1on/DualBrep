@@ -17,12 +17,15 @@ from helpers import box,hollow_sphere
 class ContractTests(unittest.TestCase):
     def test_l5_defaults_and_removed_config(self):
         cfg=Config().validate()
-        self.assertEqual((cfg.refinement_target_edge,cfg.refinement_rho_edge,cfg.refinement_rho_vertex,cfg.refinement_max_rounds),(.005,.02,.03,4))
+        self.assertEqual((cfg.refinement_coarse_edge,cfg.refinement_target_edge,cfg.refinement_rho_edge,cfg.refinement_rho_vertex,cfg.sample_timeout_seconds),(.02,.005,.02,.03,10800.))
         self.assertEqual((cfg.vertex_domains,cfg.band_connectivity),('local','vertex'))
-        with self.assertRaises(ValueError):load_config(overrides={'resolution':257})
+        for obsolete in ('resolution','refinement_max_rounds','max_triangles'):
+            with self.assertRaises(ValueError):load_config(overrides={obsolete:257})
+        for coarse in (True, 0., -.01, float('nan'), .001):
+            with self.assertRaises(ValueError):Config(refinement_coarse_edge=coarse).validate()
         with tempfile.TemporaryDirectory() as tmp:
-            p=Path(tmp)/'config.json';p.write_text('{"refinement_max_rounds": 9}')
-            self.assertEqual(load_config(p,{'refinement_max_rounds':10}).refinement_max_rounds,10)
+            p=Path(tmp)/'config.json';p.write_text('{"sample_timeout_seconds": 9}')
+            self.assertEqual(load_config(p,{'sample_timeout_seconds':10}).sample_timeout_seconds,10)
 
     def test_mesh_sdf_and_metric_udf_gradient(self):
         mesh,udf=box();p=MeshFieldProvider(mesh,udf,Config())

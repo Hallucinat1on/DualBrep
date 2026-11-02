@@ -6,7 +6,7 @@ from .reconstruct import reconstruct
 
 
 def main():
-    p=argparse.ArgumentParser(description='Mesh + continuous metric E/V to B-rep (default local L5 refinement)')
+    p=argparse.ArgumentParser(description='Mesh + continuous metric E/V to B-rep (geometry-only coarse + near-field fine refinement)')
     p.add_argument('--mesh',type=Path,required=True,help='production condition directory or normalized mesh file')
     models=p.add_mutually_exclusive_group(required=True)
     models.add_argument('--udf-model',type=Path,help='TorchScript decoder: [N,3] -> metric [N,2] E/V')

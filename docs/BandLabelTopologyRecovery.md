@@ -1,6 +1,6 @@
 # 网格与 E/V 距离场的隔离带 B-rep 重建
 
-更新：2026-11-01，模块 0.4.0。当前输入改为预处理网格与连续 E/V，不再通过 SDF 提面。安装、模型接入和 CLI 见[模块 README](../band_brep_reconstruction/README.md)，历史成绩见[实验主文档](ThreeFieldReconstructionExperiments.md)，来源见 [PROVENANCE](../band_brep_reconstruction/PROVENANCE.md)。
+更新：2026-11-01，模块 0.5.0。当前输入改为预处理网格与连续 E/V，不再通过 SDF 提面。安装、模型接入和 CLI 见[模块 README](../band_brep_reconstruction/README.md)，历史成绩见[实验主文档](ThreeFieldReconstructionExperiments.md)，来源见 [PROVENANCE](../band_brep_reconstruction/PROVENANCE.md)。
 
 ## 1. 输入与几何目标
 
@@ -29,8 +29,9 @@ E/V 梯度由模型连续场计算，不需要预测第三/第四个梯度头。
 
 | 阶段 | 主要模块 | 产物 |
 |---|---|---|
-| `mesh` | `surface_mesh.py`、`field_provider.py` | `input_mesh.npz` |
-| `refinement` | `mesh_densification.py` | `working_mesh.npz`（含原父三角形） |
+| `mesh` | `surface_mesh.py` | `input_mesh.npz` |
+| `coarse_refinement` | `mesh_densification.py`，纯几何 | `coarse_mesh.npz`（含原父三角形）、`coarse_refinement_progress.json` |
+| `fine_refinement` | `field_provider.py`、`mesh_densification.py` | `working_mesh.npz`（含组合后的原父三角形）、`center_fields.npz`、`fine_refinement_progress.json` |
 | `bands` | `bands.py`、`vertex_domains.py`、复制的两阶段分割 | `bands.npz` |
 | `seeds` | `face_seeds.py` | `face_seeds.npz` |
 | `graph` | `topology.py` | `topology_labels.npz`、`incidence.json` |
@@ -182,15 +183,17 @@ $$
 
 回转面／圆弧开关应与周期规划配套；已有实验中单独开启会使部分模型失败，配置校验并不自动禁止这种组合。未知键被拒绝，旧 `max_refinements / max_band_edge / stability_factors / project_face_samples` 等参数已移除。
 
-## 8. 默认 L5 的选择、预算与不变性
+## 8. 两级加密、超长边剪枝与不变性
 
-`mesh_densification.py::densify_surface_mesh()` 返回加密网格、原父三角形 ID 和报告。对每个 present E/V 通道，三角形最长边 L、顶点最小距离 m、中心距离 d 满足 `m−L≤rho` 或 `d≤rho` 时纳入近场；其中 `L>target_edge` 的三角形继续细分。真实距离具有 1-Lipschitz 性，这个选区规则可保守覆盖漏过中心的特征；学习场未必严格满足该性质。
+`coarse_refine_surface(mesh, target_edge)` 仅使用几何，默认全局切分超过 `0.02` 的共享边，直到最长边达标；不调用 SDF 或 E/V，也不移动原顶点。现有 red/green 规则对邻面作一致过渡。
 
-默认 `target_edge=.005`、`rho_edge=.02`、`rho_vertex=.03`、`max_rounds=4`、`max_triangles=1500000`。检查闭合、方向、零面积、壳数、欧拉特征及面积/有向体积不变性。所有孩子保留原父三角形，不继承父中心 UDF 或标签。
+`fine_refine_surface(mesh, provider, cfg)` 在粗网格上查询 E/V。对每个 present 通道，三角形最长边 L、顶点最小距离 m、中心距离 d 满足 `m−L≤rho` 或 `d≤rho` 时纳入近场，半径为 E=0.02、V=0.03。仅将选中面内仍超过 `0.005` 的边标记为切分，已经足够短的边保持不变；每轮重新检查近场达标。保留原选择规则，不加入新的下界或主动队列。
 
-四轮不足时报 `refinement_target_unmet`，三角形超限时报 `mesh_resource_limit`；原生平面可能极粗，可显式增加 `refinement_max_rounds`，不能声称默认四轮总能达标。加密不改变输入几何，不能消除 mesh 与 CAD E/V 的表示误差。
+共享边索引采用有范围检查的整数编码，并由本轮选择、剖分共用。两级都检查闭合、方向、非零面积、壳数、欧拉特征及面积／有向体积不变性。孩子始终位于原父三角形内，最终映射为 `coarse_parent[fine_parent]`。新点／中心查询场值，不从父值插值；最终中心字段带 provider 身份传给 `build_bands`，避免同一批中心再次查询。
 
-该默认规则沿用历史 L5 的参数与选择法，但输入已由 MC 面变为预处理 mesh，E/V 可来自学习场；[旧加密结果](MeshDensificationUDFExperimentReport.md#method)不能直接作为新流程成绩。
+`refinement_coarse_edge` 与 `refinement_target_edge` 必须满足 `0 < fine <= coarse`。默认每例 `sample_timeout_seconds=10800`，粗／细阶段共用时间预算，无轮数、面数或 RSS 硬上限。进度文件不作为不可变阶段缓存；完成阶段的网格和中心字段按 SHA-256 验证，旧单级缓存不能续用。
+
+原始 condition 网格继续用于模型条件及 mesh SDF，粗／细网格仅改变后处理采样。加密不修复 mesh 与 CAD E/V 的表示偏差。[历史原生四轮对照](NativeMeshL5Experiment.md)与[旧 MC 结果](MeshDensificationUDFExperimentReport.md#method)保留原批次语义；两级方案与验收见[实施文档](CoarseFineMeshRefinementPlan.md)。完整同源 20 dev 新实验尚未重跑。
 
 <a id="implementation"></a>
 ## 9. 缓存、验证与实现边界

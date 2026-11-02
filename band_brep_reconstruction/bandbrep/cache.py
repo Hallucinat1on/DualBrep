@@ -47,3 +47,9 @@ def load_topology(directory):
     a=np.load(directory/'topology_labels.npz')
     return BandTopology(d['face_count'],a['face_labels'],a['edge_labels'],a['vertex_labels'],
                         d['edges'],d['vertices'],a['contacts'],d['report'])
+
+
+def load_center_fields(path):
+    from .field_provider import CenterFields
+    with np.load(path, allow_pickle=False) as a:
+        return CenterFields(a['points'], a['values'], str(a['provider_fingerprint'].item()))

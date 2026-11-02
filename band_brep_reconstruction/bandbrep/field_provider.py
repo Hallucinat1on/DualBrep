@@ -8,6 +8,7 @@ import hashlib
 import json
 import numpy as np
 from .schemas import require
+from .deadline import checkpoint
 
 EMPTY_DISTANCE = 2 * np.sqrt(3.)
 
@@ -19,6 +20,25 @@ class FieldEvaluation:
     saturated: np.ndarray
     error: np.ndarray
     strict_error_bound: bool = False
+
+
+@dataclass
+class CenterFields:
+    """Validated final triangle-center queries, bound to one continuous provider."""
+    points: np.ndarray
+    values: np.ndarray
+    provider_fingerprint: str
+
+    def validate(self, points, provider):
+        require(self.provider_fingerprint == provider.fingerprint,
+                'center_fields_identity', 'Center queries belong to another provider')
+        require(np.array_equal(self.points, points) and self.values.shape == points.shape,
+                'center_fields_alignment', 'Center queries do not match the triangle ordering')
+        required = np.array([True] + [p == 'present' for p in provider.presence()])
+        require(np.isfinite(self.values[:, required]).all()
+                and (self.values[:, 1:][:, required[1:]] >= 0).all(),
+                'invalid_field_query', 'Cached center fields are invalid')
+        return self.values
 
 
 class CallableUDFProvider:
@@ -116,6 +136,7 @@ class MeshFieldProvider:
             points,_ = base_surface((mesh.vertices,mesh.triangles),cfg.presence_samples,cfg.seed)
             support = np.zeros(2,int);usable=np.zeros(2,int)
             for start in range(0,len(points),cfg.query_batch_size):
+                checkpoint("presence")
                 r = udf.evaluate(points[start:start+cfg.query_batch_size])
                 good=r.valid&~r.saturated&np.isfinite(r.values)
                 usable+=good.sum(0)
@@ -135,6 +156,7 @@ class MeshFieldProvider:
         return self._presence
 
     def sdf(self, xyz):
+        checkpoint("mesh_distance")
         q = np.asarray(xyz,float).reshape(-1,3)
         require(np.isfinite(q).all(),'invalid_field_query','Nonfinite query coordinates')
         return self.oracle.query(q)
@@ -168,6 +190,7 @@ class MeshFieldProvider:
         return FieldEvaluation(values,valid,saturated,np.zeros_like(values))
 
     def gradient(self, xyz, channel, step=1e-5):
+        checkpoint("field_gradient")
         q = np.asarray(xyz,float).reshape(-1,3)
         require(channel in (0,1,2),'field_channel','Unknown channel')
         if channel==0:return self.oracle.gradient(q)
@@ -194,7 +217,9 @@ def checked_values(provider, xyz, batch=8192):
     required = np.array([True]+[p=='present' for p in provider.presence()])
     parts=[]
     for start in range(0,len(q),batch):
+        checkpoint("field_values")
         r=provider.evaluate(q[start:start+batch])
+        checkpoint("field_values")
         require(np.all(r.valid[:,required]) and np.all(~r.saturated[:,required])
                 and np.isfinite(r.values[:,required]).all(),'invalid_field_query',
                 'Required field channel is invalid, outside its band, or clipped')

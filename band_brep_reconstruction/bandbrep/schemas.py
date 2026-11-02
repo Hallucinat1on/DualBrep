@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field, asdict
 import json
+import os
 from pathlib import Path
 import numpy as np
 
@@ -20,7 +21,10 @@ def jsonable(obj):
     return obj
 
 def write_json(path, value):
-    Path(path).write_text(json.dumps(jsonable(value),ensure_ascii=False,indent=2,allow_nan=False)+'\n')
+    path=Path(path)
+    temporary=path.with_name(path.name+f'.{os.getpid()}.tmp')
+    temporary.write_text(json.dumps(jsonable(value),ensure_ascii=False,indent=2,allow_nan=False)+'\n')
+    temporary.replace(path)
 
 @dataclass
 class SurfaceMesh:

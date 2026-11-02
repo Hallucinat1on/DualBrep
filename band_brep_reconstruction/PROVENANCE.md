@@ -1,6 +1,6 @@
 # 复用源码来源
 
-更新：2026-11-01，模块 0.4.0。
+更新：2026-11-01，模块 0.5.0。
 
 `bandbrep/vendor/dualbrep_segmentation.py` 复制自根目录 `clustering.py::hierarchical_segmentation`，增加排除原因、成功拆分父域和统计输出，标签决策保持一致。原 `clustering.py` SHA-256 为 `c76ce8b8022691fc003b1bbb1229aa9c175d4d23a10267da59865d9f79267432`；测试通过 AST 提取原函数进行随机图对照。运行时不导入根目录模块。
 

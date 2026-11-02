@@ -5,17 +5,24 @@ from .schemas import SurfaceMesh,require
 
 
 def mesh_edges(triangles):
-    directed=triangles[:,[[0,1],[1,2],[2,0]]].reshape(-1,2)
-    edges,inverse,counts=np.unique(np.sort(directed,axis=1),axis=0,return_inverse=True,return_counts=True)
-    return edges,inverse.reshape(-1,3),counts
+    directed = triangles[:, [[0, 1], [1, 2], [2, 0]]].reshape(-1, 2)
+    if not len(directed):
+        return np.empty((0, 2), np.int64), np.empty((0, 3), np.int64), np.empty(0, np.int64)
+    base = int(directed.max()) + 1
+    require(directed.min() >= 0 and base * base <= np.iinfo(np.int64).max,
+            'mesh_index_range', 'Vertex indices exceed the edge encoding range')
+    lo, hi = directed.min(1), directed.max(1)
+    keys, inverse, counts = np.unique(lo * base + hi, return_inverse=True, return_counts=True)
+    return np.column_stack((keys // base, keys % base)), inverse.reshape(-1, 3), counts
 
-def face_adjacency(triangles):
-    edges,inv,counts=mesh_edges(triangles)
-    ids=np.argsort(inv.ravel(),kind='stable')
-    starts=np.r_[0,np.cumsum(counts)]
-    shared=np.flatnonzero(counts==2)
-    pair=np.column_stack((ids[starts[shared]]//3,ids[starts[shared]+1]//3))
-    return pair
+
+def face_adjacency(triangles, edge_index=None):
+    edges, inv, counts = mesh_edges(triangles) if edge_index is None else edge_index
+    ids = np.argsort(inv.ravel(), kind='stable')
+    starts = np.r_[0, np.cumsum(counts)]
+    shared = np.flatnonzero(counts == 2)
+    return np.column_stack((ids[starts[shared]] // 3, ids[starts[shared] + 1] // 3))
+
 
 def vertex_adjacency(triangles):
     n=len(triangles)
@@ -71,7 +78,6 @@ def validate_mesh(mesh,cfg):
     require(f.ndim==2 and f.shape[1:]==(3,) and len(f)>0 and np.issubdtype(f.dtype,np.integer)
             and f.min()>=0 and f.max()<len(v),'invalid_mesh','Invalid triangle indices')
     require(np.abs(v).max()<=1.000001,'mesh_scale','Mesh must already use the model coordinates in [-1,1]')
-    require(len(f)<=cfg.max_triangles,'mesh_resource_limit','Input mesh exceeds triangle budget')
     report=mesh_metrics(mesh)
     require(report['volume']>0,'mesh_orientation','Input mesh must have positive oriented volume')
     mesh.report.update(report)

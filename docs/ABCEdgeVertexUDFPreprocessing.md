@@ -1,6 +1,6 @@
 # ABC 三场数据处理：生产规范与本仓库同步
 
-更新：2026-11-01。后续数据处理以 `/opt/data/private/yihengxu/Hunyuan3D/veudf` 为唯一生产来源，本仓库使用同步的 [veudf/](../veudf/README.md)。旧 `edge_vertex_preprocessing/evudf` 代码、配置和 CLI 已移除，目录只保留迁移说明及既有实验产物。
+更新：2026-11-02。后续数据处理以 `/opt/data/private/yihengxu/Hunyuan3D/veudf` 为唯一生产来源，本仓库使用同步的 [veudf/](../veudf/README.md)。旧 `edge_vertex_preprocessing/evudf` 代码、配置和 CLI 已移除，目录只保留迁移说明及既有实验产物。
 
 源码、测试、配置和打包文件按 [SOURCE.json](../veudf/SOURCE.json) 记录 SHA-256。同步命令为 `python scripts/sync_veudf.py --apply`，只读检查为 `--check`；新功能在生产目录开发后再同步。安装与命令行示例维护在[模块 README](../veudf/README.md)。
 
@@ -14,7 +14,7 @@
 - `dE`：到所有保留的有限 CAD 边的欧氏距离，包含端点。
 - `dV`：到必要 CAD 顶点集合的最近距离。
 
-STEP 用 OCC 几何包围盒居中并等比例缩放，默认最长边 1.8，位于 `[-0.9,0.9]^3`；查询域为 `[-1,1]^3`。曲线、顶点、网格及标签共用一次变换，距离单位是归一化长度。
+STEP 先选择体积最大的有效正体积 solid，体积相同按源遍历顺序确定；记录 `source_solid_count`、`selected_solid_index` 和选择策略。仅有一个 solid 时仍检查其外部游离拓扑；多 solid 输入只处理被选中的实体。随后用 OCC 几何包围盒居中并等比例缩放，默认最长边 1.8，位于 `[-0.9,0.9]^3`；查询域为 `[-1,1]^3`。曲线、顶点、网格及标签共用一次变换，距离单位是归一化长度。
 
 条件网格从 CAD 三角化得到，在固定精度焊接重复顶点，不经体素 SDF 或 MC。检查闭合、方向、正体积及退化三角形；不能静默修面后继续沿用原 provenance。`MeshSDFOracle` 为每个物体复用 libigl AABB 与 winding BVH，底层查询以最多 512 点分批，避免额外线程膨胀。[网格查询实现](../veudf/src/veudf/geometry/mesh.py)
 
@@ -24,7 +24,7 @@ E/V 仍对应 CAD，网格表面不一定精确经过 CAD 边，因此不能无�
 
 `preprocess/cad.py` 保留旧实现的统一归一化和目标语义：排除合法 seam，保留两个不同面的非 seam 边，包括相切／共面边；必要顶点在去 seam 后构造。仅移除符合条件的完整圆／椭圆孤立闭环锚点，一般 B-spline 锚点和人工分段仍保守保留。
 
-普通目标边要求两次合法使用、两个不同面；非流形、退化、开放、异常同面内部结构、多 solid 及过大源 CAD 容差明确失败。距离目标不是 sharp-only 边、GVD、边点云或测地距离。
+普通目标边要求两次合法使用、两个不同面；非流形、退化、开放、异常同面内部结构及过大源 CAD 容差明确失败。距离目标不是 sharp-only 边、GVD、边点云或测地距离。
 
 当前 [Config](../veudf/src/veudf/preprocess/config.py) 与 [filtering.py](../veudf/src/veudf/preprocess/filtering.py) 还规定：
 

@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 
@@ -23,7 +24,7 @@ def safe_id(relative):
     return label + "-" + hashlib.sha256(str(relative).encode()).hexdigest()[:12]
 
 
-def scan_directory(root, *, seed=0, train_fraction=0.8, val_fraction=0.1):
+def scan_directory(root, *, seed=0, train_fraction=0.8, val_fraction=0.1, limit=0, progress=None):
     root = Path(root).resolve()
     if not root.is_dir():
         raise ValueError(f"Not a directory: {root}")
@@ -46,7 +47,18 @@ def scan_directory(root, *, seed=0, train_fraction=0.8, val_fraction=0.1):
         if a != b:
             parents[max(a, b)] = min(a, b)
 
-    for path in sorted(p for p in root.rglob("*") if p.is_file() and is_step(p)):
+    if limit < 0:
+        raise ValueError("limit must be nonnegative")
+
+    def paths(directory):
+        # Sort each directory separately: do not enumerate the whole STEP tree.
+        for entry in sorted(os.scandir(directory), key=lambda e: e.name):
+            if entry.is_dir(follow_symlinks=False):
+                yield from paths(entry.path)
+            elif entry.is_file(follow_symlinks=False) and is_step(Path(entry.name)):
+                yield Path(entry.path)
+
+    for path in paths(root):
         relative = path.relative_to(root)
         checksum = file_hash(path)
         # ABC filename: numeric model prefix + original Onshape document id.
@@ -69,6 +81,10 @@ def scan_directory(root, *, seed=0, train_fraction=0.8, val_fraction=0.1):
             record["duplicate_of"] = duplicate["sample_id"]
         seen_hashes.setdefault(checksum, record)
         records.append(record)
+        if progress:
+            progress(len(records), str(relative))
+        if limit and len(records) >= limit:
+            break
     for record in records:
         group = find(record["source_group_id"])
         score = (

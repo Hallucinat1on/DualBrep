@@ -4,6 +4,8 @@ The reconstruction receives only a mesh and scalar E/V queries/gradients.
 CAD identities and nearest-support diagnostics stay in this benchmark module.
 """
 import argparse
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import Counter
 import csv
@@ -41,15 +43,15 @@ def save(path,value):
     tmp.replace(path)
 
 
-def configuration(timeout=10800.):
+def configuration(timeout=10800.,coarse_edge=.02):
     from bandbrep.config import Config
     # Match the last L5 experiment's feature tolerance, batching and logging.
     # All remaining settings are the mesh/L5 implementation's defaults.
-    return Config(feature_sdf_tolerance=.004,query_batch_size=65536,save_queries=False,sample_timeout_seconds=timeout)
+    return Config(feature_sdf_tolerance=.004,query_batch_size=65536,save_queries=False,sample_timeout_seconds=timeout,refinement_coarse_edge=coarse_edge)
 
 
-def freeze(out,reference,native_reference,timeout):
-    configuration(timeout).validate()
+def freeze(out,reference,native_reference,timeout,coarse_edge=.02):
+    cfg=configuration(timeout,coarse_edge).validate()
     if out.exists():raise RuntimeError('Use --run / --report on an existing experiment; never refreeze it')
     rows=read(reference/'manifest.json')
     inputs={str(reference/'manifest.json'):digest(reference/'manifest.json'),
@@ -67,11 +69,11 @@ def freeze(out,reference,native_reference,timeout):
             p=native_reference/'records'/(r['id']+'.json');inputs[str(p)]=digest(p)
     out.mkdir(parents=True)
     save(out/'manifest.json',rows)
-    save(out/'policy.json',dict(date='2026-11-01',reference=str(reference),cohort='dev',count=20,
+    save(out/'policy.json',dict(date=datetime.now(ZoneInfo('Asia/Shanghai')).date().isoformat(),reference=str(reference),cohort='dev',count=20,
         check='10 historical check models remain unrun',groups=['mesh_coarse_fine'],group='mesh_coarse_fine',jobs=2,
         native_reference=str(native_reference),sample_timeout_seconds=timeout,
-        config=configuration(timeout).to_dict(),field_source='production exact CAD E/V; oracle presence',
-        refinement='geometry-only coarse 0.02; E/V near-field fine 0.005; long-edge-only pruning',
+        config=cfg.to_dict(),field_source='production exact CAD E/V; oracle presence',
+        refinement=f'geometry-only coarse {coarse_edge:g}; E/V near-field fine 0.005; long-edge-only pruning',
         mesh_source='production read_normalized/check_solid_faces/collect_targets/validate_geometry/audit_shape/triangulate/weld',
         sampling='geometry-only condition, no full training pools required',
         comparison='same source hashes and dev split; compare historical M0 and L5; not a learned-field experiment',
@@ -346,7 +348,7 @@ def report(out):
     rows=[r for r in read(out/'manifest.json') if r['cohort']=='dev']
     policy=read(out/'policy.json');reference=Path(policy['reference'])
     primary=policy['group']
-    policy_note='先纯几何粗加密至0.02，再对E/V近场细化至0.005；仅切超长边，仅设每例总超时。'
+    policy_note=f"先纯几何粗加密至{policy['config']['refinement_coarse_edge']:g}，再对E/V近场细化至{policy['config']['refinement_target_edge']:g}；仅切超长边，仅设每例总超时。"
     records={p.stem:read(p) for p in sorted((out/'records').glob('*.json'))}
     summary=dict(total=len(rows),completed=len(records),pending=len(rows)-len(records),groups={},paired={})
     all_groups={primary:list(records.values())}
@@ -411,9 +413,10 @@ def main():
     mode.add_argument('--report',action='store_true');mode.add_argument('--worker',action='store_true')
     p.add_argument('--id')
     p.add_argument('--native-reference',type=Path,default=MODULE/'outputs/native_mesh_L5_20261101_v1')
+    p.add_argument('--coarse-edge',type=float,default=.02,help='global coarse-refinement target, frozen at initialization')
     p.add_argument('--sample-timeout',type=float,default=10800.,help='total wall-clock seconds per sample, including all preparation and scoring')
     a=p.parse_args();out=a.output.resolve()
-    if a.initialize:freeze(out,a.reference.resolve(),a.native_reference.resolve(),a.sample_timeout)
+    if a.initialize:freeze(out,a.reference.resolve(),a.native_reference.resolve(),a.sample_timeout,a.coarse_edge)
     elif a.worker:worker(out,a.id)
     elif a.report:print(json.dumps(report(out),ensure_ascii=False,indent=2))
     else:

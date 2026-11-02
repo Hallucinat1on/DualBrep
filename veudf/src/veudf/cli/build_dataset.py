@@ -45,14 +45,17 @@ def atomic_json(path, value):
     os.replace(tmp, path)
 
 
-def worker(root, sample_id):
+def worker(root, sample_id, record=None):
     """Child process: build one asset and record its outcome."""
     from veudf.preprocess.pipeline import build_asset
 
     root = Path(root)
-    record = next(
-        r for r in load_manifest(root / "manifest.jsonl") if r["sample_id"] == sample_id
-    )
+    if record is None:
+        record = next(
+            r for r in load_manifest(root / "manifest.jsonl") if r["sample_id"] == sample_id
+        )
+    if record["sample_id"] != sample_id:
+        raise ValueError("Worker record does not match sample ID")
     started = time.monotonic()
     try:
         result = dict(
@@ -96,15 +99,22 @@ def invoke(root, record, args):
                 "_worker",
                 str(root),
                 uid,
+                "--record-stdin",
             ],
             stdout=log,
             stderr=subprocess.STDOUT,
             env=env,
             start_new_session=True,
+            stdin=subprocess.PIPE,
         )
         with LOCK:
             CHILDREN.add(child)
         try:
+            try:
+                child.stdin.write(json.dumps(record).encode())
+                child.stdin.close()
+            except BrokenPipeError:
+                pass
             if STOP.is_set():
                 os.killpg(child.pid, signal.SIGTERM)
             child.wait(timeout=args.timeout)
@@ -323,11 +333,17 @@ def build_main(args):
 
 
 def manifest_main(args):
+    def progress(count, path):
+        if count == 1 or count % 1000 == 0 or count == args.limit:
+            print(json.dumps(dict(scanned=count, limit=args.limit, current_path=path)), flush=True)
+
     rows = scan_directory(
         args.step_dir,
         seed=args.seed,
         train_fraction=args.train_fraction,
         val_fraction=args.val_fraction,
+        limit=args.limit,
+        progress=progress,
     )
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -347,7 +363,8 @@ def manifest_main(args):
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     if argv[:1] == ["_worker"]:
-        return worker(*argv[1:3])
+        record = json.load(sys.stdin) if argv[3:] == ["--record-stdin"] else None
+        return worker(*argv[1:3], record=record)
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -360,6 +377,7 @@ def main(argv=None):
     m.add_argument("--seed", type=int, default=0)
     m.add_argument("--train-fraction", type=float, default=0.84)
     m.add_argument("--val-fraction", type=float, default=0.08)
+    m.add_argument("--limit", type=int, default=0, help="Scan at most the first N STEP paths")
     b = sub.add_parser("build", help="Build, deduplicate and publish (resumable)")
     b.add_argument("--root", required=True)
     b.add_argument("--manifest", help="Required when creating a root")

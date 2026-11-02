@@ -62,6 +62,29 @@ class RemainingTests(unittest.TestCase):
         self.assertEqual(a, b)
         self.assertNotEqual(a, c)
 
+    def test_order_and_historical_source_group_pin(self):
+        old = dict(row("old", "old_hash", "old_family", "val"), source_group_id="document")
+        new = dict(row("new", "new_hash", "new_family"), source_group_id="document")
+        other = row("other", "other_hash", "other_family")
+        result, summary = prepare.select_remaining([other, new], [old], 2, 0, preserve_order=True)
+        self.assertEqual([r["sample_id"] for r in result], ["other", "new"])
+        self.assertEqual((result[1]["group_id"], result[1]["split"]), ("old_family", "val"))
+        self.assertEqual(summary["selection_order"], "manifest")
+
+    def test_limited_scan_stops_before_later_directories(self):
+        from veudf.preprocess.manifest import scan_directory
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name in ("0000", "0001"):
+                (root / name).mkdir()
+            for name in ("b.step", "a.step"):
+                (root / "0000" / name).write_bytes(name.encode())
+            (root / "0001" / "later.step").write_bytes(b"later")
+            seen = []
+            result = scan_directory(root, limit=2, progress=lambda n, p: seen.append(p))
+            self.assertEqual(seen, ["0000/a.step", "0000/b.step"])
+            self.assertEqual([r["archive_member"] for r in result], seen)
+
 
 class ResourceTests(unittest.TestCase):
     def fixture(self, root):
@@ -239,6 +262,22 @@ def test_frozen_build_runs_and_resumes_without_repository(tmp_path):
     )
     report = json.loads((job / "data/report.json").read_text())
     assert report["published"] == 1
+    # Exercise the adaptive scheduler with a real frozen worker and a fresh job.
+    adaptive_job = tmp_path / "adaptive_job"
+    prepare.main(["--manifest", str(manifest), "--exclude-root", str(previous),
+                  "--run-dir", str(adaptive_job), "--config", str(config), "--limit", "1"])
+    adaptive_path = Path(__file__).parents[1] / "adaptive_build.py"
+    adaptive_env = dict(env, PYTHONPATH=str(adaptive_job / "run/code"))
+    script = ("import importlib.util,sys; from pathlib import Path; "
+              "import veudf.cli.run_guarded_build as g; "
+              "g.memory_budget=lambda:(180*2**30,100*2**30); "
+              "s=importlib.util.spec_from_file_location('adaptive',sys.argv[1]); "
+              "m=importlib.util.module_from_spec(s); s.loader.exec_module(m); "
+              "sys.exit(m.worker(Path(sys.argv[2]),'pilot',1,32))")
+    adaptive = subprocess.run([sys.executable, "-c", script, str(adaptive_path), str(adaptive_job)],
+                              cwd=tmp_path, env=adaptive_env, capture_output=True, text=True, timeout=180)
+    assert adaptive.returncode == 0, adaptive.stdout + adaptive.stderr
+    assert json.loads((adaptive_job / "data/report.json").read_text())["published"] == 1
     points = next((job / "data/assets").glob("*/pools/surface/points.npy"))
     before = points.stat().st_mtime_ns
     step.unlink()  # A successful resume must not reopen/rebuild the original STEP.

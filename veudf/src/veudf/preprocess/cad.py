@@ -100,29 +100,31 @@ def read_normalized(path, cfg):
     if imported is None or imported.IsNull():
         raise PreprocessError("read_failed", "STEP contains no shape")
     _, solids = unique_shapes(imported, TopAbs_SOLID)
-    if len(solids) != 1:
-        code = "open_boundary" if not solids else "unsupported_multi_solid"
-        raise PreprocessError(code, f"Expected one closed solid, got {len(solids)}")
-    solid = topods.Solid(solids[0])
+    if not solids:
+        raise PreprocessError("open_boundary", "Expected a closed solid, got 0")
+    # Prefer the largest valid, positively oriented solid.  The original STEP
+    # traversal order breaks exact volume ties deterministically.
+    candidates = []
+    for index, item in enumerate(solids):
+        candidate = topods.Solid(item)
+        if not BRepCheck_Analyzer(candidate).IsValid():
+            continue
+        props = GProp_GProps()
+        brepgprop.VolumeProperties(candidate, props)
+        candidate_volume = float(props.Mass())
+        if np.isfinite(candidate_volume) and candidate_volume > 0:
+            candidates.append((candidate_volume, -index, candidate))
+    if not candidates:
+        raise PreprocessError("invalid_solid", "No valid solid with positive finite volume")
+    volume, neg_index, solid = max(candidates, key=lambda item: (item[0], item[1]))
     # Refuse loose shell / wire content outside the chosen solid.
-    for kind in (TopAbs_FACE, TopAbs_EDGE, TopAbs_VERTEX):
+    for kind in (TopAbs_FACE, TopAbs_EDGE, TopAbs_VERTEX) if len(solids) == 1 else ():
         solid_index, _ = unique_shapes(solid, kind)
         _, all_items = unique_shapes(imported, kind)
         if any(solid_index.FindIndex(item) == 0 for item in all_items):
             raise PreprocessError(
                 "invalid_solid", "Loose topology outside the sole solid"
             )
-    if not BRepCheck_Analyzer(solid).IsValid():
-        raise PreprocessError(
-            "invalid_solid", "BRepCheck_Analyzer rejected the source solid"
-        )
-    properties = GProp_GProps()
-    brepgprop.VolumeProperties(solid, properties)
-    volume = float(properties.Mass())
-    if not np.isfinite(volume) or volume <= 0:
-        raise PreprocessError(
-            "invalid_solid", "Source has nonpositive or nonfinite oriented volume"
-        )
     lower, upper = bounds(solid)
     extent = float(np.max(upper - lower))
     if extent <= 0:
@@ -148,6 +150,9 @@ def read_normalized(path, cfg):
     matrix[:3, :3] *= scale
     matrix[:3, 3] = -center * scale
     metadata = dict(
+        source_solid_count=len(solids),
+        selected_solid_index=-neg_index,
+        selected_solid_policy="largest_valid_positive_volume",
         center=center.tolist(),
         scale=scale,
         source_volume=volume,

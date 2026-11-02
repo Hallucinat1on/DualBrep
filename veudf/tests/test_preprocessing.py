@@ -28,6 +28,7 @@ from OCC.Extend.DataExchange import write_step_file
 from veudf.schema import EMPTY_DISTANCE, SCHEMA as SCHEMA_VERSION
 from veudf.preprocess.cad import (
     PreprocessError,
+    compound,
     collect_targets,
     read_normalized,
     triangulate,
@@ -155,6 +156,20 @@ class DistanceTests(unittest.TestCase):
 
 
 class FilterTests(unittest.TestCase):
+    def test_multiple_solids_choose_largest_without_other_geometry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            small = BRepPrimAPI_MakeBox(gp_Pnt(10, 0, 0), 1, 1, 1).Shape()
+            large = BRepPrimAPI_MakeBox(gp_Pnt(0, 0, 0), 2, 3, 4).Shape()
+            p = write_step(tmp, "multiple", compound([small, large]))
+            solid, meta = read_normalized(p, SMALL)
+            self.assertEqual(meta["source_solid_count"], 2)
+            self.assertEqual(meta["selected_solid_policy"], "largest_valid_positive_volume")
+            self.assertAlmostEqual(meta["source_volume"], 24.0, places=6)
+            np.testing.assert_allclose(meta["source_bounds"], [[0, 0, 0], [2, 3, 4]], atol=1e-6)
+            self.assertEqual(len(collect_targets(solid, SMALL).faces), 6)
+            _, again = read_normalized(p, SMALL)
+            self.assertEqual(meta["selected_solid_index"], again["selected_solid_index"])
+
     def test_face_count_edge_and_length_endpoints(self):
         cfg = Config()
         self.assertEqual(cfg.min_faces, 2)

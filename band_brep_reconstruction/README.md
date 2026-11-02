@@ -97,4 +97,4 @@ python scripts/sync_veudf.py --check
 
 2026-11-01 已用同源 20 个 dev 完成[原生网格 L5 配对实验](../docs/NativeMeshL5Experiment.md)：精确 CAD E/V 下，默认四轮均未达到 0.005，尚未进入拓扑/STEP；旧 MC 的 M0/L5 图+STEP 分别为 5/20 和 7/20。该批原生网格的起始边长远大于 MC，四轮参数需要重新评估，不能用解析回归测试代替真实输入验证。
 
-仅限时的单级重跑已终止，相关产物和专用文档已清理。[粗加密＋近场细加密方案](../docs/CoarseFineMeshRefinementPlan.md)已实现并通过回归；同源 20 dev 的完整新批次尚未重跑。
+仅限时的单级重跑已终止，相关产物和专用文档已清理。[粗加密＋近场细加密方案](../docs/CoarseFineMeshRefinementPlan.md)已实现并通过回归；2026-11-02 已启动同源 20 dev × 粗目标 0.02/0.03 的[新对照](../docs/CoarseFineComparison20261102.md)，完整成绩仍需等待。

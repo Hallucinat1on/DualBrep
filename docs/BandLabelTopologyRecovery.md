@@ -193,7 +193,7 @@ $$
 
 `refinement_coarse_edge` 与 `refinement_target_edge` 必须满足 `0 < fine <= coarse`。默认每例 `sample_timeout_seconds=10800`，粗／细阶段共用时间预算，无轮数、面数或 RSS 硬上限。进度文件不作为不可变阶段缓存；完成阶段的网格和中心字段按 SHA-256 验证，旧单级缓存不能续用。
 
-原始 condition 网格继续用于模型条件及 mesh SDF，粗／细网格仅改变后处理采样。加密不修复 mesh 与 CAD E/V 的表示偏差。[历史原生四轮对照](NativeMeshL5Experiment.md)与[旧 MC 结果](MeshDensificationUDFExperimentReport.md#method)保留原批次语义；两级方案与验收见[实施文档](CoarseFineMeshRefinementPlan.md)。2026-11-02 已启动同源 20 dev 的[粗目标0.02/0.03配对实验](CoarseFineComparison20261102.md)，完整成绩仍需等待。
+原始 condition 网格继续用于模型条件及 mesh SDF，粗／细网格仅改变后处理采样。加密不修复 mesh 与 CAD E/V 的表示偏差。[历史原生四轮对照](NativeMeshL5Experiment.md)与[旧 MC 结果](MeshDensificationUDFExperimentReport.md#method)保留原批次语义；两级方案与验收见[实施文档](CoarseFineMeshRefinementPlan.md)。2026-11-02 同源20 dev的[粗目标0.02/0.03配对实验](CoarseFineComparison20261102.md)已完成：两组图+STEP均11/20，粗0.03耗时中位数下降28.2%。
 
 <a id="implementation"></a>
 ## 9. 缓存、验证与实现边界

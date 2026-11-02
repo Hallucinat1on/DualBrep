@@ -1,6 +1,6 @@
 # 网格粗加密与近场细加密：实施与验收
 
-更新：2026-11-01。状态：两级加密已实现，同源 20 dev × 粗目标 0.02/0.03 的[新批次](CoarseFineComparison20261102.md)已于 2026-11-02 启动。此前仅限时的单级细分批次已终止，产物、源码快照、性能探针和专用实验文档已清理；历史 MC 及原生四轮对照保留。
+更新：2026-11-01。状态：两级加密已实现，同源20 dev×粗目标0.02/0.03的[新批次](CoarseFineComparison20261102.md)已完成，两组图+STEP均11/20，粗0.03耗时中位数下降28.2%。此前仅限时的单级细分批次已终止，产物、源码快照、性能探针和专用实验文档已清理；历史 MC 及原生四轮对照保留。
 
 ## 1. 目标与固定选择
 
@@ -82,4 +82,4 @@ marked_edge = belongs_to_any(selected_face) AND edge_length > fine_edge
 | 00000602 | 35,760 | 95,466 | 0.0199399 | 0.34 秒 |
 | 00000688 | 28,742 | 269,098 | 0.0199878 | 0.86 秒 |
 
-这些耗时只覆盖粗几何与映射检查，不含真实模型／CAD 场查询及后续重建，不能当作完整流程加速比。2026-11-02 已启动[粗目标对照新批次](CoarseFineComparison20261102.md)，完整结果仍需等待。日志、查询隔离探针和源码哈希见[验证记录](../band_brep_reconstruction/outputs/coarse_fine_validation_20261101_v1/validation.json)及同目录 identity.json。
+这些耗时只覆盖粗几何与映射检查，不含真实模型／CAD 场查询及后续重建，不能当作完整流程加速比。2026-11-02的[粗目标对照新批次](CoarseFineComparison20261102.md)已完成，完整结果与阶段耗时见该文档。日志、查询隔离探针和源码哈希见[验证记录](../band_brep_reconstruction/outputs/coarse_fine_validation_20261101_v1/validation.json)及同目录 identity.json。

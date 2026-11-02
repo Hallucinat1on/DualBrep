@@ -1,6 +1,6 @@
 # 两级加密：粗目标 0.02 / 0.03 配对实验
 
-2026-11-02 启动。状态及成绩以[实时汇总](../band_brep_reconstruction/outputs/coarse_fine_20261102_v2/REPORT.md)、[summary.json](../band_brep_reconstruction/outputs/coarse_fine_20261102_v2/summary.json) 和 [state.json](../band_brep_reconstruction/outputs/coarse_fine_20261102_v2/state.json) 为准。本批使用原 F30 中相同的 20 dev，每例运行两组，共 40 个任务；10 check 不运行。
+2026-11-02 10:12 启动，18:42 完成（Asia/Shanghai），共 8.50 小时。40/40 任务完成，无超时。完整成绩及各阶段耗时见[完成分析](../band_brep_reconstruction/outputs/coarse_fine_20261102_v2/TIMING_REPORT.md)；原始统计以[实时汇总](../band_brep_reconstruction/outputs/coarse_fine_20261102_v2/REPORT.md)、[summary.json](../band_brep_reconstruction/outputs/coarse_fine_20261102_v2/summary.json) 和 [state.json](../band_brep_reconstruction/outputs/coarse_fine_20261102_v2/state.json) 为准。本批使用原 F30 中相同的 20 dev，每例运行两组，共 40 个任务；10 check 不运行。
 
 ## 固定协议
 
@@ -34,3 +34,14 @@
 [粗0.02明细](../band_brep_reconstruction/outputs/coarse_fine_20261102_v2/coarse_002/REPORT.md)、[粗0.03明细](../band_brep_reconstruction/outputs/coarse_fine_20261102_v2/coarse_003/REPORT.md)。每组始终使用 20 例分母，pending 单列，失败和超时保留。完整配对后比较面／图／STEP、粗细面数、总查询量、总耗时、峰值 RSS 和失败原因；运行中的已完成子集不能替代完整成绩。
 
 本批检验精确场下的后处理与粗阈值取舍，不能解释为真实 VAE/Flow 或 decoder 的精度、吞吐。实施与字段契约见[两级加密文档](CoarseFineMeshRefinementPlan.md)。
+
+
+## 完成结果
+
+两组均为：加密达标20/20、面正确14/20、图正确12/20、图+STEP11/20，成功集合一致。粗目标0.03在18/20例更快，单例总耗时中位数28.88→20.74分钟（−28.2%），平均28.93→21.76分钟（−24.8%）。粗网格面数中位数338815→170106，最终面数1277783→1054702，场值查询行数中位数约494万→373万。
+
+粗0.03组按全部20例均摊：粗加密1.19秒、细加密1001.00秒、bands16.48秒、曲线阶段236.56秒、离线评分19.49秒；细加密与曲线合计94.8%。完整阶段表、进入数量与时间重建方法见完成分析及stage_times.csv，未到达阶段计0、失败阶段计至报错。
+
+两组均剩6例面分割异常、2例面正确但图错误、1例图正确但曲面边界不相容。成功样本未出现新增几何报警；逐例最大双向表面采样误差增量约5.09e-6。相对历史MC L5新增4例STEP成功且原7例全部保留；历史流程未在本次重跑。
+
+建议以粗0.03、细0.005作为当前默认候选；先诊断剩余面分割和边邻接错误，再验证更细目标的收益。本批是精确CAD场下的20 dev内部比较，真实模型及10 check仍未验证。

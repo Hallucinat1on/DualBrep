@@ -5,7 +5,7 @@
 | 文档 | 内容与状态 |
 |---|---|
 | [DualBrep UDF 与拓扑](DualBrepUDFAndTopology.md) | 原 DualBrep 的 GVD-UDF、网络、两阶段分割及学习式 CAD 重建；与三场路线分开阅读 |
-| [ABC 三场预处理](ABCEdgeVertexUDFPreprocessing.md) | 当前生产 `veudf` 的网格 SDF／CAD E/V、四点池、NPY 字段、筛选与发布；旧 evudf 已退役 |
+| [ABC 表面双 UDF 预处理](ABCEdgeVertexUDFPreprocessing.md) | 当前分支 `veudf` 的表面 E/V、三点池、批量距离与 NPY 字段；生产旧格式单独保留 |
 | [隔离带算法与实现](BandLabelTopologyRecovery.md) | 当前 `bandbrep` 的多标签关联、局部顶点域、共享几何、曲面、CAD、配置和缓存；已合并原重建代码详解 |
 | [直接边图提取备选方案](EdgeVertexDistanceFields.md) | 分支追踪／网格局部提取的研究设计；完整方案未作为主库模式实现 |
 | [Hunyuan／NaTex 场 VAE 设计](HunyuanNaTexEdgeVertexVAEAdaptation.md) | 2026-10-14 的外部模型改造设计快照，涵盖场编码、联合 E/V latent、Flow 与验收；不代表本次已实施训练 |
@@ -17,7 +17,7 @@
 
 使用入口：[重建模块 README](../band_brep_reconstruction/README.md)、[生产数据模块 README](../veudf/README.md)。
 
-生产目录为 `/opt/data/private/yihengxu/Hunyuan3D/veudf`，本仓库 `veudf/` 按源码哈希同步；新功能先在生产目录开发，使用 `python scripts/sync_veudf.py --check / --apply` 核对或同步（两参数择一）。历史数据保留各自版本；旧重建 oracle 与 MC 实验入口已移除，新后处理直接使用网格、连续 E/V 和默认粗／细两级加密。
+`surface-udf` 分支直接开发本仓库 `veudf/`，schema 为 `edge_vertex_surface_udf_v1`；外部生产目录保持原实现，历史数据使用各自冻结版本。新数据只有表面查询和 E/V 两通道，模型读取端需配套迁移。
 
 建议先读[当前重建阶段](BandLabelTopologyRecovery.md#2-阶段代码与产物)与[当前数据字段](ABCEdgeVertexUDFPreprocessing.md#6-当前文件与字段)，再按需查[F30 结果](ThreeFieldReconstructionExperiments.md#f30-results)、[网格加密结果](MeshDensificationUDFExperimentReport.md)、[面分割分析](ThreeFieldReconstructionExperiments.md#segmentation-failures)和[后续实验](ThreeFieldReconstructionExperiments.md#next-experiments)。原 GVD-UDF、真实有限边/顶点距离、直接 CAD SDF 和当前 mesh SDF 的语义不能互换。
 

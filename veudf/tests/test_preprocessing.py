@@ -41,7 +41,7 @@ from veudf.preprocess.dedup import (
     features,
     sample_mesh,
 )
-from veudf.preprocess.distance import EdgeOracle, CADSDFOracle, VertexOracle
+from veudf.preprocess.distance import EdgeOracle, VertexOracle
 from veudf.preprocess.filtering import audit_shape, check_metrics, face_edge_counts
 from veudf.preprocess.manifest import load_manifest, scan_directory
 from veudf.preprocess.pipeline import build_asset, verify_asset
@@ -95,7 +95,6 @@ class DistanceTests(unittest.TestCase):
         )
         mesh = triangulate(targets, SMALL)
         for oracle in [
-            CADSDFOracle(shape, targets.faces, SMALL),
             MeshSDFOracle(*weld(mesh, SMALL)[0]),
         ]:
             np.testing.assert_allclose(oracle.query(q), [-0.5, -0.25, 1, 0], atol=1e-6)
@@ -143,10 +142,6 @@ class DistanceTests(unittest.TestCase):
         ).Shape()
         targets = collect_targets(solid, SMALL)
         mesh = triangulate(targets, SMALL)
-        values = CADSDFOracle(solid, targets.faces, SMALL).query(
-            [[0, 0, 0], [1, 0, 0], [2, 0, 0]]
-        )
-        np.testing.assert_allclose(values, [0.5, -0.5, 0.5], atol=1e-6)
         closed, oracle = weld(mesh, SMALL)
         np.testing.assert_allclose(
             oracle.query([[0, 0, 0], [1, 0, 0], [2, 0, 0]]), [0.5, -0.5, 0.5], atol=1e-6
@@ -163,12 +158,18 @@ class FilterTests(unittest.TestCase):
             p = write_step(tmp, "multiple", compound([small, large]))
             solid, meta = read_normalized(p, SMALL)
             self.assertEqual(meta["source_solid_count"], 2)
-            self.assertEqual(meta["selected_solid_policy"], "largest_valid_positive_volume")
+            self.assertEqual(
+                meta["selected_solid_policy"], "largest_valid_positive_volume"
+            )
             self.assertAlmostEqual(meta["source_volume"], 24.0, places=6)
-            np.testing.assert_allclose(meta["source_bounds"], [[0, 0, 0], [2, 3, 4]], atol=1e-6)
+            np.testing.assert_allclose(
+                meta["source_bounds"], [[0, 0, 0], [2, 3, 4]], atol=1e-6
+            )
             self.assertEqual(len(collect_targets(solid, SMALL).faces), 6)
             _, again = read_normalized(p, SMALL)
-            self.assertEqual(meta["selected_solid_index"], again["selected_solid_index"])
+            self.assertEqual(
+                meta["selected_solid_index"], again["selected_solid_index"]
+            )
 
     def test_face_count_edge_and_length_endpoints(self):
         cfg = Config()
@@ -258,7 +259,7 @@ class SamplingTests(unittest.TestCase):
     def test_profile_counts_and_strict_old_keys(self):
         cfg = load_config(ROOT / "configs/surface_pools.json")
         np.testing.assert_array_equal(
-            allocate(cfg.pool_count, cfg.pool_weights), [393216, 550502, 393216, 235930]
+            allocate(cfg.pool_count, cfg.pool_weights), [393216, 393216, 235930]
         )
         self.assertEqual(cfg.geometry_surface_pool_count, 393216)
         with self.assertRaises(ValueError):
@@ -276,71 +277,64 @@ class PipelineTests(unittest.TestCase):
     def test_cube_pools_labels_and_independent_evaluation(self):
         p = write_step(self.root, "box", BRepPrimAPI_MakeBox(1, 1, 1).Shape())
         out = self.root / "cube"
-        cfg = replace(SMALL, volume_pool_count=128, evaluation_volume_count=64)
-        result = build_asset(record(p, "cube"), out, cfg)
+        from unittest.mock import patch
+
+        with patch(
+            "veudf.geometry.mesh.MeshSDFOracle.query",
+            side_effect=AssertionError("Surface labels must not query SDF"),
+        ):
+            result = build_asset(record(p, "cube"), out, SMALL)
         verify_asset(out, result["hashes"])
+        from veudf.io.dataset import load_surface_pool
+
+        bank = load_surface_pool(out, "surface")
+        self.assertIsInstance(bank["fields"], np.memmap)
+        with self.assertRaises(ValueError):
+            load_surface_pool(out, "near_surface")
         oracle, _, _, _ = read_geometry(out / "condition")
-        for name in [
-            "surface",
-            "near_surface",
-            "edge_surface",
-            "vertex_surface",
-            "zero",
-        ]:
-            bank = out / "pools" / name
-            x = np.load(bank / "points.npy")
-            f = np.load(bank / "fields.npy")
-            np.testing.assert_allclose(f[:, 0], oracle.query(x), atol=1e-7)
-            solid, _ = read_normalized(p, SMALL)
-            targets = collect_targets(solid, SMALL)
-            np.testing.assert_allclose(
-                f[:, 1],
-                EdgeOracle(targets.edges, SMALL).query(x)["distance"],
-                atol=1e-6,
-            )
-            np.testing.assert_allclose(
-                f[:, 2],
-                VertexOracle(targets.vertices, SMALL).query(x)["distance"],
-                atol=1e-6,
-            )
-            if name == "near_surface":
-                self.assertLessEqual(np.abs(f[:, 0]).max(), SMALL.band_max + 1e-7)
+        solid, _ = read_normalized(p, SMALL)
+        targets = collect_targets(solid, SMALL)
+        from veudf.schema import POOLS, VALID
+
+        self.assertEqual(set(x.name for x in (out / "pools").iterdir()), set(POOLS))
+        for parent in ("pools", "evaluation"):
+            for name in POOLS:
+                bank = out / parent / name
+                x = np.load(bank / "points.npy")
+                f = np.load(bank / "fields.npy")
+                self.assertEqual(f.shape, (len(x), 2))
+                ids = np.load(bank / "triangle_ids.npy")
+                uv = np.load(bank / "barycentric.npy")
+                tri = oracle.vertices[oracle.faces[ids]]
+                reconstructed = (
+                    tri[:, 0]
+                    + uv[:, :1] * (tri[:, 1] - tri[:, 0])
+                    + uv[:, 1:] * (tri[:, 2] - tri[:, 0])
+                )
+                np.testing.assert_allclose(x, reconstructed, atol=1e-7)
+                for c, r in enumerate(
+                    (
+                        EdgeOracle(targets.edges, SMALL, "cad_reference"),
+                        VertexOracle(targets.vertices, SMALL),
+                    )
+                ):
+                    np.testing.assert_allclose(
+                        f[:, c], r.query(x)["distance"], atol=1e-6
+                    )
+                self.assertEqual(np.load(bank / "flags.npy").shape, f.shape)
+                self.assertTrue(np.all(np.load(bank / "flags.npy") & VALID))
         train = np.load(out / "pools/surface/points.npy")
         evaluation = np.load(out / "evaluation/surface/points.npy")
         seen = {tuple(x) for x in train}
         self.assertFalse(any(tuple(x) in seen for x in evaluation))
         meta = json.loads((out / "meta.json").read_text())
         self.assertEqual(
-            sum(v["count"] for k, v in meta["statistics"].items() if k != "zero"),
-            SMALL.pool_count,
+            sum(v["count"] for v in meta["statistics"].values()), SMALL.pool_count
         )
-        self.assertEqual(meta["channel_names"], ["s_mesh", "dE", "dV"])
-        origin = np.load(out / "pools/near_surface/strata.npy")[:, 0]
-        mode = np.load(out / "pools/near_surface/perturbation_mode.npy")
-        layer = np.load(out / "pools/near_surface/perturbation_layer.npy")
-        counts = allocate(SMALL.pool_count, SMALL.pool_weights)
-        for j, n in enumerate(allocate(int(counts[1]), [0.5, 0.3, 0.2])):
-            nc, ic = allocate(int(n), [0.8, 0.2])
-            for m, quotas in enumerate(
-                (allocate(int(nc), [0.3, 0.4, 0.3]), allocate(int(ic), [1, 1, 1, 1]))
-            ):
-                for k, need in enumerate(quotas):
-                    self.assertEqual(
-                        int(((origin == j) & (mode == m) & (layer == k)).sum()),
-                        int(need),
-                    )
-        for parent, count in [("pools", 128), ("evaluation", 64)]:
-            x = np.load(out / parent / "volume/points.npy")
-            sdf = np.load(out / parent / "volume/sdf.npy")
-            self.assertEqual(len(x), count)
-            np.testing.assert_allclose(sdf[:, 0], oracle.query(x), atol=1e-7)
-        from veudf.geometry.sampling import face_normals
-
-        fn = face_normals(oracle.vertices, oracle.faces)
-        for name in ("surface", "edge_surface", "vertex_surface"):
-            bank = out / "pools" / name
-            ids = np.load(bank / "triangle_ids.npy")
-            np.testing.assert_array_equal(np.load(bank / "normals.npy"), fn[ids])
+        self.assertEqual(meta["channel_names"], ["dE", "dV"])
+        self.assertEqual(meta["schema"], "edge_vertex_surface_udf_v1")
+        self.assertEqual(meta["distance_engine"]["occ_calls"], 0)
+        self.assertNotIn("band_max", meta)
 
     def test_cylinder_empty_vertices_and_geometry_stability(self):
         p = write_step(self.root, "cyl", BRepPrimAPI_MakeCylinder(1, 2).Shape())
@@ -351,7 +345,7 @@ class PipelineTests(unittest.TestCase):
             bank = self.root / name / "pools/vertex_surface/fields.npy"
             self.assertEqual(len(np.load(bank)), 0)
             f = np.load(self.root / name / "pools/surface/fields.npy")
-            self.assertTrue(np.all(f[:, 2] == np.float32(EMPTY_DISTANCE)))
+            self.assertTrue(np.all(f[:, 1] == np.float32(EMPTY_DISTANCE)))
         for array in ["points", "normals"]:
             a = np.load(self.root / "base/pools/surface" / f"{array}.npy")[
                 : SMALL.geometry_surface_pool_count

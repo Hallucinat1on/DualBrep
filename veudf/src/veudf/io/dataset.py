@@ -1,4 +1,4 @@
-"""Read and validate dataset indexes and optional volume supervision."""
+"""Read and validate surface-only dataset indexes."""
 
 import json
 from pathlib import Path
@@ -29,21 +29,45 @@ def discover_assets(root):
     return records
 
 
-def load_volume(path, required):
-    """Read precomputed SDF-only volume labels. No geometry oracle in workers."""
-    if not required:
-        return {}
-    if not (path / "points.npy").is_file() or not (path / "sdf.npy").is_file():
-        raise ValueError(
-            "Volume supervision requested but volume pool is missing; rebuild data with volume_pool_count > 0"
-        )
+def load_surface_pool(asset, name):
+    """Memory-map a new-schema supervision pool; CAD provenance is GT, not condition input."""
+    from veudf.schema import POOLS, CHANNELS
+
+    asset = Path(asset)
+    meta = json.loads((asset / "meta.json").read_text())
+    if meta.get("schema") != SCHEMA or meta.get("channel_names") != list(CHANNELS):
+        raise ValueError("Unsupported surface UDF schema/channels")
+    if name not in POOLS:
+        raise ValueError("Unknown surface pool")
     bank = {
-        name: np.load(path / f"{name}.npy", mmap_mode="r", allow_pickle=False)
-        for name in ("points", "sdf")
+        key: np.load(
+            asset / "pools" / name / f"{key}.npy", mmap_mode="r", allow_pickle=False
+        )
+        for key in (
+            "points",
+            "normals",
+            "triangle_ids",
+            "barycentric",
+            "fields",
+            "nearest_ids",
+            "flags",
+            "source_instance",
+            "strata",
+        )
     }
     n = len(bank["points"])
-    if n < required or bank["points"].shape != (n, 3) or bank["sdf"].shape != (n, 1):
-        raise ValueError("Invalid/insufficient volume pool")
-    if any(a.dtype != np.float32 for a in bank.values()):
-        raise ValueError("Volume points/labels must be float32")
+    layout = dict(
+        points=((n, 3), np.float32),
+        normals=((n, 3), np.float32),
+        triangle_ids=((n,), np.int32),
+        barycentric=((n, 2), np.float64),
+        fields=((n, 2), np.float32),
+        nearest_ids=((n, 2), np.int32),
+        flags=((n, 2), np.uint8),
+        source_instance=((n,), np.int32),
+        strata=((n, 1), np.uint8),
+    )
+    for key, (shape, dtype) in layout.items():
+        if bank[key].shape != shape or bank[key].dtype != dtype:
+            raise ValueError("Invalid surface pool array: " + key)
     return bank

@@ -90,7 +90,7 @@ SDF 无需模型预测：内部按需计算到原始网格的距离，用于特�
 ```bash
 PYTHONPATH="$PWD/veudf/src:$PWD/band_brep_reconstruction" \
   python -m pytest band_brep_reconstruction/tests -q
-python scripts/sync_veudf.py --check
+PYTHONPATH="$PWD/veudf/src" python -m pytest veudf/tests -q
 ```
 
 测试包含闭合剖分、域与 mask、梯度、生产 adapter、输入/缓存身份、分割/拓扑及网格起步的立方体、圆柱、腔体球与球体贯通孔 STEP 读回。外部真实权重和真实生产批次需单独评估，历史实验成绩不作为新流程成绩。

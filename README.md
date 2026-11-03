@@ -5,14 +5,12 @@ Official implementation of **DualBrep: A Dual-Field Continuous Representation fo
 **SIGGRAPH 2026** — [arXiv:2606.31579](https://arxiv.org/abs/2606.31579). If you use this code,
 please [cite it](#citation).
 
-本仓库的原理说明、三场预处理、独立重建方案及实验汇总见 [文档导航](docs/README.md)。
+本仓库的原理说明、表面双 UDF 预处理、独立重建方案及实验汇总见 [文档导航](docs/README.md)。
 
-后续 E/V-UDF 数据开发以生产目录 `/opt/data/private/yihengxu/Hunyuan3D/veudf` 为准；本仓库同步副本与运行入口见 [veudf/README.md](veudf/README.md)。旧 `edge_vertex_preprocessing/evudf` 已退役，使用 `edge_vertex_mesh_pools_v1` 的网格 SDF／CAD E/V 和 `.npy` 点池：
-
+当前 `surface-udf` 分支在本仓库 [veudf/](veudf/README.md) 开发仅表面采样的 `[dE,dV]` 数据；schema 为 `edge_vertex_surface_udf_v1`，不兼容旧三场／离面点池。外部生产目录保持原实现。
 ```bash
-python scripts/sync_veudf.py --check
+export PYTHONPATH="$PWD/veudf/src"
 # 在 veudf 所需的 OCC 7.7 / Python 3.10+ 数据环境中安装和运行。
-python -m pip install -e './veudf[jobs,postprocess,test]'
 python -m veudf.cli.build_dataset --help
 ```
 

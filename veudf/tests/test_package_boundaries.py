@@ -16,7 +16,7 @@ def test_data_interfaces_do_not_import_training_or_cad(tmp_path):
         [
             sys.executable,
             "-c",
-            "import sys; import veudf.schema, veudf.utils; "
+            f"import sys; sys.path.insert(0, {str(Path.cwd() / 'veudf/src')!r}); import veudf.schema, veudf.utils; "
             "import veudf.geometry.mesh, veudf.io.condition, veudf.io.dataset; "
             "import veudf.io.predictions, veudf.postprocess.mesh_cleanup; "
             "assert not any(n.split('.')[0] in {'torch', 'hy3dshape', 'OCC'} "
@@ -34,16 +34,16 @@ def test_data_interfaces_do_not_import_training_or_cad(tmp_path):
 def test_prediction_roundtrip_preserves_masks_and_coordinates(tmp_path):
     arrays = dict(
         query_points=np.array([[0, 0, 0], [0.5, 0.4, 0.3]], np.float32),
-        query_fields=np.array([[0, 0.01, 0.02], [0.1, np.nan, 0.3]], np.float32),
-        valid=np.array([[True, True, True], [True, False, False]]),
-        saturated=np.zeros((2, 3), bool),
+        query_fields=np.array([[0.01, 0.02], [np.nan, 0.3]], np.float32),
+        valid=np.array([[True, True], [False, False]]),
+        saturated=np.zeros((2, 2), bool),
         presence_support=np.array([20, 10]),
         has_edges=np.array(True),
         has_vertices=np.array(True),
     )
     metadata = dict(
-        schema_version="edge_vertex_prediction_v2",
-        channel_names=["sdf", "dE", "dV"],
+        schema_version="edge_vertex_surface_prediction_v1",
+        channel_names=["dE", "dV"],
         normalization=dict(center=[1, 2, 3], scale=0.5),
     )
     output = tmp_path / "prediction"
@@ -62,13 +62,13 @@ def test_prediction_rejects_misaligned_masks_before_writing(tmp_path):
             tmp_path / "invalid",
             dict(
                 query_points=np.zeros((2, 3)),
-                query_fields=np.zeros((2, 3)),
-                valid=np.ones((1, 3), bool),
-                saturated=np.zeros((2, 3), bool),
+                query_fields=np.zeros((2, 2)),
+                valid=np.ones((1, 2), bool),
+                saturated=np.zeros((2, 2), bool),
             ),
             dict(
-                schema_version="edge_vertex_prediction_v2",
-                channel_names=["sdf", "dE", "dV"],
+                schema_version="edge_vertex_surface_prediction_v1",
+                channel_names=["dE", "dV"],
             ),
         )
     assert not (tmp_path / "invalid").exists()

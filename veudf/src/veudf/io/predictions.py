@@ -5,8 +5,8 @@ from pathlib import Path
 
 import numpy as np
 
-PREDICTION_SCHEMA = "edge_vertex_prediction_v2"
-PREDICTION_CHANNELS = ["sdf", "dE", "dV"]
+PREDICTION_SCHEMA = "edge_vertex_surface_prediction_v1"
+PREDICTION_CHANNELS = ["dE", "dV"]
 
 
 def write_prediction(directory, arrays, metadata):
@@ -38,7 +38,7 @@ def validate_prediction(arrays, metadata):
     points = np.asarray(arrays["query_points"])
     if points.ndim != 2 or points.shape[1] != 3 or not np.isfinite(points).all():
         raise ValueError("Prediction coordinates must be finite [Q,3]")
-    shape = points.shape
+    shape = (len(points), 2)
     fields = np.asarray(arrays["query_fields"])
     valid = np.asarray(arrays["valid"])
     saturated = np.asarray(arrays["saturated"])

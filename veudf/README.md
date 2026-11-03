@@ -1,73 +1,70 @@
-# 生产 E/V-UDF 数据处理
+# 网格表面 E/V-UDF 数据处理
 
-本仓库后续数据处理以 `/opt/data/private/yihengxu/Hunyuan3D/veudf` 为唯一生产来源。`veudf/` 是其源码、配置、测试和打包文件的同步副本；本地运行不需要导入外部 Hunyuan3D。同步记录见 [SOURCE.json](SOURCE.json)，数据规范见[三场数据处理](../docs/ABCEdgeVertexUDFPreprocessing.md)。
+当前 `surface-udf` 分支直接维护本仓库 `veudf/`，版本 3.0.0。生产目录 `/opt/data/private/yihengxu/Hunyuan3D/veudf` 不随本次改造修改。来源记录见 [SOURCE.json](SOURCE.json)，字段与算法见[数据规范](../docs/ABCEdgeVertexUDFPreprocessing.md)。
 
-当前版本 2.0.0，schema 为 `edge_vertex_mesh_pools_v1`，通道为 `[s_mesh,dE,dV]`。SDF 来自最终闭合 CAD 三角网格，E/V 来自有限 CAD 曲线和必要顶点。默认不生成体素 SDF，也不经过 MC。原 `edge_vertex_preprocessing/evudf` 已退出新数据处理流程。
+schema 为 `edge_vertex_surface_udf_v1`，仅保存 `[dE,dV]`：在最终 condition 网格表面采样，计算到**全模型保留 CAD 边／必要顶点**的欧氏距离。不是到所属面的边界、沿表面的测地距离或到三角网格全部边／顶点的距离。所有 CAD 筛选、归一化、分组 split 和几何去重规则继续适用。
 
-## 同步生产实现
+## 运行
 
-在仓库根目录执行：
-
-```bash
-# 只读核对生产文件、本地文件和同步哈希。
-python scripts/sync_veudf.py --check
-# 生产目录有更新后，覆盖本地受管理的源码、配置、测试与打包文件。
-python scripts/sync_veudf.py --apply
-```
-
-自定义来源可加 `--source /path/to/veudf`。脚本不复制数据、运行任务、缓存或训练工程，不修改生产目录。本地 README 和集成文档独立维护；数据处理功能先在生产目录开发，再同步，避免形成第二套实现。`SOURCE.json` 记录生产文件 SHA-256，源码和测试保持逐字节一致。
-
-## 环境与运行
-
-需要 Python 3.10+、OCC/OCCT 7.7.0 和 libigl 2.6.3。完整依赖见 [environment.yml](environment.yml)、[pyproject.toml](pyproject.toml)。在仓库根目录：
+需要 Python 3.10+、OCC/OCCT 7.7.0、libigl 2.6.3；依赖见 [environment.yml](environment.yml)。可复用已有环境执行本地源码，无需更改生产 editable 安装：
 
 ```bash
-conda env update -n hunyuan -f veudf/environment.yml
-conda activate hunyuan
-python -m pip install -e './veudf[jobs,postprocess,test]'
-
+export PYTHONPATH="$PWD/veudf/src"
 python -m veudf.cli.build_dataset manifest \
-  --step-dir /data/abc/step/0000 --out /data/new_manifest.jsonl
-python -m veudf.cli.build_dataset build --root /data/new_mesh_pools \
-  --manifest /data/new_manifest.jsonl --config veudf/configs/surface_pools.json \
-  --workers 4 --threads 4 --timeout 7200
+  --step-dir /data/abc/step/0000 --out /data/surface_manifest.jsonl
+python -m veudf.cli.build_dataset build --root /data/surface_udf_v1 \
+  --manifest /data/surface_manifest.jsonl --config veudf/configs/surface_pools.json \
+  --workers 4 --threads 1 --timeout 7200
+python -m pytest veudf/tests -q
 ```
 
-请使用新输出 root；旧 `edge_vertex_udf_v1` NPZ、历史体素／MC 条件场与当前数据不能混用。续跑相同 root 时，清单、配置、源码和依赖身份必须一致。已运行的冻结任务继续使用其自身的源码与环境，不能因同步仓库而替换运行中代码。
+使用新的输出 root。旧三通道点池、离面池、体积池和旧预测交换格式全部拒绝，不提供兼容读取。相同 root 的续跑仍核验清单、配置、源码和运行环境身份；已经冻结的旧任务保持其自身代码和环境。
 
-如果生产目录已安装同名 `veudf` 包，在本仓库测试请使用独立虚拟环境，避免改变生产环境的 editable 安装。同步副本没有修改生产环境的安装位置。
+## 采样与距离
 
-## 点池与输出
+默认三池合计 1,022,362 点：普通表面 393,216，近边表面 393,216，近顶点表面 235,930。S0 固定几何前缀仍为 393,216，特征配额变化不改变它。目标不存在或无法到达时，按原有规则回流普通表面池，存在性和覆盖审计显式记录。
 
-默认普通池 1,572,864 点，S/N/E_S/V_S 比例 25/35/25/15；S0 的固定几何前缀为 393,216 点。特征池在 CAD 边／顶点附近的最终网格表面采样，N 池按实际 `abs(s_mesh)≤0.03` 接受。另有 CAD 零集与独立 evaluation 池，普通池不包含全域体积监督；可选 volume 池仅保存 SDF。
+每个点保存三角形 ID 和 float64 重心坐标；float32 点位的重建误差不超过 2e-7。普通池与特征池全部来自最终网格，没有法向噪声／各向同性噪声。CAD 零集不写入训练或 evaluation；曲边的离散网格点到 CAD 曲线可能具有正距离，不能硬写为零。训练与 evaluation 使用独立随机流。
+
+E 距离引擎按三角形缓存保守候选，按候选边批量剪枝；直线段和有限圆弧走解析距离，复杂曲线使用 OCC。所属面和来源边只是搜索提示，全局包围盒筛选保证薄壁背面的更近边不会丢失。V 距离使用批量精确 KDTree。E/V 分别保存等距标记；解析曲线的多解按几何判断，避免把 OCC 返回的重复数值极值当作真正多解。
+
+采样器用三角形包围盒索引筛选特征邻域；该邻域依据特征半径，不能用最近边归属代替。`cad_reference` 仅作独立的全边 OCC 标量审计。
+
+## 输出与读取
 
 ```text
 root/
   config.json / manifest.jsonl / identity.json
   assets/<id>/
     condition/{vertices.npy,triangles.npy,meta.json}
-    pools/{surface,near_surface,edge_surface,vertex_surface,zero}/
-    evaluation/<对应点池>/
+    pools/{surface,edge_surface,vertex_surface}/
+    evaluation/{surface,edge_surface,vertex_surface}/
     audit/ / topology.json / meta.json
   results/ / logs/ / index.json / report.json / status.json
 ```
 
-点池使用独立 `.npy` 数组并支持 mmap；只有标签审计、去重及 split 检查通过的资产发布到 `index.json`。空通道保存 float32 `2√3` 并标记不存在，不使用旧 `.02` 占位或截断归一化读取接口。
+每池含 `points[N,3]`、`normals[N,3]`、`triangle_ids[N]`、`barycentric[N,2]`、`fields[N,2]`、`nearest_ids[N,2]`、`flags[N,2]`、`source_instance[N]`、`strata[N,1]`。重心坐标为顶点 1/2 的权重，顶点 0 权重为 `1-u-v`。
 
-## 入口与验证
+`flags` 每通道 bit 0 表示有效，bit 1 表示等距歧义。空通道距离为 float32 `2√3`、最近 ID 为 -1、有效位为 0。距离不截断、不做标签归一化。`source_instance` 只表示采样来源，不能当作最近实例。
 
-| 模块入口 | 安装后的命令 |
-|---|---|
-| `python -m veudf.cli.build_dataset` | `veudf-build-dataset` |
-| `python -m veudf.cli.prepare_condition` | `veudf-prepare-condition` |
-| `python -m veudf.cli.prepare_remaining_run` | `veudf-prepare-remaining` |
-| `python -m veudf.cli.run_guarded_build` | `veudf-guarded-build` |
-
-增量候选冻结仅复制 `veudf` 包，保留 family split 和既有排除；资源保护是软停止，不是硬内存隔离。使用各命令 `--help` 查看参数。
-
-```bash
-python -m pytest veudf/tests -q
-python scripts/sync_veudf.py --check
+```python
+from veudf.io.dataset import discover_assets, load_surface_pool
+assets = discover_assets('/data/surface_udf_v1')
+bank = load_surface_pool(assets[0]['directory'], 'edge_surface')
+# bank['fields'] 的通道顺序为 [dE,dV]，数组以 mmap 读取。
 ```
 
-测试包含距离、筛选、网格条件、采样、资产构建、几何去重、发布／续跑、包依赖边界及脱离仓库的冻结任务。完整曲线拟合和 B-rep 装配仍由独立 `band_brep_reconstruction` 负责；当前生产点池没有自动注册到该模块的旧 `sampled` provider，不能直接替换其历史 NPZ 输入。
+`condition` 只提供几何。CAD 实例 ID、拓扑、三角形到 CAD face 的映射是监督／审计数据，不能送入模型条件。网格距离工具保留给几何验证及独立后处理，表面 E/V 标签不再执行网格 SDF 查询。几何 VAE 如需要体积 SDF，应使用独立数据流程。
+
+外部训练工程仍需迁移三通道、`near_surface`、`zero` 和损失 mask 的读取逻辑；本仓库本次不修改生产训练代码。
+
+## 性能验证
+
+[配对基准](benchmarks/benchmark_surface_distance.py) 在完全相同的表面点上比较距离，不把删除 35% 离面点算作算法加速：
+
+```bash
+python veudf/benchmarks/benchmark_surface_distance.py \
+  --manifest /path/to/frozen_manifest.json --output /data/surface_distance_benchmark
+```
+
+清单为已有配对实验 JSON 数组，含 `id / step / source_sha256`；可用 `--ids`、`--count` 选择样本与查询数。`--baseline /path/to/frozen_distance.py` 可加入旧冻结引擎，仅用于基准，不作为生产后端。报告记录冷／热查询时间、输入和源码哈希、OCC 调用数以及独立参考误差；冷查询包含候选缓存建立。

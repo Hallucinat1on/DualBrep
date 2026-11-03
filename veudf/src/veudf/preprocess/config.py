@@ -21,20 +21,16 @@ class Config:
     max_faces: int = 100
     max_face_edges: int = 50
     min_edge_length: float = 0.001
-    # Final CAD mesh; optional volume supervision is separate from the four pools.
-    volume_pool_count: int = 0
-    evaluation_volume_count: int = 4096
+    # Three pools on the final condition mesh, with no off-surface supervision.
     feature_curve_spacing: float = 0.002
     geometry_surface_pool_count: int = 393216
-    pool_count: int = 1572864
-    pool_weights: tuple = (0.25, 0.35, 0.25, 0.15)
-    band_max: float = 0.03
+    pool_count: int = 1022362
+    pool_weights: tuple = (393216 / 1022362, 393216 / 1022362, 235930 / 1022362)
     feature_radii: tuple = (0.002, 0.005, 0.01, 0.02, 0.03)
     feature_weights: tuple = (0.2, 0.3, 0.3, 0.2, 0.0)
     feature_min_samples: int = 32
     sampling_rounds: int = 32
     evaluation_points_per_pool: int = 4096
-    zero_checks_per_edge: int = 3
     batch_size: int = 4096
     reference_checks: int = 128
     seed: int = 0
@@ -52,9 +48,7 @@ class Config:
         for f in fields(self):
             value = getattr(self, f.name)
             if f.type is int or f.type == "int":
-                if type(value) is not int or value < (
-                    0 if f.name in ("seed", "volume_pool_count") else 1
-                ):
+                if type(value) is not int or value < (0 if f.name == "seed" else 1):
                     raise ValueError(f"{f.name} must be a positive integer")
             elif f.type is float or f.type == "float":
                 if (
@@ -65,22 +59,16 @@ class Config:
                     raise ValueError(f"{f.name} must be finite and positive")
         if self.bounding >= 1:
             raise ValueError("bounding must leave padding inside [-1,1]^3")
-        if self.bounding + self.band_max >= 1:
-            raise ValueError("band_max must keep near-surface queries inside [-1,1]^3")
-        if self.band_max < 0.01:
-            raise ValueError(
-                "band_max must be at least 0.01 for the near-surface strata"
-            )
         if self.max_faces < self.min_faces:
             raise ValueError("max_faces < min_faces")
         from veudf.utils import allocate
 
         if (
-            len(self.pool_weights) != 4
+            len(self.pool_weights) != 3
             or min(self.pool_weights) < 0
             or abs(sum(self.pool_weights) - 1) > 1e-8
         ):
-            raise ValueError("pool_weights must sum to one and have four entries")
+            raise ValueError("pool_weights must sum to one and have three entries")
         if (
             allocate(self.pool_count, self.pool_weights)[0]
             < self.geometry_surface_pool_count
@@ -91,7 +79,6 @@ class Config:
             or len(self.feature_radii) != len(self.feature_weights)
             or any(not math.isfinite(r) or r <= 0 for r in self.feature_radii)
             or list(self.feature_radii) != sorted(set(self.feature_radii))
-            or self.feature_radii[-1] > self.band_max
             or any(not math.isfinite(w) for w in self.feature_weights)
             or min(self.feature_weights) < 0
             or abs(sum(self.feature_weights) - 1) > 1e-8

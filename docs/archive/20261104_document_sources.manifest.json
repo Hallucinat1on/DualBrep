@@ -1,0 +1,77 @@
+{
+  "date": "2026-11-04",
+  "archive": "20261104_document_sources.json.gz",
+  "archive_sha256": "b0277fa5c29a036299d193dfe821a2a859e67cf3f1b6794315124c4645c71a68",
+  "files": [
+    {
+      "path": "docs/ABCEdgeVertexUDFPreprocessing.md",
+      "bytes": 11111,
+      "sha256": "5921cc29a92d392c46fd0a441fbd096dab607e737318f787d85b07729aaf1c04"
+    },
+    {
+      "path": "docs/BandLabelTopologyRecovery.md",
+      "bytes": 19000,
+      "sha256": "d83436668fdbe643a032911ffa5800ba06b2f45d6a0fdddcb91dc75ad8e71ff6"
+    },
+    {
+      "path": "docs/CoarseFineComparison20261102.md",
+      "bytes": 3475,
+      "sha256": "29d4c2bfd73610d2100074e9d16b9805002ec04f8145574ad9aded86188eb7aa"
+    },
+    {
+      "path": "docs/CoarseFineMeshRefinementPlan.md",
+      "bytes": 7266,
+      "sha256": "3870b30224aaf1f14a38dc191c47a59d6052f6cf08a1217f25fc5561e7ee7a2e"
+    },
+    {
+      "path": "docs/DualBrepUDFAndTopology.md",
+      "bytes": 39112,
+      "sha256": "53d389bdfff2b9d6fe3aeedebaa6026c14a054931596f2782d6303480f271ea2"
+    },
+    {
+      "path": "docs/EdgeVertexDistanceFields.md",
+      "bytes": 64534,
+      "sha256": "098b594de31b2a598bd9d98e8dec0a5219625b07be71559f0ae7da230e0b5c60"
+    },
+    {
+      "path": "docs/HunyuanNaTexEdgeVertexVAEAdaptation.md",
+      "bytes": 48799,
+      "sha256": "92e9d59303658bd002e03a51bca900213e0c73ece6edc524026eb61133a0effc"
+    },
+    {
+      "path": "docs/MeshDensificationUDFExperimentReport.md",
+      "bytes": 23243,
+      "sha256": "af29325c756b52239afa3725450a1d15e918732f2d5296aa31702cf5c0385528"
+    },
+    {
+      "path": "docs/NativeMeshL5Experiment.md",
+      "bytes": 5513,
+      "sha256": "8e5c3730dc868db5f8cdeb033c3687a489228a4f9ecc60528c411fe22be87a1d"
+    },
+    {
+      "path": "docs/README.md",
+      "bytes": 4288,
+      "sha256": "21c641bdd73e2f57178fb5a91ed9819b23d913169b2b652ee355f480a0e76410"
+    },
+    {
+      "path": "docs/ThreeFieldReconstructionExperiments.md",
+      "bytes": 44888,
+      "sha256": "c78dcd8017353758d8f48a8d0ea18aa1e6d060857ce85c35ff17b40facd9263a"
+    },
+    {
+      "path": "band_brep_reconstruction/README.md",
+      "bytes": 8215,
+      "sha256": "b635b98ba7f84f3bbce7d3e797e8cdf28eab79c41d14a9365df09a221220f105"
+    },
+    {
+      "path": "band_brep_reconstruction/benchmarks/README.md",
+      "bytes": 4520,
+      "sha256": "62a8f1c3c8d12e3749007d97eb889486ea9f6680a5eb2ac029fd9508eee1540b"
+    },
+    {
+      "path": "band_brep_reconstruction/PROVENANCE.md",
+      "bytes": 1179,
+      "sha256": "2956247ff73a87e5b1a7dcb8df8453c053a67050730aaa6c7f337866bbff1eb1"
+    }
+  ]
+}

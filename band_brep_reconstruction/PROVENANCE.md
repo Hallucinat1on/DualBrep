@@ -8,4 +8,4 @@
 
 网格 SDF、几何身份和表面采样直接依赖 [veudf](../veudf/README.md)，与生产预处理使用同一实现。生产来源与同步哈希见 [SOURCE.json](../veudf/SOURCE.json)。
 
-旧 `vendor/oracle`、`vendor/dualbrep_model.py` 及其适配器随旧输入流程删除，不再维护冻结副本。旧文件来源与哈希可在 Git 历史查看；整理前说明也保存在 [2026-10-31 文档归档](../docs/archive/20261031_document_sources.json.gz)中。历史实验输出未修改。
+旧 `vendor/oracle`、`vendor/dualbrep_model.py` 及其适配器随旧输入流程删除，不再维护冻结副本。旧文件来源与哈希可在 Git 历史查看；旧说明引用的 `docs/archive/20261031_document_sources.json.gz` 是历史位置，本次核对时已不在工作区；来源与旧源码身份请从 Git 历史或对应批次快照核验。本说明的本次整理前副本见[2026-11-04 文档归档](../docs/archive/20261104_document_sources.json.gz)。历史实验输出未修改。

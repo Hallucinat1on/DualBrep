@@ -1,6 +1,6 @@
 # 网格与 E/V 距离场的隔离带 B-rep 重建
 
-更新：2026-11-01，模块 0.5.0。当前输入改为预处理网格与连续 E/V，不再通过 SDF 提面。安装、模型接入和 CLI 见[模块 README](../band_brep_reconstruction/README.md)，历史成绩见[实验主文档](ThreeFieldReconstructionExperiments.md)，来源见 [PROVENANCE](../band_brep_reconstruction/PROVENANCE.md)。
+文档整理：2026-11-04，当前说明对应模块 0.5.0。已合并两级加密实施说明，验证记录集中到[实验主文档](ThreeFieldReconstructionExperiments.md#coarse-fine-validation)。当前输入改为预处理网格与连续 E/V，不再通过 SDF 提面。安装、模型接入和 CLI 见[模块 README](../band_brep_reconstruction/README.md)，历史成绩见[实验主文档](ThreeFieldReconstructionExperiments.md)，来源见 [PROVENANCE](../band_brep_reconstruction/PROVENANCE.md)。
 
 ## 1. 输入与几何目标
 
@@ -47,17 +47,17 @@ E/V 梯度由模型连续场计算，不需要预测第三/第四个梯度头。
 
 ## 3. 固定表面与两阶段面核心
 
-### 3.1 直接网格与默认 L5 加密
+### 3.1 直接网格与默认两级加密
 
-网格可从生产 condition 或已归一化网格文件读取，不自动换坐标。验证有限坐标、索引、闭合、方向、退化面、正体积与多壳嵌套；condition 另外核验版本、dtype 和 mesh hash。以原网格构建一次 AABB/winding 加速结构。
+网格可从生产condition或已归一化网格文件读取，不自动换坐标。验证有限坐标、索引、闭合、方向、退化面、正体积与多壳嵌套；condition另核验版本、dtype和mesh hash。以原网格构建一次AABB/winding加速结构，模型condition及内部SDF始终绑定原始网格。
 
-随后必经 L5：查询现有顶点和三角形中心 E/V，低 UDF 区域做一致局部剖分。新增位置重新查询；完成后对最终三角形中心重新查询再分割。共享边中点与过渡剖分避免裂缝，保持原分片线性几何。参数与选择规则见第 8 节。
+随后先纯几何粗加密，再按连续E/V做近场细加密。新增位置查询场值，完成后的中心字段可直接交给分割复用；共享边与过渡剖分保持原分片线性表面，详见[第8节](#refinement)。这与历史四轮单级L5不同，不提高原网格几何精度。
 
-图节点始终对应最终三角形中心。面核心按共享边连接；默认普通带按共享顶点连接。局部顶点域按候选归属划分，不按整个阈值带求一个连通分量。加密不提高原网格的几何精度。
+图节点始终对应最终三角形中心。面核心按共享边连接，默认普通带按共享顶点连接；局部顶点域按候选归属，不按整个阈值带求一个分量。
 
 ### 3.2 两阶段分割与排除原因
 
-`bands.py` 对最终网格的全部三角形中心查询三场，并只将 dE 送入 `vendor/dualbrep_segmentation.py::hierarchical_segmentation`：
+`bands.py` 使用经身份/坐标/顺序核验的最终中心三场；没有缓存输入时自行查询，并只将 dE 送入 `vendor/dualbrep_segmentation.py::hierarchical_segmentation`：
 
 1. 在 `dE≥face_threshold1` 的共享边图求连通分量；保留大小 `≥face_filter_size` 且平均距离 `>face_avg_udf_threshold` 的分量。
 2. 对合格父分量，在 `dE≥face_threshold2` 上再次求分量。仅当至少两个子分量通过大小过滤时替换父分量；否则完整回退父分量。
@@ -183,17 +183,39 @@ $$
 
 回转面／圆弧开关应与周期规划配套；已有实验中单独开启会使部分模型失败，配置校验并不自动禁止这种组合。未知键被拒绝，旧 `max_refinements / max_band_edge / stability_factors / project_face_samples` 等参数已移除。
 
-## 8. 两级加密、超长边剪枝与不变性
+<a id="refinement"></a>
+## 8. 两级加密、字段复用与不变性
 
-`coarse_refine_surface(mesh, target_edge)` 仅使用几何，默认全局切分超过 `0.02` 的共享边，直到最长边达标；不调用 SDF 或 E/V，也不移动原顶点。现有 red/green 规则对邻面作一致过渡。
+当前入口依次执行 `mesh → coarse_refinement → fine_refinement → bands`，默认粗目标0.02、细目标0.005、E/V近场半径0.02/0.03。原始condition网格继续决定模型输入和mesh SDF，工作网格只增加后处理采样，不修复mesh与CAD E/V的表示偏差。
 
-`fine_refine_surface(mesh, provider, cfg)` 在粗网格上查询 E/V。对每个 present 通道，三角形最长边 L、顶点最小距离 m、中心距离 d 满足 `m−L≤rho` 或 `d≤rho` 时纳入近场，半径为 E=0.02、V=0.03。仅将选中面内仍超过 `0.005` 的边标记为切分，已经足够短的边保持不变；每轮重新检查近场达标。保留原选择规则，不加入新的下界或主动队列。
+### 粗阶段：纯几何长边细分
 
-共享边索引采用有范围检查的整数编码，并由本轮选择、剖分共用。两级都检查闭合、方向、非零面积、壳数、欧拉特征及面积／有向体积不变性。孩子始终位于原父三角形内，最终映射为 `coarse_parent[fine_parent]`。新点／中心查询场值，不从父值插值；最终中心字段带 provider 身份传给 `build_bands`，避免同一批中心再次查询。
+`coarse_refine_surface(mesh, target_edge)` 建立共享边索引，只标记 `edge_length > coarse_edge*(1+1e-10)`。现有red/green规则对1/2/3条切边一致剖分，邻面作必要过渡；新点是共享边中点，不移动已有顶点、不平滑或投影，也不查询SDF/E/V。迭代至全局最长边达标，细密曲面不被强制一分四。
 
-`refinement_coarse_edge` 与 `refinement_target_edge` 必须满足 `0 < fine <= coarse`。默认每例 `sample_timeout_seconds=10800`，粗／细阶段共用时间预算，无轮数、面数或 RSS 硬上限。进度文件不作为不可变阶段缓存；完成阶段的网格和中心字段按 SHA-256 验证，旧单级缓存不能续用。
+### 细阶段：原近场规则与超长边剪枝
 
-原始 condition 网格继续用于模型条件及 mesh SDF，粗／细网格仅改变后处理采样。加密不修复 mesh 与 CAD E/V 的表示偏差。[历史原生四轮对照](NativeMeshL5Experiment.md)与[旧 MC 结果](MeshDensificationUDFExperimentReport.md#method)保留原批次语义；两级方案与验收见[实施文档](CoarseFineMeshRefinementPlan.md)。2026-11-02 已启动同源 20 dev 的[粗目标0.02/0.03配对实验](CoarseFineComparison20261102.md)，完整成绩仍需等待。
+`fine_refine_surface(mesh, provider, cfg)` 首先查询粗网格顶点/中心。对每个present通道，最长边L、顶点最小距离m、中心距离d满足 `m−L≤rho` 或 `d≤rho` 时纳入近场；学习场须同时遵守有效性、饱和和误差语义。
+
+```text
+selected_face = near_field AND face_longest_edge > fine_edge
+marked_edge = belongs_to_any(selected_face) AND edge_length > fine_edge
+```
+
+共享边全局唯一处理，未选邻面仍过渡剖分。每轮检查近场达标，已足够短的边不标记。当前没有附加更紧下界、永久远场排除、主动队列或共面重网格化；这些不能混入同批次成绩。共享边索引采用有范围检查的整数编码，本轮选择与剖分复用索引，避免重复排序。
+
+### 字段、映射与缓存
+
+新增顶点及子面中心重新查询，不复制父标签或插值父距离。原顶点字段复用，最终中心字段携带provider指纹、坐标及顺序交给 `build_bands`；独立调用分割仍有自行查询的fallback。这是相同查询复用，不是改变近场判断。
+
+粗阶段保存原父面，细阶段合成为 `original_parent = coarse_parent[fine_parent]`。每个子面始终留在单一原三角形内部，不跨父面重三角化。检查闭合、半边方向、非零面积、壳数、欧拉特征和面积/有向体积不变性。
+
+产物包括 `input_mesh.npz`、`coarse_mesh.npz`、带 `parent_triangles` 的 `working_mesh.npz`、带字段身份的 `center_fields.npz`，以及两级 `*_refinement_progress.json`。进度文件不是不可变阶段缓存；完成阶段网格和中心字段按SHA-256校验，`run.json`分别记录两级报告，细阶段失败后可复用已验收且同身份的粗阶段。旧单级缓存不能直接续用。
+
+### 配置、时间与验证职责
+
+`Config`和JSON校验 `0 < refinement_target_edge <= refinement_coarse_edge`，默认每例 `sample_timeout_seconds=10800`，两级共用总预算，不设轮数、三角形数量或RSS硬上限。批量runner的外部watchdog还覆盖输入准备、重建和评分，具体范围按冻结协议，不把粗阶段探针时间当完整加速比。
+
+算法测试覆盖粗阶段不查场、两级达标、短边不重复切分、过渡闭合、原父面映射、字段复用与直接查询一致、condition/SDF身份、缓存及超时。真实模型耗时、回归数量与批量结果统一见[实施验证](ThreeFieldReconstructionExperiments.md#coarse-fine-validation)和[粗目标配对](ThreeFieldReconstructionExperiments.md#coarse-fine-comparison)，本页不复制运行状态。
 
 <a id="implementation"></a>
 ## 9. 缓存、验证与实现边界
@@ -204,4 +226,4 @@ $$
 
 尚未解决的范围包括窄面核心找回、错误核心修复、相接顶点的多面歧义、通用短曲边追踪、无边界非解析面、复杂自由曲面及逐实例局部重试。加权距离中心、完整面域扩展、联合顶点／曲面优化和连续边界认证属于扩展设计，不能从公式或辅助函数推断为默认流程已实现。失效机制与候选改进见[面分割分析](ThreeFieldReconstructionExperiments.md#segmentation-failures)。
 
-完整输出保留 `strict_topology_guarantee=False`、`continuous_boundary_guarantee=False` 等边界：有限查询、局部雅可比及 OCC 有效性检查不构成连续全域拓扑、自交或误差的数学证明。原方案与合并前代码讲解全文保存在[2026-10-31 文档归档](archive/20261031_document_sources.json.gz)。
+完整输出保留 `strict_topology_guarantee=False`、`continuous_boundary_guarantee=False` 等边界：有限查询、局部雅可比及 OCC 有效性检查不构成连续全域拓扑、自交或误差的数学证明。本次合并前算法说明与两级实施说明全文保存在[本次文档归档](archive/20261104_document_sources.json.gz)。

@@ -95,6 +95,6 @@ python scripts/sync_veudf.py --check
 
 测试包含闭合剖分、域与 mask、梯度、生产 adapter、输入/缓存身份、分割/拓扑及网格起步的立方体、圆柱、腔体球与球体贯通孔 STEP 读回。外部真实权重和真实生产批次需单独评估，历史实验成绩不作为新流程成绩。
 
-2026-11-01 已用同源 20 个 dev 完成[原生网格 L5 配对实验](../docs/NativeMeshL5Experiment.md)：精确 CAD E/V 下，默认四轮均未达到 0.005，尚未进入拓扑/STEP；旧 MC 的 M0/L5 图+STEP 分别为 5/20 和 7/20。该批原生网格的起始边长远大于 MC，四轮参数需要重新评估，不能用解析回归测试代替真实输入验证。
+2026-11-01 已用同源 20 个 dev 完成[原生网格 L5 配对实验](../docs/ThreeFieldReconstructionExperiments.md#native-mesh-l5)：精确 CAD E/V 下，当时的四轮配置均未达到 0.005，尚未进入拓扑/STEP；旧 MC 的 M0/L5 图+STEP 分别为 5/20 和 7/20。该批原生网格的起始边长远大于 MC，该限制促成后续两级方案；不能用解析回归测试代替真实输入验证。
 
-仅限时的单级重跑已终止，相关产物和专用文档已清理。[粗加密＋近场细加密方案](../docs/CoarseFineMeshRefinementPlan.md)已实现并通过回归；2026-11-02 已启动同源 20 dev × 粗目标 0.02/0.03 的[新对照](../docs/CoarseFineComparison20261102.md)，完整成绩仍需等待。
+仅限时的单级重跑已终止，相关产物和专用文档已清理。[粗加密＋近场细加密方案](../docs/BandLabelTopologyRecovery.md#refinement)已实现并通过回归；2026-11-02 的同源 20 dev × 粗目标 0.02/0.03 [配对协议与状态入口](../docs/ThreeFieldReconstructionExperiments.md#coarse-fine-comparison)集中维护在实验主文档，最新进度和完整成绩以冻结批次汇总为准。

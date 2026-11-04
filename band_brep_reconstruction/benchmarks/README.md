@@ -8,7 +8,7 @@
 
 先不查场做全局粗加密至 0.02，再按 E/V 近场细化至 0.005，选区保持 0.02/0.03，两级均只切超长边；不设轮数、三角形或 RSS 硬上限，达标后进入拓扑。`feature_sdf_tolerance=0.004`、batch=65536、关闭查询落盘与旧 L5 保持一致；其余使用主库默认值。每例总时间默认 10800 秒，包含源核验、准备、condition、加密、后处理和离线评分；worker 进程树超时终止。RSS 仅观测，并发 2，不使用 GPU。`--sample-timeout` 可在初始化时设置总秒数，`--coarse-edge` 设置粗目标；初始化后策略冻结。
 
-runner 支持额外核验输入网格与上一批原生四轮实验的指纹一致，并同时对比旧 MC 和原生四轮成绩。旧 MC 成绩来自历史记录。此前仅限时单级批次已终止并删除；[两级加密方案](../../docs/CoarseFineMeshRefinementPlan.md)已实现。新批次分别记录粗／细阶段的面数、轮数、耗时与中间进度；历史产物不使用新 runner 覆写。
+runner 支持额外核验输入网格与上一批原生四轮实验的指纹一致，并同时对比旧 MC 和原生四轮成绩。旧 MC 成绩来自历史记录。此前仅限时单级批次已终止并删除；[两级加密方案](../../docs/BandLabelTopologyRecovery.md#refinement)已实现。新批次分别记录粗／细阶段的面数、轮数、耗时与中间进度；历史产物不使用新 runner 覆写。
 
 ```bash
 # 在含 OCC 7.7、libigl 2.6.3 的环境，从仓库根目录运行。
@@ -39,4 +39,4 @@ python band_brep_reconstruction/benchmarks/analyze_mesh_input_experiment.py \
 
 `run_coarse_fine_comparison.py` 将粗目标 0.02 与 0.03 作为两个独立冻结子组，共用两个 worker，并按同一模型交错调度，共 40 个任务。初始化需要 `--preflight` 指向当前生产源码下的 20 例输入一致性预检 JSON；只接受两组其他配置一致、源码快照相同的比较。`--run` 自动写出顶层配对汇总和各组最终分析，`--report` 可刷新汇总；已完成组的附加审计不会被刷新覆盖。
 
-2026-11-02 的实际协议、证据和实时入口见[两级粗目标对照](../../docs/CoarseFineComparison20261102.md)。
+2026-11-02 的实际协议、证据和实时入口见[两级粗目标对照](../../docs/ThreeFieldReconstructionExperiments.md#coarse-fine-comparison)。

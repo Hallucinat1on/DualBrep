@@ -1,10 +1,21 @@
 # 三场 B-rep 重建实验：结果、验证与后续计划
 
-文档更新：2026-11-01；实测记录覆盖 2026-10-12—10-29。本文统一维护历史验证、消融、F30 条件场对照和后续实验，已合并原面分割失败分析。当前接口见[预处理规范](ABCEdgeVertexUDFPreprocessing.md)、[隔离带算法与实现](BandLabelTopologyRecovery.md)及模块 README；网格加密的详细方法和结果见[独立报告](MeshDensificationUDFExperimentReport.md)。
+文档整理：2026-11-04。本文统一维护早期验证、F30、旧 MC 加密、原生网格 L5 和两级粗目标对照的协议、结果与证据。当前算法见[重建文档](BandLabelTopologyRecovery.md)，当前生产字段见[数据规范](ABCEdgeVertexUDFPreprocessing.md)。本文合并三份实验报告及两级实施验证；不重新运行实验，也不把历史配置改写成生产默认。
 
-2026-10-31 整理不重新运行实验或修改数据。10-19 合并前五份原文见[历史归档](../band_brep_reconstruction/outputs/document_consolidation_20261019/sources.json.gz)；本次整理前的完整文档及 SHA-256 见[新归档](archive/20261031_document_sources.json.gz)及[清单](archive/20261031_document_sources.manifest.json)。下文分日期保留既有成绩，不用新版本代码检查代替原批次验证。0.4.0 已改为网格起步、默认 L5 与连续 E/V，旧 MC/CAD/NPZ 实验驱动已删除；下文旧命令需使用历史 Git 版本或批次源码快照，不能在当前主库执行。2026-11-01 的生产迁移使用 `veudf/` 与新 mesh 点池，不修改这里已冻结的历史 NPZ／条件网格实验；后续验证需重新登记输入表示和配置。
+各轮保留冻结代码、输入表示、预算、样本分母及产物身份。旧 MC/CAD/NPZ 驱动已退役，复现须使用对应 Git 版本或批次源码快照；新生产使用 `veudf` mesh 点池及网格起步的重建。完整合并前原文和哈希见[本次归档](archive/20261104_document_sources.json.gz)及[清单](archive/20261104_document_sources.manifest.json)。此前归档的位置在§8记录，不承诺历史文件仍在本机。
 
-## 1. 当前结论
+## 1. 实验结论与批次索引
+
+| 批次 | 表示、协议与结论 | 状态依据 |
+|---|---|---|
+| [10-12—10-18](#historical-results) | 早期预处理、迁移与重建消融；保留当时集合和配置 | 历史报告与快照 |
+| [10-19 F30](#f30-results) | 体素条件 SDF；0.004 特征相容性候选恢复到 8/30 STEP | 冻结 30 例、210 任务 |
+| [10-28—10-29 MC 加密](#mesh-density) | 同 20 dev；L5 图+STEP 5→7，新增3／预算丢失1，未进 check | 140 条结果，详见本节产物 |
+| [11-01 原生 L5](#native-mesh-l5) | 同源原生网格四轮均未达细分目标；0/20 准备通过 | 已完成20例，未进入拓扑 |
+| [11-01 两级实施验证](#coarse-fine-validation) | 纯几何粗加密、超长边剪枝、字段复用与缓存 | 回归／几何探针，不是批量成功率 |
+| [11-02 粗目标对照](#coarse-fine-comparison) | 同20 dev×0.02/0.03，两组细目标0.005 | 状态及成绩读取链接的批次产物，本文不推断已完成 |
+
+以上 oracle E/V、内部确认及历史独立集合各有范围；不能将它们合计为独立模型数或真实学习场表现。下列 F30 与旧 MC 结论保留原批次语义。
 
 1. **条件 SDF 与直接查询的 SDF 必须区分。** F30 中，直接 `mesh_fast` SDF 配精确 E/V 为8/30 STEP；换成原生256³条件网格插值后为2/30。只将独立特征 SDF 相容性容差从0.003调为0.004，恢复到8/30，无原成功模型退化。
 2. **0.004不是全局放宽几何精度。** 曲面拟合、边界和 CAD 容差均未变。0.005、0.006没有进一步增加成功数。0.004是下轮学习场验证候选，未修改库的历史默认值或生产训练配置。
@@ -13,7 +24,7 @@
 5. **旧结果不能直接外推。** 10-18 H100b的19/100→38/100来自另一分布和直接场查询；F30是新筛选 val 中的工程诊断，不是新的独立最终测试。此次未开展 VAE/Flow 训练。
 6. **原表面加密有采样收益，也有资源成本。** 10-28—10-29 的 20 个开发模型中，L5 的图与 STEP 共同通过由 5/20 到 7/20，新增 3 例、资源丢失 1 例；没有候选满足无退化门槛，未进入 10 例确认。该实验保持原生 256³ SDF，不能解释为获得更细的几何信息。
 
-阅读顺序：[数据与口径](#data-and-metrics) → [F30结果](#f30-results) → [网格加密报告](MeshDensificationUDFExperimentReport.md) → [面分割分析](#segmentation-failures) → [剩余实验](#next-experiments)。历史证据见[早期验证](#early-validation)和[后处理演进](#historical-results)。
+阅读顺序：[数据与口径](#data-and-metrics) → [F30结果](#f30-results) → [网格加密报告](ThreeFieldReconstructionExperiments.md#mesh-density) → [面分割分析](#segmentation-failures) → [剩余实验](#next-experiments)。历史证据见[早期验证](#early-validation)和[后处理演进](#historical-results)。
 
 <a id="data-and-metrics"></a>
 ## 2. 数据、场表示与评估口径
@@ -44,6 +55,8 @@
 
 ### 2.2 三场及分辨率
 
+本小节记录10-12—10-29的历史表示；原生mesh输入及空通道哨兵变化见[§5.8](#native-mesh-l5)，当前完整字段以[生产规范](ABCEdgeVertexUDFPreprocessing.md)为准。
+
 共同契约：`[SDF, dE, dV]` 共用查询坐标；OCC几何包围盒居中，最长边1.8，查询域 \([-1,1]^3\)，SDF内负外正。目标边剔除seam，保留不同面之间的相切/共面边及必要顶点。非空UDF不截断；raw空集合使用0.02占位、ID为−1，依赖presence区分语义。
 
 | 阶段 | SDF提面/条件网格 | 任意位置SDF | E/V |
@@ -54,7 +67,7 @@
 | 10-19 B/C | 原生256³节点 | 生产条件三线性插值 | 同A |
 | 10-19 D | 从源CAD网格重算原生512³ | 新条件三线性插值 | 同A |
 
-`Hunyuan3D` 旧prepared为128³，当前条件为原生256³，不是128插值放大。524288个混合查询加零集点、131072个条件表面点都是采样预算，**不是UDF体素分辨率**。条件表面新增的精确E/V标签与raw字段分开保存。
+`Hunyuan3D` 更早prepared为128³，10-19批次条件为原生256³，不是128插值放大。524288个混合查询加零集点、131072个条件表面点都是采样预算，**不是UDF体素分辨率**。条件表面新增的精确E/V标签与raw字段分开保存。
 
 节点含域两端，\(\Delta_R=2/(R-1)\)。256和257间距只差约0.39%，但节点相位不同；真正的重要变化是直接场函数换成网格插值。raw的 `sdf_cad` 与 `s_grid` 不可混用，不能把真实三场的 \(|s_{\mathrm{CAD}}|\le d_E\) 无误差预算地套到混合表示上。
 
@@ -217,7 +230,9 @@ H100b余62例的最早失败为预处理5、面分割46、关联6、曲线3、�
 `recommended` 固化的是上述257³配置；代码默认仍是历史65/129配置。历次测试为v0.2的36项、v0.3的42项、10-18运行时52项/整理后54项；测试数不等于默认配置下真实模型成功数。
 
 <a id="f30-results"></a>
-## 5. F30条件场对齐实验（10-19）
+## 5. F30 对齐与同源网格系列实验
+
+§5.1—5.6为10-19的F30条件场对齐；§5.7—5.10分别记录后续固定MC加密、原生四轮L5、两级实施验证和粗目标配对协议。后几轮沿用同源开发样本，但输入表示与预算变化分别披露，不将成绩混为一次实验。
 
 ### 5.1 抽样、预算和实验组
 
@@ -298,47 +313,196 @@ B复用已发布网格，D需原生生成，各组终止阶段也不同；不是
 完成任务的已保存审计未见带外E/V请求；超时准备缺完整末尾查询汇总，不能证明全域带宽足够。本轮仅oracle E/V与presence，未完成整个学习/生成计划。
 
 <a id="f30-models"></a>
-### 5.6 F30逐模型结果
+### 5.6 F30 逐模型证据
 
-单元格为STEP或首个阻断；准备失败回溯上游。D0/D006状态和失败码相同，合列。C005/C006成功集合与C004相同，仅00007970/00009273由顶点错误转为 `edge_neighbors_unresolved`，仍失败。
+逐模型首个阻断、准备失败回溯、C004/C005/C006 和 D0/D006 的比较保存在冻结批次 `analysis.json` 及原始记录，入口见[§8.1](#artifacts)。合并前30行对照表也完整保存在[原文归档](archive/20261104_document_sources.json.gz)。本文件保留各组分母和配对结论，不再手工复制整张逐模型错误表。
 
-| 模型 | 面数 | 分部 | A | B | C004 | D0 / D006 |
-|---|---:|---|---|---|---|---|
-| 00000168 | 14 | 开发 | STEP | vertex_geometry_invalid | STEP | STEP |
-| 00000562 | 82 | 确认 | edge_neighbors_unresolved | vertex_geometry_invalid | edge_neighbors_unresolved | 准备超时 |
-| 00000602 | 92 | 开发 | edge_neighbors_unresolved | edge_neighbors_unresolved | edge_neighbors_unresolved | 准备超时 |
-| 00000688 | 86 | 开发 | edge_neighbors_unresolved | vertex_geometry_invalid | edge_neighbors_unresolved | 准备超时 |
-| 00000837 | 15 | 确认 | STEP | vertex_geometry_invalid | STEP | 三角形预算 |
-| 00001646 | 68 | 确认 | edge_neighbors_unresolved | vertex_geometry_invalid | edge_neighbors_unresolved | 准备超时 |
-| 00002331 | 26 | 开发 | STEP | STEP | STEP | 准备超时 |
-| 00002720 | 35 | 开发 | edge_neighbors_unresolved | edge_neighbors_unresolved | edge_neighbors_unresolved | STEP |
-| 00002748 | 20 | 开发 | edge_neighbors_unresolved | vertex_geometry_invalid | edge_neighbors_unresolved | 准备超时 |
-| 00002978 | 18 | 开发 | repair_changed_shared_edge | repair_changed_shared_edge | repair_changed_shared_edge | 三角形预算 |
-| 00003114 | 15 | 开发 | STEP | vertex_geometry_invalid | STEP | 准备超时 |
-| 00003214 | 82 | 确认 | curve_closure_unobserved | vertex_geometry_invalid | curve_closure_unobserved | 准备超时 |
-| 00003261 | 10 | 开发 | STEP | vertex_geometry_invalid | STEP | 三角形预算 |
-| 00003291 | 24 | 开发 | edge_neighbors_unresolved | edge_localization_failed | edge_neighbors_unresolved | 准备超时 |
-| 00004064 | 14 | 确认 | insufficient_edge_support | vertex_geometry_invalid | insufficient_edge_support | STEP |
-| 00004610 | 46 | 开发 | edge_neighbors_unresolved | vertex_geometry_invalid | edge_neighbors_unresolved | edge_neighbors_unresolved |
-| 00004627 | 16 | 开发 | surface_boundary_incompatible | surface_boundary_incompatible | surface_boundary_incompatible | surface_boundary_incompatible |
-| 00005094 | 54 | 开发 | curve_support_branching | vertex_geometry_invalid | curve_support_branching | 准备超时 |
-| 00007035 | 46 | 确认 | edge_neighbors_unresolved | vertex_geometry_invalid | edge_neighbors_unresolved | edge_neighbors_unresolved |
-| 00007617 | 13 | 确认 | STEP | vertex_geometry_invalid | STEP | STEP |
-| 00007861 | 41 | 确认 | insufficient_edge_support | vertex_geometry_invalid | insufficient_edge_support | STEP |
-| 00007970 | 27 | 开发 | edge_neighbors_unresolved | vertex_geometry_invalid | vertex_geometry_invalid | edge_neighbors_unresolved |
-| 00008133 | 24 | 开发 | surface_error | vertex_geometry_invalid | edge_vertices_unresolved | vertex_mixed_support |
-| 00008222 | 99 | 开发 | edge_neighbors_unresolved | vertex_geometry_invalid | edge_neighbors_unresolved | edge_neighbors_unresolved |
-| 00008280 | 31 | 开发 | STEP | vertex_geometry_invalid | STEP | 三角形预算 |
-| 00008655 | 13 | 确认 | STEP | STEP | STEP | STEP |
-| 00008804 | 55 | 开发 | edge_neighbors_unresolved | edge_neighbors_unresolved | edge_neighbors_unresolved | insufficient_edge_support |
-| 00009273 | 51 | 确认 | edge_neighbors_unresolved | vertex_geometry_invalid | vertex_geometry_invalid | edge_neighbors_unresolved |
-| 00009340 | 30 | 开发 | edge_neighbors_unresolved | vertex_geometry_invalid | edge_neighbors_unresolved | STEP |
-| 00009843 | 14 | 开发 | edge_neighbors_unresolved | edge_neighbors_unresolved | edge_neighbors_unresolved | STEP |
+<a id="mesh-density"></a>
+### 5.7 10-28—10-29：固定 MC 表面加密
+
+同 F30 的20 dev、7组共140条结果已完成；10 check 未运行。原 raw/prepared 缺失，复用哈希核验的 B 组256³条件网格、MC面和中心缓存，从同源 STEP 重建精确 E/V，核对目标数及32个旧中心；离线真值网格重新三角化，所以本轮 M0 是新配对基线，不能把旧 C004 的阶段结果直接代入。存在性为 oracle，不使用学习权重。
+
+所有主组固定条件 SDF 三线性插值、E/V有效带0.02、两阶段阈值0.005/0.01、分量10、均值0.003、特征 SDF 容差0.004、曲面容差0.003及当时 recommended 的其余几何开关。
+
+<a id="mesh-density-method"></a>
+#### 方法与过滤对照
+
+| 组 | 处理 |
+|---|---|
+| M0 | 原 MC 网格重新准备、重建 |
+| U1 | 所有共享边中点一轮一分四 |
+| L5 / L25 | 近E/V局部细分，目标最长边0.005/0.0025，最多四轮 |
+| U1-count40 | U1 的两阶段最小分量改为40 |
+| Area-M0 / Area-L5 | 冻结 `10*median(original_triangle_area)` 面积门槛，第一阶段均值按面积加权 |
+
+历史局部选区对 present 通道使用 `min(vertex_distance)−longest_edge≤rho` 或 `center_distance≤rho`，E/V半径0.02/0.03；选中面标记三条边，一致过渡避免T接头，原表面几何不变。新顶点与最终中心重新查询，记录原父面及中心重心坐标。它与当前“先粗后细、仅切超长边”的实现不同，不能用新规则续跑旧缓存。
+
+每组包括M0都检查闭合、方向、零面积、壳数、欧拉特征及面积/体积不变性。面积过滤是独立辅助变体，不是普通细分的隐含规则；学习场也不能无误差余量地继承精确距离的 Lipschitz 选区保证。
+
+#### 固定分母结果
+
+| 集合/组 | 分母 | 准备通过 | 面正确 | 图正确 | CAD STEP | 图+STEP | 准备中位秒 | 重建中位秒 | 峰值GiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| dev:Area-L5 | 20 | 15 | 11 | 9 | 7 | 7 | 770.7 | 219.4 | 1.34 |
+| dev:Area-M0 | 20 | 18 | 11 | 7 | 5 | 5 | 62.2 | 21.6 | 0.50 |
+| dev:L25 | 20 | 1 | 0 | 0 | 0 | 0 | 511.3 | 24.0 | 1.30 |
+| dev:L5 | 20 | 15 | 11 | 9 | 7 | 7 | 770.7 | 205.3 | 1.34 |
+| dev:M0 | 20 | 18 | 11 | 7 | 5 | 5 | 62.2 | 22.6 | 0.50 |
+| dev:U1-count40 | 20 | 15 | 9 | 6 | 5 | 5 | 171.3 | 53.1 | 0.94 |
+| dev:U1 | 20 | 15 | 9 | 6 | 5 | 5 | 171.3 | 52.1 | 0.98 |
+
+所有阶段按固定分母，图正确为有限支撑一对一及关联诊断，不是全域认证。时间含失败，准备和重建分开，辅助组复用对应准备缓存。总墙钟5.74小时；L5与U1最终密度并不匹配，不能把表中时间作为同等密度的加速比较。
+
+#### 配对收益、退化与限制
+
+- L5及Area-L5新增 `00003291 / 00009340 / 00009843`，丢失 `00008280`。三例分别修复面拆分或漏边，图和STEP均通过；共同成功最大表面距离增量7.16e-6，低于门槛0.0002。
+- L5丢失08280是拟1672470面超过150万预算；另00602、05094也超预算。它们不是进入几何拟合后失败，不能假定提高预算必然恢复。
+- U1新增同三例，丢失03114、03261、08280。后两者超预算；03114准备成功且面正确，但24边变22边，一条边收到三个面标签，是实际关联退化。该例L5仍正确通过。
+- L25为17例超面数预算、2例原输入退化、1例顶点几何失败，0/20主要是准备限制，不能据此宣称更密采样无效。
+- 所有组中的02748/04610原输入分别含131/1083个零面积三角形，本轮更严格检查直接拒绝；不是细分新增退化。旧C004虽无STEP，也曾进入后处理，因此新旧阶段结果不完全相同。
+- U1/count40、M0/Area-M0、L5/Area-L5的成功集合分别一致，支持采样/剖分收益不只是最小计数放松；失败例标签仍有变化，面积对照不消除全部混杂。
+
+L5剩余13例为准备5（预算3、原输入退化2）、图错误6（面错4、关联错2）、图正确后失败2（CAD共享边修复、曲面边界各1）。L5准备约4701.8万次E/V位置请求，约49.3%重复；这提供缓存优化线索，不能直接换算墙钟收益。详细逐例及失败矩阵留在批次资产与原文归档。
+
+<a id="mesh-density-selection-policy"></a>
+#### 原预注册选型与预算
+
+开发集候选须同时满足：图与 STEP 共同通过至少净增 2/20；无原 STEP 或图诊断成功例丢失；无新几何报警；共同成功模型的最大表面采样距离增量不超过 0.0002。合格候选优先选择新增查询与成本较低者，再冻结配置，仅在 10 check 上重跑 M0 和该候选，不在确认集继续选参数。
+
+本轮未选出候选，所以没有 check 任务。更高三角形预算、处理原零面积面或改变几何均需另立版本和配对实验，不能回填本轮成绩。
+
+预算统一为每例准备 7200 秒、后处理 3600 秒、150 万三角形、进程树 RSS 8 GiB、初始并发 2。资源失败保留在固定分母。出现裂缝、拓扑／方向变化、GT 泄漏、身份失配、带外请求或静默缓存误用时停止该实现版本排查；普通单模型数值失败继续记录其余任务。
+
+必报指标包括网格边长／面积分位数与几何不变性、全部查询与重复请求、面缺失／拆分／混合、E–F/V–E 关联、几何及 STEP、配对新增／退化、准备与重建时间和峰值内存。有限采样距离不是严格 Hausdorff 或连续拓扑认证。
+
+#### 产物与复现
+
+根目录为 `band_brep_reconstruction/outputs/mesh_density_20261028_v2/`，含 `policy.json / manifest.json / identity.json / input_migration.json`、`cache/<id>/<组>/`、`records/`、`metrics.csv / analysis.json`、`supplemental_audit.json` 和成功STEP。原文中的完整逐模型表与方法见[归档](archive/20261104_document_sources.json.gz)。历史 `run_mesh_density_experiments.py / alignment_grid.py / alignment_fields.py` 已退役，须从对应Git或快照恢复；不能用当前主库改写本批次。
+
+实施时67项回归通过，20个解析组合17份STEP、3例预算拒绝；这些数字是当时验证记录，不是本次重跑结果，也不替代20 dev的固定分母。
+
+<a id="native-mesh-l5"></a>
+### 5.8 11-01：生产原生网格四轮 L5
+
+状态：20/20已完成，10 check未运行。以下是0.4.0冻结批次，不是当前0.5.0两级加密的表现。
+
+本轮用当时的 0.4.0 后处理，直接读取生产几何网格，默认 L5 加密后重新查询连续 E/V。样本沿用[旧加密实验](ThreeFieldReconstructionExperiments.md#mesh-density)的同 20 个 dev，核验全部 30 份源 STEP 哈希与 dev/check 划分，10 个 check 不用于调参或本轮成绩。使用精确 CAD E/V 和 oracle presence，评估后处理输入与执行流程，未使用学习权重。
+
+#### 配对条件
+
+| 项目 | 旧 L5 | 新 mesh L5 |
+|---|---|---|
+| 源数据 | F30 同源 STEP，20 dev | 相同 STEP 字节与 dev 列表 |
+| 几何表面 | 256³ 条件 SDF 的 MC 面 | 生产 CAD 三角化与焊接网格 |
+| 内部 SDF | 条件体素三线性插值 | 到原始输入网格的距离与绕数符号 |
+| E/V | 精确有限 CAD 边/顶点距离 | 生产 EdgeOracle/VertexOracle |
+| 存在性 | oracle | oracle |
+| 加密 | L5：0.005、0.02/0.03、4 轮 | 同参数，调用当时主入口 |
+| 过滤 | 两阶段 0.005/0.01，分量 10，均值 0.003 | 相同 |
+| 特征 SDF 容差 | 0.004 | 固定为相同值，控制变量 |
+| 预算 | 准备 7200 s、后处理 3600 s、150 万三角形、8 GiB、并发 2 | 相同 |
+
+新 condition 复用生产的几何检查、目标提取、过滤、三角化、焊接和几何采样代码；不生成无关的完整训练点池。生产过滤拒绝的样本仍在固定分母。每例报告目标数是否变化、归一化矩阵差，以及旧中心 32 点的 E/V 差异。
+
+评分沿用旧实验的面/边/顶点最近支撑诊断、E–F/V–E/V–F 检查，以及 STEP 内核与读回。有限支撑匹配不是全域拓扑证明。仅 STEP 有效与“图及 STEP 同时正确”分别统计。
+
+#### 运行与产物
+
+- 驱动和命令：[benchmarks/README](../band_brep_reconstruction/benchmarks/README.md)。
+- 冻结批次：[native_mesh_L5_20261101_v1](../band_brep_reconstruction/outputs/native_mesh_L5_20261101_v1/)。
+- 滚动结果：[REPORT.md](../band_brep_reconstruction/outputs/native_mesh_L5_20261101_v1/REPORT.md)、`summary.json`、`metrics.csv`。
+- 源身份：`identity.json`、`manifest.json`、`policy.json`、`environment.json` 和 `source_snapshot/`。
+- 逐例：`records/<id>.json`，`runs/<id>/source_audit.json`、`condition/`、`reconstruction/`；进程日志见 `logs/`。
+
+#### 结果与解释
+
+全部 20 例完成，10 个 check 未运行。新流程 **0/20 通过准备**，全部在 `refinement` 阶段报 `refinement_target_unmet`：四轮之后仍有近场三角形最长边超过 0.005。没有样本进入面核心、拓扑、曲线或 STEP 阶段，也没有超时、内存或进程异常。
+
+| 流程 | 固定分母 | 准备通过 | 面正确 | 图正确 | 图与 STEP 共同通过 |
+|---|---:|---:|---:|---:|---:|
+| 旧 MC，M0 | 20 | 18 | 11 | 7 | 5 |
+| 旧 MC，L5 | 20 | 15 | 11 | 9 | 7 |
+| 新原生网格，L5 四轮 | 20 | 0 | 0（未执行） | 0（未执行） | 0 |
+
+相对旧 L5，没有新增成功，原有 7 个成功都在新流程准备阶段被阻断。此轮说明**旧 MC 起点上的四轮 L5 参数不能直接迁移到这一批原生 CAD 网格**；尚不能据此评价后续拓扑、几何拟合或模型预测精度。
+
+输入尺度是明确差异。`00000168` 的旧 MC 起点有 345356 个三角形，最长边约 0.01314；新原生起点只有 1014 个三角形，最长边约 1.8。新网格四轮后到 222188 个三角形，仍有 129811 个近场三角形超目标。`00003291` 则从 11246 个三角形加密到 1024756 个后，仍有 171008 个超目标。三角形总数增加并不保证近特征区域覆盖均匀。
+
+20 个原生输入的最长边范围为 0.26368–2.31098，远大于旧 MC 起点。后续应另开批次比较适合原生网格尺度的轮数与剖分策略，同时继续保持几何不变性和资源上限；本批次没有放宽参数或带着未达标网格继续恢复。
+
+本轮墙钟 **70.78 分钟**，逐例总耗时中位数 **369.81 秒**，最大观测进程树 RSS **0.822 GiB**；累计 E/V evaluation 23746646 点，梯度查询 0 点。新旧失败/完成阶段不同，这些时间不能解释为同工作量的加速比。
+
+##### 核对与复现边界
+
+- 30 份源 STEP 哈希核验通过；实际运行同 20 个 dev，保持原有划分。
+- 全 20 例目标数量一致；归一化矩阵最大差为 0；每例旧中心 32 点的**存在通道** E/V 最大差为 0。
+- `00003291` 的 V 通道 absent，旧空通道占位值 0.02 与当前生产的 `2√3` 不同；此通道不参与算法，原始差异与掩码后的核验分别保留。
+- 使用旧 `00000168` L5 的 1142004 个已保存节点回放评分，面/边/顶点映射、图正确性和关联诊断全部一致。梯度与中心差分的 32 点对照中，最大 L2 差约 E=5.18e-6、V=1.70e-6；这些只是有限探针核对。
+- 主库 57 项回归通过，日志保存于批次 `regression.log`。
+- 运行期间生产目录的 CLI/清单代码更新；本批次不变更冻结代码，实际使用的 13 个几何/距离/过滤/condition 依赖与结束时生产目录仍逐字节一致，详见 `production_drift.json`。不将本批次换成新版本后隐式续跑。
+- 结果及补充审计见批次 `REPORT.md / summary.json / analysis.json / analysis_identity.json`。原始冻结控制器输出另存 `controller_result.json`；报告修正仅区分“进程正常退出”与“准备语义通过”，不修改 worker 或逐例结果。
+
+<a id="coarse-fine-validation"></a>
+### 5.9 11-01：两级加密实施验证
+
+已实现的算法、阶段和字段契约统一维护在[两级加密说明](BandLabelTopologyRecovery.md#refinement)。本节只记录当时验证证据；此前仅限时单级细分的中止批次已清理，不作为完整基线。
+
+模块版本 0.5.0，62 项回归测试通过，包含立方体续跑到 STEP、圆柱、腔体、贯通孔，以及细阶段失败后复用已完成粗阶段。粗阶段不查场、超长边剪枝、原父面映射、中心字段身份／顺序与缓存均有验证。实验 runner 的冻结／输入身份、空与部分结果报告、两级指标分析及外部阻塞进程超时检查通过。
+
+三个真实历史 condition 网格的纯几何粗加密结果如下，均保持原始网格不变、零场查询，父面平面最大残差小于 1.5e-16：
+
+| ID | 输入面数 | 粗加密后面数 | 最长边 | 粗阶段耗时 |
+|---|---:|---:|---:|---:|
+| 00000168 | 1,014 | 718,202 | 0.0199994 | 2.17 秒 |
+| 00000602 | 35,760 | 95,466 | 0.0199399 | 0.34 秒 |
+| 00000688 | 28,742 | 269,098 | 0.0199878 | 0.86 秒 |
+
+这些耗时只覆盖粗几何与映射检查，不含真实模型／CAD 场查询及后续重建，不能当作完整流程加速比。完整配对实验的协议与状态入口见下一节；上述探针不作为其成绩。日志、查询隔离探针和源码哈希见[验证记录](../band_brep_reconstruction/outputs/coarse_fine_validation_20261101_v1/validation.json)及同目录 identity.json。
+
+<a id="coarse-fine-comparison"></a>
+### 5.10 11-02：粗目标0.02/0.03配对协议
+
+本节合并原协议，不把其“已启动”描述当作当前运行状态。最新pending、失败、完成及配对成绩以以下批次资产为准，本次不重算或覆盖它们。
+
+2026-11-02 启动。状态及成绩以[实时汇总](../band_brep_reconstruction/outputs/coarse_fine_20261102_v2/REPORT.md)、[summary.json](../band_brep_reconstruction/outputs/coarse_fine_20261102_v2/summary.json) 和 [state.json](../band_brep_reconstruction/outputs/coarse_fine_20261102_v2/state.json) 为准。本批使用原 F30 中相同的 20 dev，每例运行两组，共 40 个任务；10 check 不运行。
+
+#### 固定协议
+
+| 设置 | 基线组 | 成本候选组 |
+|---|---|---|
+| 粗目标 | 0.02 | 0.03 |
+| 细目标 | 0.005 | 0.005 |
+| E/V 近场半径 | 0.02 / 0.03 | 0.02 / 0.03 |
+| 两阶段分割阈值 | 0.005 / 0.01 | 0.005 / 0.01 |
+| 最小分量 | 10 个三角形 | 10 个三角形 |
+| 字段 | 生产精确 CAD E/V，oracle presence | 同左 |
+| 剪枝 | 仅切超长边 | 同左 |
+| 总超时 | 每例 10800 秒 | 每例 10800 秒 |
+
+其余配置完全一致，并在初始化时逐键核验。粗阶段不查场，细阶段及后续计算继续使用原始 condition 作为模型/SDF 基准，复用最终中心字段。无轮数、三角形数或 RSS 硬上限；并发为两组共用两个 CPU worker，按样本交错调度，不使用 GPU。
+
+`feature_sdf_tolerance=0.004`、查询 batch=65536、关闭查询落盘，沿用历史比较口径。总超时从 worker 启动起包含输入核验、源准备、condition、两级加密、拓扑、几何、STEP 和离线评分。旧 MC 与原生四轮数字读取历史记录，不重跑或覆盖旧结果。
+
+#### 生产版本与输入一致性
+
+按生产目录同步了 36 个受管理文件。生产 STEP 读取规则更新为选取最大的有效正体积实体；本批逐例预检确认原 20 dev 均只有一个实体，原网格指纹、归一化矩阵和 E/V 目标数量全部与历史一致。详见[preflight.json](../band_brep_reconstruction/outputs/coarse_fine_20261102_v2/preflight.json)、生产源码记录和各组的 source_audit.json。
+
+本次重建及生产预处理 84 项测试通过。对控制器的临时模拟测试覆盖 40 个任务、双 worker 总并发、两组参数隔离、汇总／最终分析和附加审计保留；模拟结果仅供测试，未进入本批数据。
+
+首次试启动在产生任何样本结果前发现汇总刷新会覆盖附加审计，已停止、清理并修正后重新冻结为当前 v2；该试启动不构成结果组。
+
+#### 运行与验收
+
+控制器为 `benchmarks/run_coarse_fine_comparison.py`，单组 worker 使用 `run_mesh_input_experiment.py`。父控制器和 workers 都从冻结的 source_snapshot 运行。各组单独保存 policy、identity、active、logs、runs、records、REPORT、metrics.csv 和 analysis.json；控制器在每个任务完成后更新顶层配对汇总，组完成后自动追加输入／耗时审计。
+
+[粗0.02明细](../band_brep_reconstruction/outputs/coarse_fine_20261102_v2/coarse_002/REPORT.md)、[粗0.03明细](../band_brep_reconstruction/outputs/coarse_fine_20261102_v2/coarse_003/REPORT.md)。每组始终使用 20 例分母，pending 单列，失败和超时保留。完整配对后比较面／图／STEP、粗细面数、总查询量、总耗时、峰值 RSS 和失败原因；运行中的已完成子集不能替代完整成绩。
+
+本批检验精确场下的后处理与粗阈值取舍，不能解释为真实 VAE/Flow 或 decoder 的精度、吞吐。实施与字段契约见[两级加密文档](BandLabelTopologyRecovery.md#refinement)。
 
 <a id="alignment-contract"></a>
-## 6. 已冻结的对齐约定与计划落实情况
+## 6. 历史 F30 对齐约定与候选配置
 
-对齐计划原文归档保留，此处以实际状态代替“全部待实施”的旧说明。
+以下记录10-19时的体素/MC对齐状态及候选，不覆盖当前网格生产规范；历史计划原文按归档路径追溯。
 
 | 约定 | 10-19状态及后续要求 |
 |---|---|
@@ -353,7 +517,7 @@ B复用已发布网格，D需原生生成，各组终止阶段也不同；不是
 | GT隔离 | 当前A–D是显式oracle E/V及presence；正式学习场不注入GT顶点/面图，不按模型真值调阈值 |
 | 选型与测试 | 已做20开发/10确认；512+选中0.004、学习E/F、最终test均未做，不把D006冒充选定D1 |
 
-当前候选固定数值：
+10-19批次候选固定数值（不是当前生产默认）：
 
 | 项目 | 值 |
 |---|---|
@@ -374,7 +538,7 @@ B复用已发布网格，D需原生生成，各组终止阶段也不同；不是
 
 本节保留 F30 后的原计划与 10-29 执行进展，不与已有通过数混算。2026-11-01 起新开发以生产 mesh 点池为基准，下面的 256³／512³、0.004 和旧筛选只适用于明确登记的历史对照，不自动成为新生产默认。新实验须重新登记输入表示、生产配置及开发／确认子集，不能静默替换旧批次输入。
 
-2026-10-28—10-29 已完成[网格加密后查询 UDF 配对实验](MeshDensificationUDFExperimentReport.md)：保持原生256条件SDF与参数化不变，20个dev模型×7组共140条结果。基线共同通过5/20，全局一轮5/20，局部目标0.005为7/20（新增3、三角形预算丢失1），0.0025主要资源超限；过滤对照未改变成功集合。无候选满足无退化门槛，按[预注册选型门槛](MeshDensificationUDFExperimentReport.md#selection-policy)未进入10例check。报告披露两例原网格零面积面被本轮新增验证拒绝的限制。这些是另一轮密度实验，不覆盖本报告已冻结的F30结果。
+2026-10-28—10-29 已完成[网格加密后查询 UDF 配对实验](ThreeFieldReconstructionExperiments.md#mesh-density)：保持原生256条件SDF与参数化不变，20个dev模型×7组共140条结果。基线共同通过5/20，全局一轮5/20，局部目标0.005为7/20（新增3、三角形预算丢失1），0.0025主要资源超限；过滤对照未改变成功集合。无候选满足无退化门槛，按[预注册选型门槛](ThreeFieldReconstructionExperiments.md#mesh-density-selection-policy)未进入10例check。报告披露两例原网格零面积面被本轮新增验证拒绝的限制。这些是另一轮密度实验，不覆盖本报告已冻结的F30结果。
 
 | 优先项 | 实验设计 | 验收与停止条件 |
 |---|---|---|
@@ -401,7 +565,7 @@ B复用已发布网格，D需原生生成，各组终止阶段也不同；不是
 |---|---|
 | [历史消融](#historical-results)：降低全局阈值、降低分量门槛或关闭第二阶段未普遍修复图 | 简单全局放宽可能在缺面和碎面之间交换失败 |
 | [F30](#f30-results)：C004 剩余 22 例，18 例最早错于面分割或关联 | SDF 相容性校准不能替代拓扑恢复 |
-| [加密报告](MeshDensificationUDFExperimentReport.md)：三个新增共同成功，计数／面积对照保留收益 | 同一表面上的查询覆盖与剖分确实可能改善结果 |
+| [加密报告](ThreeFieldReconstructionExperiments.md#mesh-density)：三个新增共同成功，计数／面积对照保留收益 | 同一表面上的查询覆盖与剖分确实可能改善结果 |
 | 同轮 U1 的 00003114 面正确但边关联退化 | 更密采样不保证关联单调改善，须保留配对退化 |
 
 **区分两种瓶颈。** 线性细分不能恢复粗条件表面已经缺失的棱或错误连通，但能够增加该表面上的查询位置，并改变离散带与核心的剖分。因此原文“只细分原折面无效、必须重新提面”的笼统结论撤回；要判断几何偏移，另做局部零面重提取对照，不能用它否认已经观测到的采样收益。
@@ -419,7 +583,7 @@ B复用已发布网格，D需原生生成，各组终止阶段也不同；不是
 <a id="artifacts"></a>
 ## 8. 证据、复现与文档整理
 
-### 8.1 最新F30产物
+### 8.1 冻结 F30 产物
 
 根目录：[`band_brep_reconstruction/outputs/alignment30_20261019_v3/`](../band_brep_reconstruction/outputs/alignment30_20261019_v3/)。
 
@@ -435,7 +599,7 @@ B复用已发布网格，D需原生生成，各组终止阶段也不同；不是
 | `preparation_migration.json` | 9份准备资产的审计迁移，无旧重建成绩复用 |
 | `regression.log`、`final_audit.json` | 61项测试，210任务结算及50份STEP哈希/读回核验 |
 
-实验驱动为 `band_brep_reconstruction/benchmarks/run_alignment_experiments.py`，网格为 `alignment_grid.py`，精确适配器为 `alignment_fields.py`。实际阶段参数 `--phase select|prepare|run|summarize`，准备组A/B/D，重建组A/B/C004/C005/C006/D0/D006。使用冻结源码与环境、新输出目录；旧目录只允许同身份续跑，不用旧S30驱动替代。
+历史实验驱动为 `band_brep_reconstruction/benchmarks/run_alignment_experiments.py`，网格为 `alignment_grid.py`，精确适配器为 `alignment_fields.py`。实际阶段参数 `--phase select|prepare|run|summarize`，准备组A/B/D，重建组A/B/C004/C005/C006/D0/D006。这些脚本已从当前入口退役；使用历史快照、冻结环境与新输出目录复现，不用当前网格驱动或旧S30驱动替代。
 
 进程状态以 `process.json` 优先，不能用超时前的 `outcome.json: running` 推断仍在执行。v1/v2故障记录保留，不合并成v3成绩。审计哈希不能替代几何认证。
 
@@ -457,3 +621,9 @@ B复用已发布网格，D需原生生成，各组终止阶段也不同；不是
 新归档 `band_brep_reconstruction/outputs/document_consolidation_20261019/sources.json.gz` 含五份合并前完整文本、相对路径和SHA-256，已验证可解压且内容哈希一致；包含当时未提交的F30结果。代码、原始数据、JSON/日志、成功STEP、源码快照和 `.codebuddy` 均未因文档整理删除。设计/使用/来源许可文档保留，只将重复实验正文改为本文入口。
 
 2026-10-31 合并：原面分割分析移入[§7.1](#segmentation-failures)；重建代码讲解并入隔离带文档；网格加密计划并入独立报告的方法与预注册附录。三份原文件退出主目录，完整原文及本次修改前的其余文档共 13 份保存在 `docs/archive/20261031_document_sources.json.gz`，对应清单记录每份原文字节数和 SHA-256。
+
+### 8.4 2026-11-04 合并与原文
+
+三份加密/对照报告合入§5.7—5.10；两级实施说明的算法与字段契约合入重建文档，验证证据保留在§5.9。逐模型大表由批次资产和完整原文提供，正文只维护分母、配对结论及关键限制。原始11份docs、两个模块README及源码来源说明共14份完整文本保存在[本次归档](archive/20261104_document_sources.json.gz)，[清单](archive/20261104_document_sources.manifest.json)记录原文字节和SHA-256。`DualBrepUDFAndTopology.md`保留原样。
+
+10-31归档在本次整理时已不在 `docs/archive/`，本次不声称恢复它；本次归档完整保存整理前现有文档和它们的历史说明。历史实验证据是否可用仍按§8.2核验。

@@ -1,229 +1,577 @@
-# 网格与 E/V 距离场的隔离带 B-rep 重建
+# 从网格与连续 E/V 距离场到 STEP：后处理逐步详解
 
-文档整理：2026-11-04，当前说明对应模块 0.5.0。已合并两级加密实施说明，验证记录集中到[实验主文档](ThreeFieldReconstructionExperiments.md#coarse-fine-validation)。当前输入改为预处理网格与连续 E/V，不再通过 SDF 提面。安装、模型接入和 CLI 见[模块 README](../band_brep_reconstruction/README.md)，历史成绩见[实验主文档](ThreeFieldReconstructionExperiments.md)，来源见 [PROVENANCE](../band_brep_reconstruction/PROVENANCE.md)。
+代码核对：2026-11-04，模块版本0.5.0。本文按 [reconstruct.py](../band_brep_reconstruction/bandbrep/reconstruct.py) 的实际调用顺序，解释每个阶段解决的问题、算法、输出和验收条件。数据目标与字段见 [Pre.md](Pre.md)，历史成绩见 [Experiment.md](Experiment.md)，安装和模型接入命令见[模块 README](../band_brep_reconstruction/README.md)。
 
-## 1. 输入与几何目标
+这里的“后处理”是整个 `band_brep_reconstruction` 流程，不仅指其中名为 `postprocess` 的单个阶段。当前入口直接使用输入网格，不通过SDF或Marching Cubes重新生成表面，也不使用原DualBrep的面网络预测邻接。
 
-外部输入为闭合、定向、已归一化的三角网格，以及两个可连续查询的 metric 距离场 `dE(x), dV(x)`。`E` 为非 seam 的有效面间边，`V` 为其必要顶点；相切、共面面间边保留，完整闭环可以没有生成顶点。CAD 实例 ID、最近点和真实邻接不进入算法。
+<a id="input"></a>
+## 0. 先理解输入、状态和执行顺序
 
-内部 `MeshFieldProvider` 按需组合 `[s_mesh,dE,dV]`：第一通道到**原始输入网格**，用 AABB 距离及绕数符号，内负外正。SDF 用于有效带、方向和特征/曲面相容性检查，无需模型预测，不用于 MC。CAD 边与三角网格有近似偏差，不能无误差预算地强制 `|s_mesh|≤dE`。
+### 0.1 两份外部输入，三个内部距离通道
 
-### 查询接口
+Python入口是：
 
-[field_provider.py](../band_brep_reconstruction/bandbrep/field_provider.py) 提供：
-
-- `CallableUDFProvider`：接收 `[N,3] -> [N,2]` metric E/V 函数，可显式提供梯度，否则中心差分。
-- `ProductionUDFProvider`：接入生产 `FieldProviderAdapter` 的 E/V、有效/饱和 mask 和 autograd；验证 condition mesh 身份，要求其 SDF 来源为 condition。
-- `TorchScriptUDFProvider`：加载已冻结条件与 latent 的两通道 decoder，直接 autograd。
-- `MeshFieldProvider`：内部三通道、网格距离和查询域管理；`RecordingProvider` 记录 metric 查询与 mask。
-
-E/V 梯度由模型连续场计算，不需要预测第三/第四个梯度头。外部梯度 channel 为 E=0、V=1，内部为 SDF=0、E=1、V=2。有效 mask 描述有限值和可查询范围，饱和 mask 描述截断平台/负值裁剪等不可作为几何零集的值；不要求独立预测这些 mask。
-
-`presence` 可以接收模型适配器的场规则结果，也可在确定性表面样本上按低 UDF 支撑数推断；不能由全部无效的查询判定不存在。absent 通道使用有限哨兵并标记 invalid，必要查询仅要求 present 通道有效。该有限支撑规则可能漏掉微小特征，需随模型评估。
-
-模型域为同坐标 `[-1,1]` 内、`|s_mesh|≤band_width` 的训练带。必要查询若无效或饱和即失败；边定位/覆盖探针的越带移动回退，顶点壳层缩小。保留真实几何误差，不把特征投影到网格后改写目标。固定网格顶点的预测数组无法替代连续函数。
-
-## 2. 阶段、代码与产物
-
-编排器为 [reconstruct.py](../band_brep_reconstruction/bandbrep/reconstruct.py)。初始化检查后顺序执行：
-
-| 阶段 | 主要模块 | 产物 |
-|---|---|---|
-| `mesh` | `surface_mesh.py` | `input_mesh.npz` |
-| `coarse_refinement` | `mesh_densification.py`，纯几何 | `coarse_mesh.npz`（含原父三角形）、`coarse_refinement_progress.json` |
-| `fine_refinement` | `field_provider.py`、`mesh_densification.py` | `working_mesh.npz`（含组合后的原父三角形）、`center_fields.npz`、`fine_refinement_progress.json` |
-| `bands` | `bands.py`、`vertex_domains.py`、复制的两阶段分割 | `bands.npz` |
-| `seeds` | `face_seeds.py` | `face_seeds.npz` |
-| `graph` | `topology.py` | `topology_labels.npz`、`incidence.json` |
-| `vertices` | `vertex_localization.py` | `vertices.json` |
-| `curves` | `edge_geometry.py`、`curve_fitting.py`、`geometry_refinement.py` | `logical_graph.json`、`curves.json`、`refined_geometry.npz` |
-| `postprocess` | `postprocess.py`、`boundary_cycles.py` | `cad_graph.json` |
-| `surfaces` | `surface_fitting.py` | `face_patches.json` |
-| `cad` | `occ_assembly.py` | `logical_to_cad.json`、`reconstruction.step` |
-
-`--stop-after` 只支持 `seeds / graph / vertices / curves / surfaces / solid`，其中 `solid` 包含最终 CAD 装配与 STEP 读回。不能直接指定 `bands` 或 `postprocess`。各阶段记录于 `run.json`，`quality.json` 保存完成或失败诊断。
-
-`logical_graph_ready` 仅表示无方向关联已输出，可以含未解决的边。只有 `solid_validated` 表示 CAD 和读回验收完成；磁盘上存在 STEP 或 CLI 某个实验任务退出 0，都不能替代这个标记。STEP 有效性也不等于恢复了全部真实实例。
-
-## 3. 固定表面与两阶段面核心
-
-### 3.1 直接网格与默认两级加密
-
-网格可从生产condition或已归一化网格文件读取，不自动换坐标。验证有限坐标、索引、闭合、方向、退化面、正体积与多壳嵌套；condition另核验版本、dtype和mesh hash。以原网格构建一次AABB/winding加速结构，模型condition及内部SDF始终绑定原始网格。
-
-随后先纯几何粗加密，再按连续E/V做近场细加密。新增位置查询场值，完成后的中心字段可直接交给分割复用；共享边与过渡剖分保持原分片线性表面，详见[第8节](#refinement)。这与历史四轮单级L5不同，不提高原网格几何精度。
-
-图节点始终对应最终三角形中心。面核心按共享边连接，默认普通带按共享顶点连接；局部顶点域按候选归属，不按整个阈值带求一个分量。
-
-### 3.2 两阶段分割与排除原因
-
-`bands.py` 使用经身份/坐标/顺序核验的最终中心三场；没有缓存输入时自行查询，并只将 dE 送入 `vendor/dualbrep_segmentation.py::hierarchical_segmentation`：
-
-1. 在 `dE≥face_threshold1` 的共享边图求连通分量；保留大小 `≥face_filter_size` 且平均距离 `>face_avg_udf_threshold` 的分量。
-2. 对合格父分量，在 `dE≥face_threshold2` 上再次求分量。仅当至少两个子分量通过大小过滤时替换父分量；否则完整回退父分量。
-3. 最终面标签连续编号。`seeds` 负责验收并落盘，不重复分割。
-
-默认值依次为 `0.005 / 0.01 / 10 / 0.003`，与原分割函数签名默认值不同。复制源码增加了原因码和报告，标签决策有与原函数的随机图对照测试；这不证明新 dE 与原 GVD-UDF 有相同分割精度。
-
-| 原因码 | 含义 | 几何支撑 |
-|---:|---|---|
-| 0 | 最终面核心 | 面内部采样来源 |
-| 1 | 第一阶段低距离 | 边／顶点距离支撑 |
-| 2 | 成功拆分父域中的第二阶段低距离 | 边／顶点距离支撑 |
-| 3 | 第一阶段大小过滤 | 不作为边／顶点支撑 |
-| 4 | 第一阶段均值过滤 | 不作为边／顶点支撑 |
-| 5 | 第二阶段子分量大小过滤 | 不作为边／顶点支撑 |
-
-当前分割不回填、不自动合面、不按 GT 面数重试。没有面核心时明确失败。
-
-### 3.3 核心与传播掩码
-
-面核心为 `labels≥0`，边带记为 `B_E`：
-
-- `band_propagation='distance_only'`：`B_E = reason∈{1,2}`；原因 3/4/5 为不传播的排除区，此时核心不等于边带补集。
-- `band_propagation='noncore'`：边存在时 `B_E = ~core`，原因 3/4/5 参与标签传播，但仍不作为边／顶点几何支撑。默认使用这一设置。
-- 边不存在时边带为空；顶点不存在时顶点域为空。空集合由显式存在性区分，不能用全零距离表示。
-
-基础顶点带 `B_V = B_E & (dV<tau_vertex)`；普通带为 `B_E & ~B_V`。局部模式按下一节替换 `B_V`，始终保持 `B_V⊆B_E`。
-
-`tau_edge` 不定义分割边带。它仍用于边定位半径、覆盖探针及曲面可信内部点筛选，不能将它与 `face_threshold1/2` 混用。
-
-## 4. 多标签关联与局部顶点域
-
-### 4.1 完整收集与禁止回传
-
-`topology.py::collect_labels()` 按组件汇总标签，与顶点域吸收的集合传播等价：
-
-1. 每个普通带连通分量获得独立 `edge_id`，收集直接接触的全部面核心标签。两个独立圆环即使邻面相同，仍为两条边。
-2. 每个顶点域收集直接接触的面核心，以及实际接触的 `edge_id`；再并入这些边的全部面标签。
-3. 域内每个节点通过组件引用获得完整集合；顶点域不向普通边带回传，所以不同边不会经顶点交换标签。
-
-实现不需要维护传播队列，也不会因为标签晚到而丢弃新标签。`BandTopology.node_labels(node)` 按实例引用返回集合，不复制稠密 face×node 矩阵。`topology_labels.npz` 和 `incidence.json` 共同保存成员、标签、跨域接触和无方向 E–F、V–E、V–F 关系。
-
-普通边带收到恰好两个面标签时标为 `supported`，其余保留完整集合并标为 `unresolved`。关联阶段不要求两个端点、使用次数、方向或闭合面环；这些约束在几何阶段检查。边 ID 不能用面标签对或端点对代替。
-
-### 4.2 默认局部顶点域
-
-`vertex_domains.py` 在原因 1/2 且 `dV<tau_vertex` 的边带支撑上读取梯度，用 `x−dV·g/||g||` 投票。投票以 `max(2*localization_tolerance, 4*field_error)` 半径聚类，至少 `vertex_min_votes` 票的簇以中位数作为候选。
-
-对候选 i，设最近其他候选间距为 gap，附近支撑点 dE 的 95% 分位数为 w，半径为：
-
-$$
-r_i=\min(\tau_V,\max(\text{vertex\_radius\_fraction}\cdot gap_i,
-\text{vertex\_cut\_factor}\cdot w_i)).
-$$
-
-边带节点归属最近候选，距离小于该候选半径时进入顶点域。不同候选即使半径区域相接，也保留不同域 ID。该规则没有顶点夹角控制，不保证任意相邻结构都能分开。
-
-### 4.3 短边推断
-
-`infer_short_edges=True` 处理两个局部顶点域直接接触而无普通带的情形。已有边连接的顶点对跳过；候选必须有两邻面，并在两投票中心连线上 33 点满足 `dE≤2*localization_tolerance`、`|sdf|≤feature_sdf_limit`。
-
-共享面多于两个时，代码比较各面核心到线段中部的最近距离；只有第三近距离至少为第二近的 1.5 倍，才保留最近两面，否则拒绝。通过者补建 `inferred_short` 实例，拒绝信息保存在报告中。它是有限采样的直段候选，不是通用短曲边追踪；之后仍需曲线验证。
-
-## 5. 顶点与共享曲线
-
-### 5.1 v-UDF 定位
-
-`vertex_localization.py` 只使用顶点域原因 1/2 的支撑。梯度投票中位数提供初值，再在附近三维壳层追加距离查询，用 `distance_center()` 拟合：
-
-$$
-\min_v\sum_i\rho(\|x_i-v\|-d_V(x_i)).
-$$
-
-当前调用使用非加权 `soft_l1`；SDF 不进入这个优化目标，而是在中心拟合后与 dE/dV 一起验收。最多八次尝试缩小查询半径。距离残差超过 `localization_tolerance` 报 `vertex_mixed_support`；中心三场检查失败报 `vertex_geometry_invalid`。不能把域内全部混合顶点观测强行拟合成一个有效中心。
-
-### 5.2 e-UDF 定位与实例内排序
-
-`edge_geometry.py` 要求每条边恰好两个邻面、至多两个不同顶点域。正常边至少三个距离支撑点，沿 e-UDF 梯度做最多 32 次阻尼定位，位移受 `max(3*tau_edge, 4*surface_tolerance)` 限制；至少三个且不少于 80% 的点须通过 e-UDF/SDF 检查。
-
-优先尝试直线与圆周排序，一般支持用局部 kNN 图的最小生成树主路径排序，再检查覆盖，分支或断裂会失败。这里的 kNN 用于单条已实例化曲线的几何排序，不用于表面拓扑传播。两个端点的推断短边可从端点直段初始化。
-
-一个不同顶点在几何阶段变为两次端点使用；没有生成顶点的支持需要观测闭合，不能自动补齐大缺口。顶点域中的全部低 dE 点也不能同时当作每条入射边的支撑。
-
-### 5.3 固定端点与拟合验收
-
-`curve_fitting.py` 依次尝试直线、启用 `arcs` 后精确通过固定端点的圆弧、适用的闭合圆，最后回退分段三次 Bézier。分段拟合固定拼接点，并施加按参数长度缩放的内部 C1 约束；拼接点不是新增 B-rep 顶点。
-
-单段固定端点约束为：
-
-$$
-C(t)=(1-t)^3v_a+3(1-t)^2tP_1+3(1-t)t^2P_2+t^3v_b.
-$$
-
-拟合后检查采样曲线的 e-UDF、SDF、支持覆盖及共享端点（位移小于 `1e-8`），并执行独立结构覆盖探针检查。只最小化全局 e-UDF 可能吸附到其他边，因此支持和端点约束必须同时保留。曲线一旦冻结，邻面引用同一条三维曲线。
-
-## 6. 面环、曲面与 CAD
-
-`postprocess.py::orient_boundaries()` 在曲线后处理顺序、方向、外环／孔环。闭合、自环及端点使用已在 `curves` 阶段开始确定；周期 seam/pcurve 在曲面可用后由装配阶段处理。
-
-`surface_fitting.py` 按面核心三角形面积采样内部点。存在边时优先保留 `dE>tau_edge/2` 的可信内部样本（至少 20 个才启用该筛选），共享曲线提供边界；当前没有把所有多标签带点扩充为两侧面的内部样本。
-
-基础候选包括平面、球面及适用的圆柱；`surface_candidates='revolution'` 在基础候选失败后增加圆柱／圆锥／圆环候选。没有合格解析候选时，用 B-spline 控制网格与交替 UV 拟合，在离散边界对应上解等式约束。没有边界的非解析面当前仍明确失败。
-
-曲面边界在每条冻结曲线的 129、257、513 点网格检查，受 `boundary_tolerance` 约束；内部点拟合及 SDF 残差受 `2*surface_tolerance` 检查。有限采样雅可比非退化不证明全域无折叠或自交。`fit_four_sided_bezier()` 提供相容四边控制网格的边界锁定工具，不代表所有裁剪面都走四边模板。
-
-`occ_assembly.py` 构造共享 OCC 顶点、边、pcurve、wire、face 及实体。周期规划将参数切口安排在边界空隙，同轴环面协调参考方向，双环圆柱／圆锥面可显式建 seam。随后检查结构、容差、共享实体和导出读回，不能靠静默合并真实边或任意放宽 CAD 容差掩盖不相容。
-
-## 7. 配置职责与误差预算
-
-以 [config.py](../band_brep_reconstruction/bandbrep/config.py) 为准。默认启用 L5、共享顶点带邻接、非核心传播、局部顶点域、短边、圆弧/回转面和周期规划。优先级为代码默认值 < JSON < 显式 CLI 参数；不再提供 preset 或分辨率。
-
-| 参数 | 当前职责 |
-|---|---|
-| `face_threshold1/2`、`face_filter_size`、`face_avg_udf_threshold` | 面核心分割 |
-| `tau_vertex`、局部顶点域参数 | 顶点候选与截断范围 |
-| `tau_edge` | 定位／探针半径和面内部可信样本筛选，不定义传播边带 |
-| `localization_tolerance`、`curve_tolerance` | 顶点定位和曲线误差 |
-| `feature_sdf_tolerance` | 顶点、边支持、曲线、覆盖探针、短边的 SDF 相容性 |
-| `surface_tolerance` | 方向探测及曲面内部拟合等；不是所有阶段共用的可放宽开关 |
-| `boundary_tolerance`、`cad_tolerance` | 固定曲线与曲面相容性、CAD 内核验收 |
-
-`feature_sdf_tolerance=None` 时 `feature_sdf_limit` 回退为 `surface_tolerance`；显式值必须有限且大于零。F30 候选 `0.004` 只由实验配置设置，当前默认没有改成 0.004。
-
-回转面／圆弧开关应与周期规划配套；已有实验中单独开启会使部分模型失败，配置校验并不自动禁止这种组合。未知键被拒绝，旧 `max_refinements / max_band_edge / stability_factors / project_face_samples` 等参数已移除。
-
-<a id="refinement"></a>
-## 8. 两级加密、字段复用与不变性
-
-当前入口依次执行 `mesh → coarse_refinement → fine_refinement → bands`，默认粗目标0.02、细目标0.005、E/V近场半径0.02/0.03。原始condition网格继续决定模型输入和mesh SDF，工作网格只增加后处理采样，不修复mesh与CAD E/V的表示偏差。
-
-### 粗阶段：纯几何长边细分
-
-`coarse_refine_surface(mesh, target_edge)` 建立共享边索引，只标记 `edge_length > coarse_edge*(1+1e-10)`。现有red/green规则对1/2/3条切边一致剖分，邻面作必要过渡；新点是共享边中点，不移动已有顶点、不平滑或投影，也不查询SDF/E/V。迭代至全局最长边达标，细密曲面不被强制一分四。
-
-### 细阶段：原近场规则与超长边剪枝
-
-`fine_refine_surface(mesh, provider, cfg)` 首先查询粗网格顶点/中心。对每个present通道，最长边L、顶点最小距离m、中心距离d满足 `m−L≤rho` 或 `d≤rho` 时纳入近场；学习场须同时遵守有效性、饱和和误差语义。
-
-```text
-selected_face = near_field AND face_longest_edge > fine_edge
-marked_edge = belongs_to_any(selected_face) AND edge_length > fine_edge
+```python
+reconstruct(mesh, udf, cfg, output_dir, resume=False)
 ```
 
-共享边全局唯一处理，未选邻面仍过渡剖分。每轮检查近场达标，已足够短的边不标记。当前没有附加更紧下界、永久远场排除、主动队列或共面重网格化；这些不能混入同批次成绩。共享边索引采用有范围检查的整数编码，本轮选择与剖分复用索引，避免重复排序。
+- `mesh`：闭合、定向、已归一化的三角网格，包含顶点、三角形和可选归一化元数据。
+- `udf`：对新坐标连续返回metric `[dE,dV]`，分别是到有效面间边、必要顶点的距离。距离与输入坐标使用同一尺度。
+- `cfg`：配置；`output_dir`：各阶段产物和诊断的保存目录。
 
-### 字段、映射与缓存
+内部 `MeshFieldProvider` 将两通道组合为 `[s_mesh,dE,dV]`。`s_mesh` 的距离、符号和梯度始终来自**原始输入网格**；粗／细网格只是后续采样载体。由此形成两份职责不同的几何：
 
-新增顶点及子面中心重新查询，不复制父标签或插值父距离。原顶点字段复用，最终中心字段携带provider指纹、坐标及顺序交给 `build_bands`；独立调用分割仍有自行查询的fallback。这是相同查询复用，不是改变近场判断。
+| 对象 | 用途 | 后续是否改变 |
+|---|---|---|
+| 原始 `input_mesh` | 模型condition、坐标身份、mesh SDF基准 | 不因加密改变 |
+| 工作 `mesh` | 查询位置、面核心、边／顶点域及邻接 | 在粗、细阶段增加三角形 |
 
-粗阶段保存原父面，细阶段合成为 `original_parent = coarse_parent[fine_parent]`。每个子面始终留在单一原三角形内部，不跨父面重三角化。检查闭合、半边方向、非零面积、壳数、欧拉特征和面积/有向体积不变性。
+目标边排除同一面参数seam，保留不同面之间的相切／共面边；完整闭环可以没有生成顶点。后处理可增加参数锚点和seam，不要求复原源CAD的编号或切口。真实实例ID、最近点和关联不跨入重建算法；oracle或VAE重建评估的输入来源由调用端显式区分。
 
-产物包括 `input_mesh.npz`、`coarse_mesh.npz`、带 `parent_triangles` 的 `working_mesh.npz`、带字段身份的 `center_fields.npz`，以及两级 `*_refinement_progress.json`。进度文件不是不可变阶段缓存；完成阶段网格和中心字段按SHA-256校验，`run.json`分别记录两级报告，细阶段失败后可复用已验收且同身份的粗阶段。旧单级缓存不能直接续用。
+<a id="stages"></a>
+<a id="2-阶段代码与产物"></a>
+### 0.2 实际阶段与输出
 
-### 配置、时间与验证职责
+```mermaid
+flowchart TD
+    A[mesh：验证原始网格] --> B[coarse_refinement：纯几何粗加密]
+    B --> C[fine_refinement：准备查询接口与近场细加密]
+    C --> D[bands：面核心、普通边带、局部顶点域]
+    D --> E[seeds：验收面核心标签]
+    E --> F[graph：实例化无方向关联]
+    F --> G[vertices：精化共享顶点坐标]
+    G --> H[curves：定位、排序和拟合共享边曲线]
+    H --> I[postprocess：确定边使用方向与有向环]
+    I --> J[surfaces：固定边界拟合支撑曲面]
+    J --> K[cad：pcurve、seam、实体装配及STEP读回]
+```
 
-`Config`和JSON校验 `0 < refinement_target_edge <= refinement_coarse_edge`，默认每例 `sample_timeout_seconds=10800`，两级共用总预算，不设轮数、三角形数量或RSS硬上限。批量runner的外部watchdog还覆盖输入准备、重建和评分，具体范围按冻结协议，不把粗阶段探针时间当完整加速比。
+| 顺序／阶段 | 本阶段建立什么 | 主要产物 |
+|---|---|---|
+| 1 `mesh` | 验收原始网格及其度量 | `input_mesh.npz` |
+| 2 `coarse_refinement` | 满足全局粗边长的工作网格 | `coarse_mesh.npz`、`coarse_refinement_progress.json` |
+| 3 `fine_refinement` | 满足近场细边长的网格及最终中心场 | `working_mesh.npz`、`center_fields.npz`、`fine_refinement_progress.json` |
+| 4 `bands` | 面核心、排除原因、E/V掩码和局部顶点域 | `bands.npz` |
+| 5 `seeds` | 可用的面核心标签 | `face_seeds.npz` |
+| 6 `graph` | 无方向面／边／顶点实例关联 | `topology_labels.npz`、`incidence.json` |
+| 7 `vertices` | 每个候选顶点的三维坐标 | `vertices.json` |
+| 8 `curves` | 共享曲线、端点使用及覆盖诊断 | `logical_graph.json`、`curves.json`、`refined_geometry.npz` |
+| 9 `postprocess` | 每个面的有向边界环 | `cad_graph.json` |
+| 10 `surfaces` | 固定共享曲线下的参数曲面 | `face_patches.json` |
+| 11 `cad` | OCC共享实体及读回通过的STEP | `curves_and_faces.brep`、`logical_to_cad.json`、`reconstruction.step` |
 
-算法测试覆盖粗阶段不查场、两级达标、短边不重复切分、过渡闭合、原父面映射、字段复用与直接查询一致、condition/SDF身份、缓存及超时。真实模型耗时、回归数量与批量结果统一见[实施验证](ThreeFieldReconstructionExperiments.md#coarse-fine-validation)和[粗目标配对](ThreeFieldReconstructionExperiments.md#coarse-fine-comparison)，本页不复制运行状态。
+关联、几何和CAD逐步建立，不能把前一层完成理解为后一层通过。`logical_graph_ready` 可以含未解决的边；只有 `solid_validated` 表示整套CAD和读回检查完成。相对真实CAD的实例是否全部恢复，仍需离线一对一评分。
+
+<a id="mesh"></a>
+## 1. `mesh`：接收并验证原始网格
+
+代码：[surface_mesh.py](../band_brep_reconstruction/bandbrep/surface_mesh.py) 的 `load_mesh()`、`validate_mesh()`，以及 [mesh_densification.py](../band_brep_reconstruction/bandbrep/mesh_densification.py) 的 `mesh_metrics()`。
+
+**目的。** 后续传播依赖表面连接，SDF符号又依赖闭合和方向，因此先排除不能支持这些操作的输入。这里验收已有几何，不自动补洞、重建或重新归一化。
+
+### 1.1 读取与坐标身份
+
+CLI先通过 `load_mesh()` 读入网格：
+
+- 生产condition目录：读取 `vertices.npy / triangles.npy / meta.json`；检查geometry版本、float64顶点、int64三角形及mesh SHA-256。资产目录可自动进入其 `condition/`。
+- 普通网格文件：用trimesh读取，`process=False`，不隐式合点或修改拓扑；调用者须提供模型使用的坐标。
+
+进入 `reconstruct()` 后，`validate_mesh()` 检查有限的 `[N,3]` 顶点、有效整数三角形索引、非空网格，以及坐标是否位于约 `[-1,1]^3`。同一模型如果被再次缩放，即使形状相似，也不再是同一个距离场输入。
+
+### 1.2 表面结构检查
+
+对全局无向边建立索引，检查：
+
+1. 每条边恰好被两个三角形使用，排除开放边和边非流形。
+2. 两次半边方向相反，避免相邻三角形朝向冲突。
+3. 每个三角形面积为正，拒绝零面积面。
+4. 总有向体积为正，计算连通分量、欧拉特征、面积和边长／面积分位数。
+
+这些统计写入mesh报告，并保存 `input_mesh.npz`。多壳嵌套方向的进一步检查在第3步创建 `MeshSDFOracle` 时进行；第1步不会仅凭总正体积就证明所有壳的嵌套正确。
+
+**常见失败。** `invalid_mesh`、`mesh_scale`、`refinement_nonmanifold`、`refinement_orientation`、`refinement_degenerate`、`mesh_orientation`。此时先检查输入和预处理，后续标签传播不能修复这些结构问题。
+
+<a id="refinement"></a>
+<a id="coarse-refinement"></a>
+## 2. `coarse_refinement`：不查询场，先把过长边切短
+
+代码：`mesh_densification.py::coarse_refine_surface()`、`marked_long_edges()`、`split_edges()`。
+
+**输入。** 已验收的原始网格；默认 `refinement_coarse_edge=0.02`。
+
+**目的。** 原生CAD三角化可以包含极长的平面边。先纯几何降低跨度，避免直接在这些长三角形上反复查询E/V。粗阶段没有场查询，因而尚不需要推断E/V是否存在。
+
+### 2.1 一轮如何细分
+
+1. 建立本轮全局共享边索引，计算每条边的长度。
+2. 标记 `length > coarse_edge*(1+1e-10)` 的边；已经足够短的边不标记。
+3. 每条标记边只创建一个中点，邻接三角形复用同一顶点。
+4. 按一个三角形有0／1／2／3条切边，分别保留或拆成1／2／3／4个子三角形；两条切边时选择较短的剩余四边形对角线。
+5. 重建共享边，迭代到全局最长边达标。
+
+相邻未主动细分的三角形也按共享切边过渡剖分，避免T接头。它不是把所有三角形统一一分四；细密曲面区域可以直接保留。
+
+### 2.2 为什么几何不变，如何追溯父面
+
+新增顶点是原边中点，子面仍位于原父三角形内部，没有平滑、投影或跨父面重三角化。函数逐轮组合父ID，得到粗三角形到原三角形的 `coarse_parent`。
+
+结束时再次检查闭合、方向和非零面积，并核对连通分量、欧拉特征、面积及有向体积不变。面积／体积比较允许 `1e-10 + abs(original)*1e-9` 的数值差异。这是线性细分的不变性检查，不表示原网格更接近真实CAD。
+
+**输出。** `coarse_mesh.npz` 含顶点、三角形和 `parent_triangles`；进度写入 `coarse_refinement_progress.json`，完成报告进入 `run.json`。失败或尚未达标的进度文件不能当成可恢复的完整阶段缓存。
+
+<a id="fine-refinement"></a>
+## 3. `fine_refinement`：建立查询接口，再按 E/V 近场细化
+
+代码：[field_provider.py](../band_brep_reconstruction/bandbrep/field_provider.py)、`mesh_densification.py::fine_refine_surface()`。
+
+这个阶段先创建绑定原网格的provider，再执行场引导细分。把查询接口的准备放在这里，才能解释为什么粗阶段不查场，而细阶段开始需要有效域、存在性和梯度契约。
+
+<a id="查询接口"></a>
+### 3.1 组合原网格 SDF 与外部 E/V
+
+`MeshFieldProvider(input_mesh, udf, cfg)` 做以下准备：
+
+- 核对外部adapter的condition指纹，要求与原始输入网格完全一致。
+- 用原网格创建生产 `MeshSDFOracle`，建立AABB最近距离树与绕数BVH。距离幅值来自最近三角形，符号按绕数判断，实体内负外正；同时进一步检查网格和多壳方向。
+- 将外部E/V查询包装为内部 `[s_mesh,dE,dV]`，指纹包含原mesh、模型、有效带、归一化及存在性策略。
+
+| 外部provider | 值与梯度的来源 |
+|---|---|
+| `CallableUDFProvider` | 用户提供metric `[N,2]` 函数；可提供梯度，否则中心差分 |
+| `TorchScriptUDFProvider` | 已冻结condition/latent的两通道decoder；坐标梯度用autograd |
+| `ProductionUDFProvider` | 包装生产 `FieldProviderAdapter` 的E/V、mask和梯度；要求 `sdf_source='condition'` |
+
+外部梯度channel为E=0、V=1；内部为SDF=0、E=1、V=2。模型参数冻结仍允许对查询坐标求导，不要求另预测梯度头。
+
+### 3.2 确定 E/V 是否存在
+
+外部 `presence()` 已给出两个 `present/absent` 时直接使用。返回 `None` 时，provider在**原网格**上确定性采样，默认：
+
+- `presence_samples=393216`；
+- 只统计有效、未饱和、有限值；
+- `d < presence_tau=0.005` 的支撑数达到 `presence_min_points=16`，判为present，否则absent；
+- 每通道有效样本不足16时失败，不能把“查询全部无效”解释为不存在。
+
+外部显式返回unknown不会自动走上述推断，需要先解决。`E absent、V present` 不符合目标定义，报 `invalid_presence`。有限表面支撑可能漏掉微小特征，报告中保留推断支撑数；它不是不存在的数学证明。
+
+### 3.3 每次查询如何验收
+
+E/V有效域为立方域内且 `abs(s_mesh) <= udf.band_width`；TorchScript默认带宽0.02，生产bundle使用自己的配置。
+
+- `valid` 描述可查询性与有限性，`saturated` 描述截断／负值等不能可靠用于定位的值。
+- absent通道用 `2*sqrt(3)` 哨兵且标invalid，不能把它当几何距离；`checked_values()`只要求SDF及present通道有效、未饱和、有限。
+- 需要有限差分时，各轴正负扰动也必须落在有效域内。
+- 定位移动用 `bounded_update()` 在越带时最多16次二分回退，仍无效则回到当前位置，不把候选吸附到原网格掩盖误差。
+
+默认 `save_queries=True`，包装器将部分实际调用记录到 `queries/`，包括坐标、metric值、valid和saturated；仅SDF查询的E/V列为NaN。梯度内部查询并非全部由该记录器拦截，不能把日志视作所有底层运算的完整追踪或新的完整训练集。
+
+### 3.4 近场细分的选择与停止
+
+默认 `refinement_target_edge=0.005`，E/V半径分别为 `refinement_rho_edge=0.02`、`refinement_rho_vertex=0.03`。每轮在顶点和三角形中心查询场。
+
+对present通道c，令一个三角形最长边为L、三顶点最小距离为m、中心距离为d，则近场判断为：
+
+$$
+\mathrm{near}_c=(m-L\le\rho_c)\ \lor\ (d\le\rho_c),\qquad
+\mathrm{near}=\mathrm{near}_E\lor\mathrm{near}_V.
+$$
+
+`m-L`让长三角形即使中心没落在低距离区，也能保守进入候选；精确距离的Lipschitz解释不能直接当作学习场误差保证。代码实际选择为：
+
+```text
+selected_face = near AND longest_edge > fine_edge*(1+1e-10)
+marked_edge = touches_selected_face AND edge_length > fine_edge*(1+1e-10)
+```
+
+只切选中面中的超长边，邻面仍作必要过渡。原顶点字段复用，新增顶点重新查询；每一轮重新查询当前全部中心。没有selected面时停止，报告 `target_reached=True` 和近场最长边。粗／细阶段都没有轮数、三角形数或RSS硬上限，受单样本总时间预算控制。
+
+### 3.5 保存最终网格与中心字段
+
+细分函数返回细网格、相对粗网格的 `fine_parent`、报告及最后一轮的 `CenterFields`。最终映射组合为：
+
+```text
+original_parent = coarse_parent[fine_parent]
+```
+
+`working_mesh.npz` 保存最终网格和这个原父面映射；`center_fields.npz` 保存最终中心坐标、三通道值及provider指纹。第4步复用前检查指纹、坐标逐项相等、顺序、形状及必要通道数值，防止网格变了却仍使用旧中心场。
+
+**常见失败。** `condition_mismatch`、`presence_unknown`、`invalid_presence`、`invalid_field_query`、`center_fields_identity`、`center_fields_alignment`，或细分不变性／超时错误。有效域不足与模型没预测出某个结构，是不同问题。
+
+<a id="bands"></a>
+## 4. `bands`：分割面核心，再建立边带与顶点域
+
+代码：入口为 [bands.py](../band_brep_reconstruction/bandbrep/bands.py) 的 `build_bands()`，调用 [dualbrep_segmentation.py](../band_brep_reconstruction/bandbrep/vendor/dualbrep_segmentation.py) 的两阶段分割，以及 [vertex_domains.py](../band_brep_reconstruction/bandbrep/vertex_domains.py) 的局部域构建。
+
+**输入。** 最终工作网格和经过核验的三角形中心场；没有 `CenterFields` 时自行查询。每个图节点是一个三角形中心，不是网格顶点。
+
+**目的。** 面内部远离真实边，dE较大，可作为面标签的来源；接近边、顶点的区域暂时留出来，用于之后收集多标签关联。此时只产生核心和候选域，不拟合真实曲线。
+
+### 4.1 第一阶段：形成父面核心
+
+1. 保留 `dE >= face_threshold1` 的三角形，默认阈值0.005。
+2. 按三角形共享边求连通分量，孤立三角形也先作为分量参与统计。
+3. 保留大小 `>= face_filter_size=10` 且平均dE `> face_avg_udf_threshold=0.003` 的分量。
+
+面核心连通始终按共享边计算，与后面边带默认的共享顶点连通不同。在默认阈值下，已保留点的dE至少0.005，均值门槛通常不再额外过滤；改变阈值后它仍可能生效。
+
+### 4.2 第二阶段：有条件拆分父核心
+
+对合格父分量，在其内部保留 `dE >= face_threshold2=0.01` 再求共享边连通分量。只有至少两个子分量满足最小大小，才用子分量替换父分量；否则保留完整父核心。最后将face ID重编号为连续整数。
+
+这个拆分判据只使用距离和连通性，没有验证分隔处一定存在真实边。窄面无核心、细颈面被误拆等仍会发生；代码不按GT面数修复、合并或回填。
+
+### 4.3 排除原因与传播／支撑的区别
+
+| `exclusion_reasons` | 含义 | 后续用途 |
+|---:|---|---|
+| 0 | 最终保留面核心 | 提供face标签及面内部采样 |
+| 1 | 第一阶段低距离 | 可作边／顶点几何支撑 |
+| 2 | 成功拆分父域中的第二阶段低距离 | 可作边／顶点几何支撑 |
+| 3 | 第一阶段大小过滤 | 可传播但不作几何支撑，取决于配置 |
+| 4 | 第一阶段均值过滤 | 同上 |
+| 5 | 成功拆分时第二阶段子分量大小过滤 | 同上 |
+
+默认 `band_propagation='noncore'` 且边存在时：
+
+```text
+core_mask = face_labels >= 0
+edge_band = ~core_mask
+support = exclusion_reasons in {1, 2}
+```
+
+上式区分“允许收集标签”和“距离上确实接近边”。原因3/4/5可以连接传播区域，但不能直接拿来拟合边或顶点。可选 `distance_only` 则仅原因1/2进入边带，其他过滤区域独立排除。边不存在时边带为空，面核心按网格连通性及相同分量过滤产生，不强制整张表面只算一个面。
+
+### 4.4 在边带中划出局部顶点域
+
+默认 `vertex_domains='local'`。从边带的距离支撑中选择 `dV < tau_vertex=0.02` 的点，以梯度产生候选投票：
+
+$$
+v_i^{vote}=x_i-d_V(x_i)\frac{g_i}{\|g_i\|}.
+$$
+
+投票按半径 `max(2*localization_tolerance, 4*field_error)` 聚类，默认0.002；至少3票的簇以中位数作候选中心。对每个候选j，设最近其他候选间距为gap、附近距离支撑的dE第95百分位为w，则：
+
+$$
+r_j=\min\bigl(\tau_V,\max(0.45\,gap_j,1.5\,w_j)\bigr).
+$$
+
+系数分别由 `vertex_radius_fraction`、`vertex_cut_factor` 配置。边带节点归属最近候选，小于其半径才进入该顶点域；无其他候选时gap为无穷。不同域即使几何相接也保留不同ID，避免整个阈值带把相邻顶点吞成一个分量。
+
+`vertex_band`是所有局部域成员，`edge_region = edge_band & ~vertex_band`是普通边带。可选threshold模式才直接用 `edge_band & (dV<tau_vertex)`。始终保持顶点域嵌套在边带内；当前局部规则没有夹角控制，也不保证所有近邻顶点都可区分。
+
+**输出。** `bands.npz` 保存点、场值、三类掩码、核心标签、原因码及可选局部域标签／中心；报告保存各类计数、分割参数和字段复用情况。
+
+<a id="seeds"></a>
+## 5. `seeds`：验收已有面核心标签
+
+代码：[face_seeds.py](../band_brep_reconstruction/bandbrep/face_seeds.py) 的 `extract_face_seeds()`。
+
+这个阶段不重新分割，也不训练或运行面网络。它读取第4步已有的 `bands.face_labels`，要求标签存在且至少一个节点具有非负face ID，再保存 `face_seeds.npz`。
+
+- 标签不存在：`missing_face_segmentation`。
+- 全部被排除：`no_face_core`，附带分割与原因计数。
+
+这里的seed是整块核心标签，不是每个面的单个种子点。继续执行时，这些核心是第6步关联与第10步面内部采样的来源；`--stop-after seeds` 在此返回 `face_seeds_ready`。
+
+<a id="graph"></a>
+## 6. `graph`：从域接触建立无方向实例关联
+
+代码：[topology.py](../band_brep_reconstruction/bandbrep/topology.py) 的 `collect_labels()`、`recover_topology()`、`infer_short_edges()`。
+
+**输入。** 最终网格、面核心标签、普通边带和顶点域。默认普通带连接按共享网格顶点构图，禁止用空间kNN连接彼此靠近但表面不相邻的区域。
+
+### 6.1 先确定普通边实例，再汇总顶点关联
+
+1. 对普通边带求连通分量，每个分量获得独立 `edge_id`。
+2. 每个edge收集直接接触的全部面核心标签，不只保留两个“获胜者”。
+3. 每个顶点域收集直接接触的面标签和实际 `edge_id`，再并入这些edge的完整面集合。
+4. 域内每个节点通过组件引用读取相同完整集合；顶点域不向普通边带反向转发标签。
+
+因此从A/B边进入某顶点的标签，不会穿过顶点跑到B/C边上。实现按组件求集合并集，不必模拟逐点消息队列，也不会丢弃晚到标签。`BandTopology.node_labels(node)`按组件返回集合，不复制稠密face×node矩阵。
+
+同一对面之间两条独立孔口圆环仍有两个edge ID；面标签对和端点对都不能当唯一边身份。
+
+### 6.2 当前能确定与暂不要求的内容
+
+恰好收到两个面标签的普通边标 `supported`，其他情况保留完整集合并标 `unresolved`。顶点域保存入射edge与面集合，得到无方向E–F、V–E、V–F关联；成员中只有原因1/2被列为 `support_nodes`。
+
+此时不要求边有两个端点、端点使用次数、方向或闭合wire。没有几何支撑、多邻面、没有入射边的顶点域等都写入诊断。关联图可以落盘供检查，再由几何阶段拒绝无法确认的结构。
+
+### 6.3 两个顶点域直接相接时推断短边
+
+默认 `infer_short_edges=True`：
+
+1. 找到不同局部顶点域之间的直接网格接触；已有edge连接的顶点对跳过。
+2. 用第4步的候选中心连接线采33点，先检查有效域，再查场。
+3. 需要恰好两个共享面标签；超过两个时，以面核心到线段中部的最近距离排序，第三近至少为第二近的1.5倍才取最近两面，否则拒绝。
+4. 要求沿线 `max(dE) <= 2*localization_tolerance` 且 `max(abs(s_mesh)) <= feature_sdf_limit`。
+
+通过者新增 `inferred_short`，更新两个域的入射edge；拒绝原因也记录。这时使用的是候选中心而非第7步最终顶点，后续仍重新拟合和验收。它是直段假设，不是通用短曲边追踪。
+
+**输出。** `topology_labels.npz` 保存节点到face/edge/vertex域的映射及跨域contacts；`incidence.json`保存实例、成员、支撑、标签集合、反向关联和未决诊断。`--stop-after graph` 返回 `logical_graph_ready`，不表示CAD有效。
+
+<a id="vertices"></a>
+<a id="51-v-udf-定位"></a>
+## 7. `vertices`：把候选顶点域精化为共享三维坐标
+
+代码：[vertex_localization.py](../band_brep_reconstruction/bandbrep/vertex_localization.py) 的 `localize_vertices()`、`distance_center()`。
+
+**目的。** 第4步中心仅用于区域划分，第6步只确定连接关系；现在为每个已实例化顶点求唯一坐标，所有入射边之后引用它。
+
+### 7.1 初始化与追加三维观测
+
+每个顶点域只取其距离支撑，读取dV及有效梯度，以归一化梯度投票的中位数初始化v。没有支撑或梯度时分别报 `vertex_support_insufficient`、`vertex_gradient_invalid`。
+
+初始查询半径为 `max(8*localization_tolerance, min(0.2*tau_vertex, 0.01))`，默认0.008。每次在半径0.5r到r的三维壳层随机取120点；全部点须在有效域内，否则缩小半径，最多8次尝试。比仅用表面上的单侧／共面点，这些三维观测更有利于确定距离中心。
+
+### 7.2 距离中心拟合
+
+距离平方差给出线性初值：
+
+$$
+2(x_i-x_0)^Tv=\|x_i\|^2-\|x_0\|^2-(d_i^2-d_0^2).
+$$
+
+秩不足时使用已有初值，然后以 `soft_l1` 鲁棒最小二乘优化：
+
+$$
+\min_v\sum_i\rho\bigl(\|x_i-v\|-d_V(x_i)\bigr).
+$$
+
+当前调用不设置额外权重，也不把SDF放进优化目标；SDF在拟合后单独验收。多个真实顶点混入同一域时，不能靠平均坐标伪造一个共享点。
+
+### 7.3 验收与输出
+
+最大距离模型残差须不超过 `localization_tolerance=0.001`，否则 `vertex_mixed_support`。最终中心还需满足dV、dE均不超过该容差，且 `abs(s_mesh) <= feature_sdf_limit`，否则 `vertex_geometry_invalid`。
+
+`vertices.json`保存ID、position、residual和support_radius。`--stop-after vertices`返回 `vertices_ready`。这些位置之后被冻结为共享端点，不由第一条拟合边决定其他边的交点。
+
+<a id="curves"></a>
+<a id="5-顶点与共享曲线"></a>
+## 8. `curves`：定位边支撑、排序并拟合共享曲线
+
+代码：[edge_geometry.py](../band_brep_reconstruction/bandbrep/edge_geometry.py)、[curve_fitting.py](../band_brep_reconstruction/bandbrep/curve_fitting.py)、[geometry_refinement.py](../band_brep_reconstruction/bandbrep/geometry_refinement.py)。
+
+调用顺序为 `build_edge_geometry()` → `fit_shared_curves()` → `validate_structure_coverage()`：先把宽边带定位到一维边、建立单条边的点列顺序，再拟合唯一共享曲线并检查覆盖。全局面环的顺序和方向留到第9步。
+   
+### 8.5 独立结构覆盖检查
+
+`validate_structure_coverage()`从工作网格中心中选 `dE<0.6*tau_edge` 的点，最多2048个，不依赖已恢复face标签选点。做最多8步受域约束的e-UDF定位，再将有效探针与所有曲线每条4097个采样比较，最远距离须不超过 `3*curve_tolerance`。
+
+这能发现“每条已拟合边都不错，但另一个边低谷根本没有实例”的情况，报 `edge_valley_unrepresented`。它仍受有限中心和探针覆盖限制，报告 `continuous_coverage_certified=False`。
+
+**输出。** `logical_graph.json`保存共享顶点、边点列和端点使用；`curves.json`保存曲线参数；`refined_geometry.npz`保存支撑。`--stop-after curves`在覆盖验收后返回 `curves_ready`。
+
+<a id="postprocess"></a>
+## 9. `postprocess`：确定每个面的边使用方向并串成环
+
+代码：[postprocess.py](../band_brep_reconstruction/bandbrep/postprocess.py) 的 `orient_boundaries()`、[boundary_cycles.py](../band_brep_reconstruction/bandbrep/boundary_cycles.py)。
+
+**目的。** 一条共享边在两侧面的使用方向应相反。前面只有无方向关联和曲线参数顺序，现在利用面核心和网格法向确定coedge方向，再按共享端点连接有向环。
+
+### 9.1 判断边的左、右面
+
+每条曲线在参数0.05到0.95内采64点，避开顶点交汇。对每个邻面，找到最近面核心中心，以网格法向n、曲线切向t及“曲线指向面内部”的向量a计算：
+
+$$
+\mathrm{score}_f=\operatorname{median}\bigl((n\times t)\cdot a\bigr).
+$$
+
+两邻面的score必须异号，否则 `boundary_orientation_ambiguous`。正号一侧记录为 `left_face`，从而建立 `CoedgeUse(face, edge, forward)`；同一条三维边在两面的方向相反。
+
+### 9.2 按共享顶点连接有向环
+
+每个面先收集其coedge。无顶点闭环可直接形成单边cycle；其他边按本面方向选择起、终顶点，从一条边的终点寻找下一条起点相同的未使用coedge，直到回到起点。
+
+- 找不到唯一下一条：`face_sector_ambiguous`。
+- 在闭合前重复使用：`wire_repeated_use`。
+- 超过允许步数仍不闭合：`wire_not_closed`。
+
+同一顶点可能连接多条边，但对某个已定向面扇区，下一次使用必须唯一；不会按空间最近边任意接线。
+
+**输出与边界。** `cad_graph.json`保存每个面的有向cycles。此函数不重新扩展完整面三角形区域，也不显式给每个cycle标“外环/孔环”；它们作为有向边界交给曲面和OCC裁剪。周期展开、pcurve及seam尚未建立，不能在这里就视为完成CAD面。
+
+<a id="surfaces"></a>
+<a id="6-面环曲面与-cad"></a>
+## 10. `surfaces`：固定共享曲线，拟合每个面的支撑曲面
+
+代码：[surface_fitting.py](../band_brep_reconstruction/bandbrep/surface_fitting.py) 的 `sample_face_regions()`、`initialize_face_surfaces()`、`fit_general_spline()`。
+
+**输入。** 原核心标签、工作网格、有向关联图及冻结的共享曲线。每个面独立求支撑曲面，但不能独立移动公共三维边。
+
+### 10.1 取面内部样本与完整边界
+
+在该face的核心三角形内，按面积随机采样 `face_samples=1200` 点，使用对应三角形法向。边存在时尝试保留 `dE>tau_edge/2` 的可信内部点；至少有20个才启用此筛选，否则保留原采样。
+
+每条关联曲线采65点组成初始边界约束。面内只取本face核心，不把整片多标签边带同时当成两个面的内部点；当前没有另做完整面域回填。
+
+### 10.2 优先选择相容的解析曲面
+
+基础候选包括平面、球面和圆柱；平面由点／边界统计得到，球与圆柱作几何最小二乘。两条同半径圆边还可提供圆柱初值。
+
+候选先检查内部点到曲面的最大偏差不超过 `2*surface_tolerance`、边界偏差不超过 `boundary_tolerance`。默认 `surface_candidates='revolution'` 时，对浅曲面避免过早选不够贴边的平面；基础候选失败后，联合轴线和母线轮廓尝试圆柱、圆锥、圆环，边界点在该拟合中权重更高。
+
+只有通过内部和边界门槛才接受解析面，不能因为点云看起来近似平面就压平冻结曲线。
+
+### 10.3 解析候选失败，回退受约束 B-spline
+
+先用PCA平面投影建立UV初值，将内部点和边界范围归一化，再求三次张量样条控制网格。默认控制数从8到16每次增加2，`uv_iterations=4`。
+
+固定UV时，设内部基矩阵为A、边界基矩阵为B、控制点为P，求：
+
+$$
+\min_P\|AP-X\|^2+\lambda\|P\|^2,
+\qquad BP=C_{boundary}.
+$$
+
+`constrained_lstsq()`先求边界可行解，再在B的零空间拟合内部，因此边界是等式约束而非大权重软惩罚。更新内部／边界UV后会重新解约束，不保留已经过期的对应。
+
+边界不相容或控制预算不足时失败，不退回无约束曲面。辅助 `fit_four_sided_bezier()`只对相容四边提供控制网格锁定，主流程不会强制所有多边、带孔面进入四边模板。无边界且无法识别解析面的情形当前报 `surface_initialization_failed`。
+
+### 10.4 独立验收支撑曲面
+
+对每条冻结曲线，依次在129、257、513点参数网格上检查 `||S_f(uv(C_e(t)))-C_e(t)||`，最大值须不超过 `boundary_tolerance=0.001`。
+
+内部点投影误差和投影点的mesh SDF残差均不超过 `2*surface_tolerance=0.006`；在这些内部参数位置作有限差分，要求雅可比叉积模大于 `1e-10`。
+
+失败可能是 `boundary_constraints_conflict`、`surface_boundary_incompatible`、`surface_fit_failed`、`surface_fold`。`face_patches.json`保存面类型、参数、法向、参考内部点和误差报告；`--stop-after surfaces`返回 `surfaces_ready`。
+
+这里检验的是冻结边界和采样内部的工程相容性，没有证明连续全边界误差、参数全域无折叠或无自交。UV中的pcurve及最终裁剪实体仍在第11步建立。
+
+<a id="cad"></a>
+## 11. `cad`：周期规划、共享 OCC 实体与 STEP 读回
+
+代码：[occ_assembly.py](../band_brep_reconstruction/bandbrep/occ_assembly.py) 的 `assemble_brep()`、`make_pcurve()`、`verify_export_and_roundtrip()`。
+
+这一阶段将数值图、曲线和曲面转成内核拓扑。共享坐标还不够：两邻面必须真正引用同一个OCC Edge和Vertex对象，才能保持共享关系。
+
+### 11.1 先规划周期参数，保持三维几何不变
+
+圆柱、球、圆锥、圆环有周期参数。同一三维点可以有多个等价UV，切口不合理时，一条连续三维边会在UV中跨越周期并诱发错误seam修复。
+
+默认 `periodic_frame_planning=True`：
+
+- 协调关联周期圆环面的参考方向和闭环参数起点，让辅助锚点落在相容的子午方向。
+- 边界留有足够角空隙时，把参数切口放入空隙，避免不必要的seam。
+- 对完整绕转的有向环按整周期平移UV，保持相邻pcurve连续；适用的双绕转圆柱／圆锥环可规划显式带状seam。
+
+代码深拷贝曲线／曲面记录后调整参数框架和闭环起点，不改变真实共享边的几何集合。因此 `curves.json` 的闭环参数起点可能与装配内部使用的等价起点不同。
+
+### 11.2 只构造一次真实共享顶点和边
+
+将每个 `VertexNode`建成一个OCC Vertex，每条 `CurveRecord`转成OCC三维曲线及参数范围，再创建唯一Edge：
+
+- 两端点或self-loop使用已经创建的共享Vertex。
+- 无生成顶点闭环补一个 `closed_loop_anchor`，同一锚点作首尾，不计入逻辑vertex。
+- 直线用一次B-spline保留主参数区间；圆转解析圆；分段Bézier转B-spline。
+
+后续面只引用这些Edge的正／反向使用，不再由每个面重建一条近似边。构造失败报 `cad_edge_failed`。
+
+### 11.3 为每个边—面使用建立 pcurve
+
+三维曲线 `C_e` 只存几何，pcurve `gamma_fe`描述它在某个支撑曲面UV中的轨迹；两侧面需要各自的pcurve，但共用同一条三维Edge：
+
+$$
+S_f(\gamma_{fe}(t))\approx C_e(t).
+$$
+
+适用的平面圆可用解析二维圆。其他情况从65点开始，按129、257、513、1025加密，将已展开的UV插值为分段一次B-spline，独立检查各段中点的三维回代误差。达到半个boundary容差时可提前停止，最终仍须不超过完整容差，否则 `pcurve_fit_failed`。
+
+pcurve附着到共享Edge的具体Face，并设置与OCC三维曲线一致的参数范围；不能只把三维曲线投到UV就忽略参数对应。
+
+### 11.4 组装 wire、裁剪面与允许的辅助结构
+
+通常按第9步cycles添加正／反向Edge组成wire，再加入支撑曲面。必要时同步调整face与wire方向，使参数法向和工作网格的物理法向一致。
+
+周期及无边界情况使用专门分支：
+
+- 无逻辑边的闭合支撑面仅允许球或环面，由OCC建立自然参数边界。
+- 两条闭合圆限定的适用周期面，显式生成连接两个环锚点的seam；圆柱／圆锥为母线，球／环面为子午曲线。
+- 单圆球冠补seam、极点及参数退化边；这些是CAD辅助结构，不是距离场生成的真实面间边或顶点。
+- 已规划的双绕转圆柱／圆锥带，显式构造矩形参数环和必要孔环。
+
+未走显式分支且确需补缝的周期面，才尝试 `FixMissingSeam()`；随后按对象身份检查所有原逻辑Edge仍存在。修复替换共享边时立即报 `repair_changed_shared_edge`，不能用较大容差悄悄缝合。
+
+执行 `SameParameter` 协调三维边和pcurve；它不负责让不相容的曲面自动经过边。各face必须通过 `BRepCheck_Analyzer`，失败保存 `rejected_face_<id>.brep` 并报 `cad_face_invalid`。
+
+### 11.5 从面邻接构壳和单实体
+
+按逻辑edge的面邻接求面连通分量，每个分量构造shell，再装进solid。要求恰好一个正体积外壳，允许向内的空腔壳；否则 `unsupported_multi_solid`。用 `OrientClosedSolid`协调实体方向，不运行不受约束的全局ShapeFix替换共享结构。
+
+装配后再次核验每条真实逻辑Edge：必须恰好在两个不同Face中使用，且方向相反。检查最大OCC容差不超过 `1.01*cad_tolerance`，并要求实体内核有效。
+
+通过后写 `curves_and_faces.brep`，映射记录真实边、face、辅助顶点、后处理边、周期规划、修复和壳体积。CAD辅助边数可以多于逻辑边数，不能仅比较总边数判断拓扑是否恢复。
+
+### 11.6 先写未验收 STEP，再读回通过后改名
+
+`verify_export_and_roundtrip()`顺序执行：
+
+1. 要求正体积，并以 `surface_tolerance` 对最终solid做CAD三角化检查。
+2. 导出 `reconstruction.unverified.step`，读取、TransferRoots，要求读回shape有效。
+3. 比较体积，预算为 `max(1e-7, abs(volume)*1e-5, area*boundary_tolerance)`。
+4. 要求读回face数等于逻辑face数。
+5. 每条逻辑曲线采33点，对读回所有Edge求最近CAD距离，最大值不超过 `cad_tolerance=0.002`。STEP可能重编号，因此不按原OCC ID匹配。
+6. 全部通过才将未验收文件改名为 `reconstruction.step`。
+
+随后保存 `logical_to_cad.json`，标记CAD阶段产物哈希并完成 `solid_validated`。读回几何检查不证明Edge一对一匹配或全域连续误差；正式完成状态仍以 `run.json / quality.json`为准，避免将中断留下的部分文件当作成功。
 
 <a id="implementation"></a>
-## 9. 缓存、验证与实现边界
+<a id="cache"></a>
+## 12. 阶段之间如何停止、恢复和定位失败
 
-`cache.py` 的键包括原网格数组/归一化、E/V 模型指纹、有效带/presence、配置（排除 `stop_after`）、`bandbrep` 包内源码及生产 mesh oracle 实现哈希。`--resume` 核验键与已记录产物哈希，从 JSON/NPZ 恢复阶段对象。输入、几何或源码身份变化时使用新输出；历史被清理的缓存不能跳过校验续跑。文档修改本身不改变主库代码哈希。
+### 12.1 缓存验收先于重建阶段
 
-测试覆盖集合传播不回传、晚到标签、同面对多边、两阶段分割一致性、固定端点／边界、缓存、网格起步的解析 STEP，以及连续查询有效域与网格加密。具体运行命令见[模块 README](../band_brep_reconstruction/README.md#测试与验证)；历史版本测试数和解析通过率不替代真实模型评估。
+`reconstruct()`先验证配置，计算缓存键，再读取旧 `run.json`。键包含原网格及归一化、外部UDF指纹／带宽／声明存在性、配置（排除 `stop_after`）、`bandbrep`源码哈希、生产geometry版本以及mesh oracle／表面采样实现哈希。
 
-尚未解决的范围包括窄面核心找回、错误核心修复、相接顶点的多面歧义、通用短曲边追踪、无边界非解析面、复杂自由曲面及逐实例局部重试。加权距离中心、完整面域扩展、联合顶点／曲面优化和连续边界认证属于扩展设计，不能从公式或辅助函数推断为默认流程已实现。失效机制与候选改进见[面分割分析](ThreeFieldReconstructionExperiments.md#segmentation-failures)。
+有旧输出却未加resume：`output_exists`；输入／配置／实现变化：`cache_mismatch`；已记录产物缺失或哈希不符：`cache_corrupt`。只有通过身份与完整性检查的阶段才进入accepted集合，从JSON/NPZ恢复对象。已完成solid同样先验哈希再直接返回。
 
-完整输出保留 `strict_topology_guarantee=False`、`continuous_boundary_guarantee=False` 等边界：有限查询、局部雅可比及 OCC 有效性检查不构成连续全域拓扑、自交或误差的数学证明。本次合并前算法说明与两级实施说明全文保存在[本次文档归档](archive/20261104_document_sources.json.gz)。
+原始mesh仍会重新验收；粗阶段完成而细阶段失败时，可以复用粗阶段。恢复细阶段会重新建立绑定原mesh的provider，并验证中心场身份与坐标。进度文件、查询chunks和未验收STEP不充当完成阶段标记。
+
+### 12.2 可停止的位置
+
+| `--stop-after` | 完成至 | 状态 |
+|---|---|---|
+| `seeds` | 核心标签验收 | `face_seeds_ready` |
+| `graph` | 无方向实例关联 | `logical_graph_ready` |
+| `vertices` | 顶点定位 | `vertices_ready` |
+| `curves` | 曲线及独立覆盖验收 | `curves_ready` |
+| `surfaces` | 有向环及曲面验收 | `surfaces_ready` |
+| `solid` | CAD及STEP读回 | `solid_validated` |
+
+不能直接指定 `bands`、`postprocess` 或单个加密阶段。只改变停止位置不改变缓存键，其他配置／模型／几何变更通常需要新输出目录。
+
+### 12.3 时间与错误报告
+
+默认 `sample_timeout_seconds=10800`，`deadline.py`为一次调用建立协作式总时间预算，在阶段、细分及场查询检查点检查；嵌套预算不能延长外层期限。原生库调用可能延迟Python检查，批量runner另用独立worker进程树超时监督。CLI加载模型等调用前工作不自动算入库函数装饰器的时间，批次总超时范围以runner协议为准。
+
+初始化诊断后发生异常，`run.json`记录 `status='failed'`、`failed_stage`及带code/message/details的错误，`quality.json`也保存失败信息。配置、缓存验收等更早错误可能发生在阶段诊断初始化前，不能保证所有启动失败都有新的quality文件。
+
+排查时先找第一个阻断阶段，再看具体实例ID、残差、域和支撑数量。`edge_neighbors_unresolved`虽可能源自面核心错误，但在 `curves`阶段才要求两邻面；程序首个报错不一定是最早的拓扑错误。
+
+<a id="parameters"></a>
+## 13. 参数分别控制哪一步
+
+配置入口为 [config.py](../band_brep_reconstruction/bandbrep/config.py)，优先级为代码默认值 < JSON < 显式CLI参数。当前没有preset、MC分辨率或旧递归近带细分配置；未知键拒绝。
+
+| 参数及默认值 | 实际职责 |
+|---|---|
+| `refinement_coarse_edge=0.02` | 全网格纯几何粗目标 |
+| `refinement_target_edge=0.005` | 近场细目标，须不大于粗目标 |
+| `refinement_rho_edge=0.02`、`refinement_rho_vertex=0.03` | 近场选区，不是模型有效带或最终拟合误差 |
+| `face_threshold1/2=0.005/0.01`、`face_filter_size=10`、`face_avg_udf_threshold=0.003` | 两阶段核心提取 |
+| `tau_vertex=0.02`、局部域系数0.45/1.5、`vertex_min_votes=3` | 顶点候选和局部截断 |
+| `tau_edge=0.025` | 边定位／覆盖半径、面内部可信点筛选，不定义传播边带 |
+| `localization_tolerance=0.001`、`curve_tolerance=0.001` | 距离中心、边支撑、排序、曲线及覆盖检查 |
+| `feature_sdf_tolerance=None` | 特征SDF相容性；`feature_sdf_limit`默认回退0.003 |
+| `surface_tolerance=0.003` | 曲面内部误差和SDF预算的基值、部分几何半径及最终CAD三角化 |
+| `boundary_tolerance=0.001` | 曲线—曲面、pcurve及共享边界相容性 |
+| `cad_tolerance=0.002` | 内核容差和STEP读回曲线检查 |
+| `query_batch_size=8192`、`save_queries=True` | 场查询批量与记录 |
+
+`feature_sdf_tolerance=0.004`是部分历史实验的显式候选，不是当前代码默认；调它不等于放宽曲面内部、boundary或CAD容差。圆弧／回转面与周期规划应配套评估，配置校验不自动禁止可能退化的组合。
+
+## 14. 如何理解完整流程的能力边界
+
+这套流程先恢复实例关联，再精化共享几何，最后补齐CAD使用关系。完整STEP通过表示有限采样、容差、内核及读回条件均已满足，不证明真实实例全部恢复、连续边界全域正确或模型无自交。
+
+当前仍需单独研究窄面核心找回、同面碎裂修复、相接顶点多面歧义、通用短曲边、无边界非解析面、复杂自由曲面及逐实例局部重试。相关失败证据见 [Experiment.md](Experiment.md#segmentation-failures)；直接先提边图的研究路线见 [Pipeline.md](Pipeline.md)，不把它与本文已实现的阶段混为同一算法。

@@ -1,4 +1,4 @@
-"""Graph components and face labels retained by the two-pass segmentation."""
+"""Graph components and face labels retained by face segmentation."""
 import numpy as np
 from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import connected_components
@@ -16,7 +16,7 @@ def core_components(pairs,active):
 
 def extract_face_seeds(mesh,bands,provider,cfg):
     labels=bands.face_labels
-    require(labels is not None,'missing_face_segmentation','Build two-pass bands before extracting seeds')
-    require(np.any(labels>=0),'no_face_core','Two-pass segmentation retained no face core',
+    require(labels is not None,'missing_face_segmentation','Build segmented bands before extracting seeds')
+    require(np.any(labels>=0),'no_face_core','Face segmentation retained no face core',
             segmentation=bands.report.get('segmentation'), exclusions=bands.report.get('exclusion_counts'))
     return labels,bands.report['segmentation']

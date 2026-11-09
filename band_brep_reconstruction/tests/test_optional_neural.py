@@ -6,17 +6,20 @@ import numpy as np
 
 @unittest.skipUnless(importlib.util.find_spec('torch'),'optional torch missing')
 class NeuralTests(unittest.TestCase):
-    def test_two_channel_metric_script_and_autograd(self):
+    def test_two_channel_metric_script_samples_without_autograd(self):
         import torch
         from bandbrep.udf_model import TorchScriptUDFProvider
         class Decoder(torch.nn.Module):
-            def forward(self,x):return torch.stack((2*x[:,0].abs(),3*x[:,1].abs()),dim=1)
+            def forward(self,x):return torch.stack((2*x[:,0].abs(),3*x[:,1].abs()),dim=1).detach()
         with tempfile.TemporaryDirectory() as tmp:
             path=Path(tmp)/'udf.pt';torch.jit.script(Decoder()).save(str(path))
             p=TorchScriptUDFProvider(path,presence=('present','present'))
             q=np.array([[.1,.2,.3]])
             np.testing.assert_allclose(p.evaluate(q).values,[[.2,.6]],atol=1e-7)
-            g,valid=p.gradient(q,1);self.assertTrue(valid[0]);np.testing.assert_allclose(g,[[0,3,0]])
+            # The detached decoder cannot supply autograd derivatives.
+            for channel,expected in ((0,[[2,0,0]]),(1,[[0,3,0]])):
+                g,valid=p.gradient(q,channel)
+                self.assertTrue(valid[0]);np.testing.assert_allclose(g,expected,atol=.005)
 
     def test_mesh_cli_without_sdf_model(self):
         import torch

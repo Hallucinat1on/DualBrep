@@ -21,10 +21,12 @@ def main():
     p.add_argument('--resume',action='store_true')
     p.add_argument('--config',type=Path)
     p.add_argument('--stop-after',choices=('seeds','graph','vertices','curves','surfaces','solid'))
+    p.add_argument('--face-second-pass',action=argparse.BooleanOptionalAction,default=None,
+                   help='enable second-pass face splitting; --no-face-second-pass keeps only pass 1 (default: enabled)')
     args=p.parse_args()
     if args.vae_bundle and not (args.flow_bundle or args.asset):p.error('--vae-bundle requires --flow-bundle or --asset')
     if args.udf_model and (args.flow_bundle or args.asset):p.error('--flow-bundle/--asset require --vae-bundle')
-    cfg=load_config(args.config,{'stop_after':args.stop_after})
+    cfg=load_config(args.config,{'stop_after':args.stop_after,'face_second_pass':args.face_second_pass})
     try:
         mesh=load_mesh(args.mesh)
         if args.udf_model:

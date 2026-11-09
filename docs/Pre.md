@@ -45,7 +45,7 @@ E-UDF 用 `cad_bvh` 对保守几何包围盒剪枝，候选再由 OCC 求有限 
 
 CAD SDF 只作审计，生产第一通道固定 `s_mesh`，没有旧 `--sdf-backend cad/mesh/mesh_fast` 切换。[距离实现](../veudf/src/veudf/preprocess/distance.py)
 
-当前 E/V 标签输出包含距离、最近 ID 和边歧义标记，不保存旧 `gradient_E/V`、最近点及梯度 mask 数组。后续梯度监督应在生产目录扩展并重新记录版本；模型推理时仍可对连续 decoder 的实际距离输出用 autograd 求预测梯度。网格条件 SDF 查询另有梯度和不可微有效性接口。
+当前 E/V 标签输出包含距离、最近 ID 和边歧义标记，不保存旧 `gradient_E/V`、最近点及梯度 mask 数组。后续梯度监督应在生产目录扩展并重新记录版本；当前后处理固定latent，对邻近空间位置解码UDF，再统一中心差分求E/V梯度，不使用autograd或CAD解析梯度，也不需要预存梯度标签，见[后处理查询接口](Post.md#查询接口)。网格条件 SDF 查询另有梯度和不可微有效性接口。
 
 ## 4. 普通点池、零集与独立评估
 

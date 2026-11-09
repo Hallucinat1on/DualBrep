@@ -1,7 +1,7 @@
 """Copied from repository clustering.py::hierarchical_segmentation.
 
-Local standalone copy; only rejection provenance/report outputs were added.
-Label decisions match the original two-pass function.
+Local standalone copy with rejection provenance/report outputs and an optional
+first-pass-only mode. Default labels match the original two-pass function.
 """
 from collections import defaultdict
 import numpy as np
@@ -9,7 +9,7 @@ from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import connected_components
 
 def hierarchical_segmentation(mesh, face_udf, threshold1=0.003, threshold2=0.01,
-                              filter_size=5, avg_udf_threshold=0.003):
+                              filter_size=5, avg_udf_threshold=0.003, *, second_pass=True):
     """
     Two-pass hierarchical segmentation mirroring C++ segment_mode3.
 
@@ -27,16 +27,23 @@ def hierarchical_segmentation(mesh, face_udf, threshold1=0.003, threshold2=0.01,
     - threshold2: Float. Second-pass split threshold.
     - filter_size: Int. Minimum cluster size.
     - avg_udf_threshold: Float. Minimum average UDF for a cluster to survive.
+    - second_pass: Bool. If False, return filtered pass-1 clusters without splitting.
 
     Returns:
     - n_clusters: int, number of clusters found.
     - labels: np.ndarray of shape (n_faces,), cluster id per face (-1 if masked).
+    - reasons: np.ndarray of shape (n_faces,), rejection provenance (0 for core).
+    - report: dict, pass-1 counts, split parents and second-pass enablement.
     """
+    if type(second_pass) is not bool:
+        raise ValueError('second_pass must be a boolean')
     udf = np.abs(face_udf[:, 0]) if face_udf.ndim == 2 else np.abs(face_udf)
     n_faces = len(udf)
 
     reasons = np.ones(n_faces, dtype=np.int8)  # 0 core, 1 first threshold, 2 split threshold, 3 size, 4 mean, 5 sub-size
     split_parents = []
+    report = dict(split_parents=split_parents, pass1_components=0, pass1_valid=0,
+                  second_pass_enabled=second_pass)
     # --- Pass 1: threshold masking + connected components ---
     active = udf >= threshold1
     labels = np.full(n_faces, -1, dtype=np.int32)
@@ -44,7 +51,7 @@ def hierarchical_segmentation(mesh, face_udf, threshold1=0.003, threshold2=0.01,
     active_indices = np.where(active)[0]
     n_active = len(active_indices)
     if n_active == 0:
-        return 0, labels, reasons, dict(split_parents=[], pass1_components=0, pass1_valid=0)
+        return 0, labels, reasons, report
 
     adj = mesh.face_adjacency  # (E, 2)
     both_active = active[adj[:, 0]] & active[adj[:, 1]]
@@ -79,8 +86,12 @@ def hierarchical_segmentation(mesh, face_udf, threshold1=0.003, threshold2=0.01,
     mean_rejected = (cluster_sizes[comp_labels] >= filter_size) & (cluster_avg_udf[comp_labels] <= avg_udf_threshold)
     reasons[active_indices[mean_rejected]] = 4
     labels[~valid_mask] = -1
+    report.update(pass1_components=int(len(cluster_sizes)), pass1_valid=int(len(valid_clusters)))
+    if not second_pass:
+        # Removed clusters can leave gaps in pass-1 ids; downstream expects 0..N-1.
+        labels[valid_mask] = np.searchsorted(valid_clusters, labels[valid_mask])
+        return len(valid_clusters), labels, reasons, report
     # Pass-1 labels retain original comp_labels ids (sparse); relabel once after pass 2.
-    valid_set = set(valid_clusters.tolist())
 
     # --- Pass 2: split clusters with high max UDF using threshold2 ---
     # Compute per-cluster max UDF using original (sparse) cluster ids
@@ -167,4 +178,4 @@ def hierarchical_segmentation(mesh, face_udf, threshold1=0.003, threshold2=0.01,
     labels[valid_pos] = relabel_map[labels[valid_pos]]
     n_clusters = len(unique_labels)
 
-    return n_clusters, labels, reasons, dict(split_parents=split_parents, pass1_components=int(len(cluster_sizes)), pass1_valid=int(len(valid_clusters)))
+    return n_clusters, labels, reasons, report

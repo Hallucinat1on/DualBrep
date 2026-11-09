@@ -58,17 +58,76 @@ class ContractTests(unittest.TestCase):
         udf=CallableUDFProvider(lambda q:FieldEvaluation(np.ones((len(q),2)),np.ones((len(q),2),bool),np.ones((len(q),2),bool),0),fingerprint='clipped',presence=('present','present'))
         with self.assertRaises(ReconstructionError):checked_values(MeshFieldProvider(mesh,udf,Config()),mesh.vertices[:1])
 
-    def test_production_gradient_adapter_and_condition_identity(self):
+    def test_gradients_query_center_and_six_spatial_offsets(self):
+        calls=[]
+        def values(q):
+            calls.append(q.copy())
+            return np.column_stack((2+q@[1.,2.,3.],3+q@[4.,5.,6.]))
+        udf=CallableUDFProvider(values,fingerprint='sampled')
+        q=np.array([[.1,.2,.3]])
+        g,valid=udf.gradient(q,1)
+        np.testing.assert_allclose(g,[[4,5,6]],atol=1e-9)
+        self.assertTrue(valid[0]);self.assertEqual(len(calls),7)
+        np.testing.assert_array_equal(calls[0],q)
+        for axis in range(3):
+            delta=np.eye(3)[axis]*1e-5
+            np.testing.assert_array_equal(calls[1+2*axis],q+delta)
+            np.testing.assert_array_equal(calls[2+2*axis],q-delta)
+        for step in (0.,-1.,float('nan'),float('inf')):
+            with self.assertRaises(ReconstructionError):udf.gradient(q,0,step)
+
+    def test_mesh_gradient_bypasses_custom_derivatives_and_batches_samples(self):
+        mesh,source=box();calls=[]
+        def values(q):
+            calls.append(q.copy());return source.evaluate(q)
+        def forbidden(*args):raise AssertionError('external gradient was called')
+        udf=SimpleNamespace(evaluate=values,gradient=forbidden,presence=source.presence,
+                            fingerprint='values-only',band_width=.02)
+        p=MeshFieldProvider(mesh,udf,Config(query_batch_size=2))
+        q=np.array([[.551,.53,.52],[.552,.53,.52],[.553,.53,.52]])
+        g,valid=p.gradient(q,2)
+        expected=q-[.55,.55,.55];expected/=np.linalg.norm(expected,axis=1)[:,None]
+        np.testing.assert_allclose(g,expected,atol=1e-7)
+        self.assertTrue(valid.all());self.assertTrue(all(len(v)<=2 for v in calls))
+        self.assertEqual(sum(len(v) for v in calls),7*len(q))
+        calls.clear()
+        # The center is inside the band, but its positive x probe is outside.
+        g,valid=p.gradient([[.57-5e-6,.1,.1]],2)
+        self.assertFalse(valid[0]);self.assertEqual(calls,[])
+        np.testing.assert_array_equal(g,[[0,0,0]])
+
+    def test_gradient_rejects_bad_probe_values_and_zero_distance(self):
+        q=np.array([[.1,.2,.3]])
+        for failure in ('invalid','saturated','negative','nan','zero_center','flat'):
+            with self.subTest(failure=failure):
+                def values(points):
+                    v=np.column_stack((1+points[:,0],2+points[:,1]))
+                    valid=np.ones(v.shape,bool);saturated=np.zeros(v.shape,bool)
+                    probe=points[:,0]>q[0,0]
+                    if failure=='invalid':valid[probe,1]=False
+                    if failure=='saturated':saturated[probe,1]=True
+                    if failure=='negative':v[probe,1]=-.1
+                    if failure=='nan':v[probe,1]=np.nan
+                    if failure=='zero_center':v[:,1]=np.linalg.norm(points-q,axis=1)
+                    if failure=='flat':v[:,1]=1.
+                    return FieldEvaluation(v,valid,saturated,0)
+                udf=CallableUDFProvider(values,fingerprint=failure)
+                g,valid=udf.gradient(q,1)
+                self.assertFalse(valid[0]);np.testing.assert_array_equal(g,[[0,0,0]])
+                # A bad V value must not invalidate the independent E derivative.
+                self.assertTrue(udf.gradient(q,0)[1][0])
+
+    def test_production_values_only_adapter_and_condition_identity(self):
         mesh,_=box()
         from veudf.geometry.sampling import mesh_hash
-        calls=[]
         def gradient(q,channel):
-            calls.append(channel);return np.ones_like(q),np.ones(len(q),bool)
-        adapter=SimpleNamespace(evaluate=lambda q:FieldEvaluation(np.ones((len(q),3))*.01,np.ones((len(q),3),bool),np.zeros((len(q),3),bool),np.zeros((len(q),3))),
+            raise AssertionError('production gradient must not be used')
+        adapter=SimpleNamespace(evaluate=lambda q:FieldEvaluation(np.column_stack((q[:,0],2+q[:,0],2+2*q[:,1])),np.ones((len(q),3),bool),np.zeros((len(q),3),bool),np.zeros((len(q),3))),
             gradient=gradient,band_width=.02,presence=lambda:('present','present'),fingerprint='fake',
             condition=SimpleNamespace(fingerprint=mesh_hash(mesh.vertices,mesh.triangles)),sdf_source='condition')
         udf=ProductionUDFProvider(adapter);p=MeshFieldProvider(mesh,udf,Config())
-        p.gradient(mesh.vertices[:1],2);self.assertEqual(calls,[2])
+        g,valid=p.gradient(mesh.vertices[:1],2)
+        self.assertTrue(valid[0]);np.testing.assert_allclose(g,[[0,2,0]],atol=1e-9)
         adapter.condition.fingerprint='wrong'
         with self.assertRaises(ReconstructionError):MeshFieldProvider(mesh,ProductionUDFProvider(adapter),Config())
 
@@ -100,6 +159,7 @@ class ContractTests(unittest.TestCase):
         mesh,udf=box();cfg=Config()
         key,_=cache_key(mesh,udf,cfg)
         self.assertEqual(key,cache_key(mesh,udf,replace(cfg,stop_after='seeds'))[0])
+        self.assertNotEqual(key,cache_key(mesh,udf,replace(cfg,face_second_pass=False))[0])
         udf.band_width=.03;self.assertNotEqual(key,cache_key(mesh,udf,cfg)[0]);udf.band_width=.02
         mesh.vertices[0,0]+=.001;self.assertNotEqual(key,cache_key(mesh,udf,cfg)[0]);mesh.vertices[0,0]-=.001
         with tempfile.TemporaryDirectory() as tmp:

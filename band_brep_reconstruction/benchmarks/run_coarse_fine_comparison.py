@@ -16,25 +16,36 @@ from run_mesh_input_experiment import (MODULE, REPO, read, save, digest, freeze,
 GROUPS = {'coarse_002': .02, 'coarse_003': .03}
 
 
-def initialize(out, preflight):
+def initialize(out, preflight, *, fine_edge=.005, face_threshold1=.005,
+               face_second_pass=True, historical_comparison=None):
+    from run_mesh_input_experiment import configuration
+    for coarse in GROUPS.values():
+        configuration(coarse_edge=coarse,fine_edge=fine_edge,face_threshold1=face_threshold1,
+                      face_second_pass=face_second_pass).validate()
     if out.exists():raise RuntimeError('Use a new comparison directory')
     audit = read(preflight)
     if not audit['all_twenty_match'] or len(audit['cases']) != 20:
         raise RuntimeError('All 20 production input meshes must match the historical cohort')
+    for relative,expected in audit.get('code',{}).items():
+        if digest(REPO/relative)!=expected:raise RuntimeError('Preflight source changed: '+relative)
     out.mkdir(parents=True)
     shutil.copy2(preflight, out/'preflight.json')
     shutil.copy2(REPO/'veudf/SOURCE.json', out/'production_source.json')
     policy = dict(date=datetime.now(ZoneInfo('Asia/Shanghai')).date().isoformat(),
                   groups=GROUPS, dev=20, check=10, jobs=2, sample_timeout_seconds=10800.,
-                  fine_edge=.005, face_threshold1=.005, face_threshold2=.01,
+                  fine_edge=fine_edge, face_threshold1=face_threshold1, face_threshold2=.01,
+                  face_second_pass=face_second_pass,refinement_selection='edge_udf_only',
+                  udf_gradient='central_difference',udf_gradient_step=1e-5,
                   scheduling='interleave the same sample across groups; two workers total',
                   field_source='exact production CAD E/V and oracle presence; no learned model',
                   geometry_source='current production condition mesh; all 20 input fingerprints preflighted',
-                  comparison='historical MC and native-four-round results are read only; no old workflow rerun')
+                  comparison='historical results are read only; no old workflow rerun',
+                  historical_comparison=str(historical_comparison) if historical_comparison else None)
     save(out/'campaign.json', policy)
     for group, coarse in GROUPS.items():
         freeze(out/group, MODULE/'outputs/mesh_density_20261028_v2',
-               MODULE/'outputs/native_mesh_L5_20261101_v1', 10800., coarse)
+               MODULE/'outputs/native_mesh_L5_20261101_v1', 10800., coarse,
+               fine_edge=fine_edge,face_threshold1=face_threshold1,face_second_pass=face_second_pass)
     configs = [read(out/g/'policy.json')['config'] for g in GROUPS]
     normalized = [{k:v for k,v in c.items() if k != 'refinement_coarse_edge'} for c in configs]
     if normalized[0] != normalized[1]:raise RuntimeError('Groups differ beyond coarse target')
@@ -42,6 +53,18 @@ def initialize(out, preflight):
     if identities[0]['code'] != identities[1]['code']:raise RuntimeError('Group source snapshots differ')
     immutable = ['campaign.json', 'preflight.json', 'production_source.json']
     immutable += [g+'/identity.json' for g in GROUPS]
+    rows=read(out/next(iter(GROUPS))/'manifest.json')
+    expected_ids={r['id'] for r in rows if r['cohort']=='dev'}
+    if {r['id'] for r in audit['cases']} != expected_ids:
+        raise RuntimeError('Preflight IDs differ from the frozen dev cohort')
+    if historical_comparison:
+        for group in GROUPS:
+            old=historical_comparison/group
+            if read(old/'manifest.json') != rows:
+                raise RuntimeError('Historical comparison cohort differs')
+            records=[old/'records'/(sid+'.json') for sid in sorted(expected_ids)]
+            if not all(p.is_file() for p in records):raise RuntimeError('Incomplete historical comparison')
+            immutable += [str(old/'manifest.json'),str(old/'policy.json'),*[str(p) for p in records]]
     save(out/'comparison_identity.json', {'files':{n:digest(out/n) for n in immutable}})
     update_report(out)
 
@@ -74,6 +97,20 @@ def update_report(out):
             median_fine_triangles=median([r['fine_refinement']['refined']['triangles'] for r in records.values() if r.get('fine_refinement')]),
             median_evaluation_rows=median([r['queries']['evaluation_rows'] for r in records.values() if r.get('queries')]),
             failure_counts=current['failure_counts'])
+        if policy.get('historical_comparison'):
+            old=Path(policy['historical_comparison'])/group
+            historical={p.stem:read(p) for p in (old/'records').glob('*.json')}
+            paired_ids=sorted(set(records)&set(historical))
+            def good(r,key):
+                return bool(r.get('joint_success')) if key=='joint_success' else bool(r.get('score',{}).get(key))
+            results[group]['historical_comparison']=dict(
+                total=len(historical),
+                counts={key:sum(good(r,key) for r in historical.values()) for key in ('face_good','graph_good','joint_success')},
+                paired_completed=len(paired_ids),
+                changes={key:dict(
+                    gained=[sid for sid in paired_ids if good(records[sid],key) and not good(historical[sid],key)],
+                    lost=[sid for sid in paired_ids if good(historical[sid],key) and not good(records[sid],key)])
+                    for key in ('face_good','graph_good','joint_success')})
     a, b = (all_records[g] for g in groups)
     common = sorted(set(a) & set(b))
     paired = dict(completed_pairs=len(common),
@@ -89,12 +126,17 @@ def update_report(out):
     save(out/'summary.json', summary)
     lines = ['# 粗加密 0.02 / 0.03：两级后处理配对实验', '',
              f"已完成 {summary['completed']}/{summary['total']} 个样本×配置任务；{len(common)}/20 对完成。10 个 check 不运行。", '',
-             '细目标固定 0.005，E/V 选区 0.02/0.03，分割阈值 0.005/0.01；仅切超长边。',
+             f"细目标 {policy['fine_edge']:g}，{'仅E场选区，半径0.02' if policy.get('refinement_selection')=='edge_udf_only' else 'E/V选区0.02/0.03'}；仅切超长边。",
+             f"第一阶段分割阈值 {policy['face_threshold1']:g}，第二阶段{'启用' if policy.get('face_second_pass',True) else '关闭'}；分量至少10个三角形、均值大于0.003。",
              '每例总超时 3 小时，无轮数、三角形或 RSS 硬上限；两组共用两个 CPU worker，不使用 GPU。', '',
              '| 粗目标 | 已完成/20 | 加密达标 | 面正确 | 图正确 | CAD STEP | 图+STEP | 已完成者耗时中位数(秒) |',
              '|---|---:|---:|---:|---:|---:|---:|---:|']
     for group, x in results.items():
         lines.append(f"| {x['coarse_edge']} | {x['completed']} | {x['prepared']} | {x['face_good']} | {x['graph_good']} | {x['cad_step']} | {x['joint_success']} | {x['median_total_seconds']} |")
+    if policy.get('historical_comparison'):
+        lines += ['', '## 与历史同粗目标的逐例比较', '',
+                  '旧批次为细目标0.005、E/V选区、两阶段0.005/0.01及解析梯度；本批使用冻结的新配置。差异不能只归因于分割。',
+                  '', '```json',json.dumps({g:x['historical_comparison'] for g,x in results.items()},ensure_ascii=False,indent=2),'```']
     lines += ['', '## 逐例对照', '',
               '| ID | 粗0.02状态/错误 | 粗0.03状态/错误 | 粗0.02秒 | 粗0.03秒 |',
               '|---|---|---|---:|---:|']
@@ -158,10 +200,16 @@ def main():
     mode.add_argument('--initialize', action='store_true'); mode.add_argument('--run', action='store_true')
     mode.add_argument('--report', action='store_true')
     parser.add_argument('--preflight', type=Path)
+    parser.add_argument('--fine-edge',type=float,default=.005)
+    parser.add_argument('--face-threshold1',type=float,default=.005)
+    parser.add_argument('--face-second-pass',action=argparse.BooleanOptionalAction,default=True)
+    parser.add_argument('--historical-comparison',type=Path)
     args = parser.parse_args();out=args.output.resolve()
     if args.initialize:
         if args.preflight is None:parser.error('--initialize requires --preflight')
-        initialize(out,args.preflight)
+        initialize(out,args.preflight,fine_edge=args.fine_edge,face_threshold1=args.face_threshold1,
+                   face_second_pass=args.face_second_pass,
+                   historical_comparison=args.historical_comparison.resolve() if args.historical_comparison else None)
     elif args.run:run(out)
     else:print(json.dumps(update_report(out),ensure_ascii=False,indent=2))
 

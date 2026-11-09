@@ -1,6 +1,6 @@
 """Paired, frozen native-mesh/L5 benchmark against the historical F30 dev cohort.
 
-The reconstruction receives only a mesh and scalar E/V queries/gradients.
+The reconstruction receives only a mesh and scalar E/V queries.
 CAD identities and nearest-support diagnostics stay in this benchmark module.
 """
 import argparse
@@ -43,15 +43,21 @@ def save(path,value):
     tmp.replace(path)
 
 
-def configuration(timeout=10800.,coarse_edge=.02):
+def configuration(timeout=10800.,coarse_edge=.02,*,fine_edge=.005,
+                  face_threshold1=.005,face_second_pass=True):
     from bandbrep.config import Config
     # Match the last L5 experiment's feature tolerance, batching and logging.
     # All remaining settings are the mesh/L5 implementation's defaults.
-    return Config(feature_sdf_tolerance=.004,query_batch_size=65536,save_queries=False,sample_timeout_seconds=timeout,refinement_coarse_edge=coarse_edge)
+    return Config(feature_sdf_tolerance=.004,query_batch_size=65536,save_queries=False,
+                  sample_timeout_seconds=timeout,refinement_coarse_edge=coarse_edge,
+                  refinement_target_edge=fine_edge,face_threshold1=face_threshold1,
+                  face_second_pass=face_second_pass)
 
 
-def freeze(out,reference,native_reference,timeout,coarse_edge=.02):
-    cfg=configuration(timeout,coarse_edge).validate()
+def freeze(out,reference,native_reference,timeout,coarse_edge=.02,*,fine_edge=.005,
+           face_threshold1=.005,face_second_pass=True):
+    cfg=configuration(timeout,coarse_edge,fine_edge=fine_edge,
+                      face_threshold1=face_threshold1,face_second_pass=face_second_pass).validate()
     if out.exists():raise RuntimeError('Use --run / --report on an existing experiment; never refreeze it')
     rows=read(reference/'manifest.json')
     inputs={str(reference/'manifest.json'):digest(reference/'manifest.json'),
@@ -73,7 +79,9 @@ def freeze(out,reference,native_reference,timeout,coarse_edge=.02):
         check='10 historical check models remain unrun',groups=['mesh_coarse_fine'],group='mesh_coarse_fine',jobs=2,
         native_reference=str(native_reference),sample_timeout_seconds=timeout,
         config=cfg.to_dict(),field_source='production exact CAD E/V; oracle presence',
-        refinement=f'geometry-only coarse {coarse_edge:g}; E/V near-field fine 0.005; long-edge-only pruning',
+        udf_gradient='central differences of scalar UDF samples; step=1e-5; no analytic derivative callback',
+        refinement=f'geometry-only coarse {coarse_edge:g}; E-only near-field fine {fine_edge:g}; long-edge-only pruning',
+        refinement_selection='edge_udf_only',
         mesh_source='production read_normalized/check_solid_faces/collect_targets/validate_geometry/audit_shape/triangulate/weld',
         sampling='geometry-only condition, no full training pools required',
         comparison='same source hashes and dev split; compare historical M0 and L5; not a learned-field experiment',
@@ -103,13 +111,13 @@ def verify(out):
 
 
 class ExactUDF:
-    """Production CAD distances; analytic derivatives from the nearest finite entity."""
+    """Production CAD distance values; reconstruction samples its own gradients."""
     def __init__(self,targets,cfg):
         import numpy as np
         from veudf.preprocess.distance import EdgeOracle,VertexOracle
         self.np=np;self.targets=targets;self.edge=EdgeOracle(targets.edges,cfg);self.vertex=VertexOracle(targets.vertices,cfg)
         self.last=None;self.results=None
-        self.counts=dict(evaluation_rows=0,gradient_rows=0,edge_cache_rows=0,actual_edge_rows=0)
+        self.counts=dict(evaluation_rows=0,edge_cache_rows=0,actual_edge_rows=0)
     def query(self,q):
         np=self.np
         if self.last is not None and np.array_equal(q,self.last):
@@ -120,21 +128,6 @@ class ExactUDF:
     def values(self,q):
         self.counts['evaluation_rows']+=len(q);e,v=self.query(q)
         return self.np.column_stack((e['distance'],v['distance']))
-    def gradient(self,q,channel):
-        np=self.np
-        from veudf.preprocess.distance import solve
-        from OCC.Core.BRepBuilderAPI import BRepBuilderAPI_MakeVertex
-        from OCC.Core.gp import gp_Pnt
-        self.counts['gradient_rows']+=len(q)
-        r=self.query(q)[channel];d=r['distance'];ids=r['nearest_id']
-        valid=(ids>=0)&~r['tie']&(d>1e-8);g=np.zeros_like(q)
-        if channel==0:
-            for i in np.flatnonzero(valid):
-                closest=solve(self.edge.tools[int(ids[i])],BRepBuilderAPI_MakeVertex(gp_Pnt(*q[i])).Vertex())[1]
-                g[i]=(q[i]-closest)/d[i]
-        else:
-            g[valid]=(q[valid]-self.targets.vertices[ids[valid]])/d[valid,None]
-        return g,valid
     def report(self):return dict(**self.counts,cad_distance_solver_calls=self.edge.calls)
 
 
@@ -232,7 +225,7 @@ def worker_sample(out,model_id):
         mesh,udf,targets,raw,oracle,audit=prepare_source(row,folder)
         result['source_audit']=audit
         provider=CallableUDFProvider(udf.values,fingerprint='production-cad:'+row['source_sha256'],
-            gradient=udf.gradient,presence=('present' if targets.edges else 'absent','present' if len(targets.vertices) else 'absent'))
+            presence=('present' if targets.edges else 'absent','present' if len(targets.vertices) else 'absent'))
         stage='reconstruction';save(folder/'state.json',dict(stage=stage,unix=time.time(),pid=os.getpid()))
         try:reconstruction=reconstruct(mesh,provider,Config(**read(out/'policy.json')['config']),folder/'reconstruction')
         except Exception as exc:
@@ -348,7 +341,10 @@ def report(out):
     rows=[r for r in read(out/'manifest.json') if r['cohort']=='dev']
     policy=read(out/'policy.json');reference=Path(policy['reference'])
     primary=policy['group']
-    policy_note=f"先纯几何粗加密至{policy['config']['refinement_coarse_edge']:g}，再对E/V近场细化至{policy['config']['refinement_target_edge']:g}；仅切超长边，仅设每例总超时。"
+    near_field='E近场' if policy.get('refinement_selection')=='edge_udf_only' else 'E/V近场'
+    policy_note=f"先纯几何粗加密至{policy['config']['refinement_coarse_edge']:g}，再对{near_field}细化至{policy['config']['refinement_target_edge']:g}；仅切超长边，仅设每例总超时。"
+    config=policy['config']
+    policy_note+=f" 面分割第一阈值{config['face_threshold1']:g}，第二阶段{'启用' if config.get('face_second_pass',True) else '关闭'}。"
     records={p.stem:read(p) for p in sorted((out/'records').glob('*.json'))}
     summary=dict(total=len(rows),completed=len(records),pending=len(rows)-len(records),groups={},paired={})
     all_groups={primary:list(records.values())}
@@ -415,8 +411,12 @@ def main():
     p.add_argument('--native-reference',type=Path,default=MODULE/'outputs/native_mesh_L5_20261101_v1')
     p.add_argument('--coarse-edge',type=float,default=.02,help='global coarse-refinement target, frozen at initialization')
     p.add_argument('--sample-timeout',type=float,default=10800.,help='total wall-clock seconds per sample, including all preparation and scoring')
+    p.add_argument('--fine-edge',type=float,default=.005)
+    p.add_argument('--face-threshold1',type=float,default=.005)
+    p.add_argument('--face-second-pass',action=argparse.BooleanOptionalAction,default=True)
     a=p.parse_args();out=a.output.resolve()
-    if a.initialize:freeze(out,a.reference.resolve(),a.native_reference.resolve(),a.sample_timeout,a.coarse_edge)
+    if a.initialize:freeze(out,a.reference.resolve(),a.native_reference.resolve(),a.sample_timeout,a.coarse_edge,
+                          fine_edge=a.fine_edge,face_threshold1=a.face_threshold1,face_second_pass=a.face_second_pass)
     elif a.worker:worker(out,a.id)
     elif a.report:print(json.dumps(report(out),ensure_ascii=False,indent=2))
     else:

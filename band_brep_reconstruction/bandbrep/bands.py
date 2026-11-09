@@ -1,4 +1,4 @@
-"""Two-pass face cores define disjoint propagation masks on a fixed mesh."""
+"""Face cores from one or two passes define propagation masks on a fixed mesh."""
 import numpy as np
 from .schemas import BandState, require
 from .surface_mesh import evaluate_batched, face_adjacency
@@ -17,7 +17,8 @@ def build_bands(mesh, provider, cfg, center_fields=None):
     count, labels, reasons, segmentation = hierarchical_segmentation(
         SimpleNamespace(face_adjacency=face_adjacency(mesh.triangles)), udf,
         threshold1=cfg.face_threshold1, threshold2=cfg.face_threshold2,
-        filter_size=cfg.face_filter_size, avg_udf_threshold=cfg.face_avg_udf_threshold)
+        filter_size=cfg.face_filter_size, avg_udf_threshold=cfg.face_avg_udf_threshold,
+        second_pass=cfg.face_second_pass)
     # A rejected high-distance component is not evidence of an edge.
     eb = np.isin(reasons, [1, 2]) if presence[0] == 'present' else np.zeros(len(points), bool)
     core = labels >= 0
@@ -32,7 +33,8 @@ def build_bands(mesh, provider, cfg, center_fields=None):
         vertex_labels, vertex_centers, vertex_report = local_vertex_domains(points, values, eb, support, provider, cfg)
         vb = vertex_labels >= 0
     segmentation.update(count=count, sizes=np.bincount(labels[core]).tolist(),
-        method='dualbrep_two_pass_triangle_components',
+        method=('dualbrep_two_pass_triangle_components' if cfg.face_second_pass
+                else 'dualbrep_first_pass_triangle_components'),
         threshold1=cfg.face_threshold1, threshold2=cfg.face_threshold2,
         filter_size=cfg.face_filter_size, avg_udf_threshold=cfg.face_avg_udf_threshold,
         reason_codes={'core':0,'first_threshold':1,'split_threshold':2,'size_rejected':3,

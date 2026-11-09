@@ -9,7 +9,7 @@ class Config:
     refinement_coarse_edge: float = .02
     refinement_target_edge: float = .005
     refinement_rho_edge: float = .02
-    refinement_rho_vertex: float = .03
+    refinement_rho_vertex: float = .03  # Legacy configuration compatibility; selection uses E only.
     sample_timeout_seconds: float = 10800.
     presence_samples: int = 393216
     presence_tau: float = .005
@@ -18,6 +18,7 @@ class Config:
     tau_vertex: float = .02
     face_threshold1: float = .005
     face_threshold2: float = .01
+    face_second_pass: bool = True
     face_filter_size: int = 10
     face_avg_udf_threshold: float = .003
     field_error: float = .0002
@@ -63,7 +64,7 @@ class Config:
             raise ValueError('invalid vertex_domains')
         if self.surface_candidates not in ('basic', 'revolution'):
             raise ValueError('invalid surface_candidates')
-        for key in ('infer_short_edges', 'periodic_frame_planning'):
+        for key in ('infer_short_edges', 'periodic_frame_planning', 'face_second_pass'):
             if type(getattr(self, key)) is not bool:
                 raise ValueError(f'{key} must be a boolean')
         if type(self.vertex_min_votes) is not int or self.vertex_min_votes < 1:

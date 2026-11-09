@@ -12,6 +12,7 @@
   "tau_vertex": 0.02,
   "face_threshold1": 0.005,
   "face_threshold2": 0.01,
+  "face_second_pass": true,
   "face_filter_size": 10,
   "face_avg_udf_threshold": 0.003,
   "field_error": 0.0002,

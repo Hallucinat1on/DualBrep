@@ -120,7 +120,7 @@ CLI先通过 `load_mesh()` 读入网格：
 **输出。** `coarse_mesh.npz` 含顶点、三角形和 `parent_triangles`；进度写入 `coarse_refinement_progress.json`，完成报告进入 `run.json`。失败或尚未达标的进度文件不能当成可恢复的完整阶段缓存。
 
 <a id="fine-refinement"></a>
-## 3. `fine_refinement`：建立查询接口，再按 E/V 近场细化
+## 3. `fine_refinement`：建立查询接口，再按 E 近场细化
 
 代码：[field_provider.py](../band_brep_reconstruction/bandbrep/field_provider.py)、`mesh_densification.py::fine_refine_surface()`。
 
@@ -137,11 +137,11 @@ CLI先通过 `load_mesh()` 读入网格：
 
 | 外部provider | 值与梯度的来源 |
 |---|---|
-| `CallableUDFProvider` | 用户提供metric `[N,2]` 函数；可提供梯度，否则中心差分 |
-| `TorchScriptUDFProvider` | 已冻结condition/latent的两通道decoder；坐标梯度用autograd |
-| `ProductionUDFProvider` | 包装生产 `FieldProviderAdapter` 的E/V、mask和梯度；要求 `sdf_source='condition'` |
+| `CallableUDFProvider` | 用户提供metric `[N,2]` 查询函数与可选mask；梯度统一由采样值中心差分得到 |
+| `TorchScriptUDFProvider` | 已冻结condition/latent的两通道decoder；无梯度模式查询UDF，再中心差分 |
+| `ProductionUDFProvider` | 只包装生产 `FieldProviderAdapter` 的E/V和mask，不调用其梯度；要求 `sdf_source='condition'` |
 
-外部梯度channel为E=0、V=1；内部为SDF=0、E=1、V=2。模型参数冻结仍允许对查询坐标求导，不要求另预测梯度头。
+外部梯度channel为E=0、V=1；内部为SDF=0、E=1、V=2。E/V不接受独立梯度回调，不依赖autograd或最近CAD实体的解析导数。网格SDF仍使用独立的 `MeshSDFOracle`，不参与这两个UDF的差分。
 
 ### 3.2 确定 E/V 是否存在
 
@@ -160,23 +160,40 @@ E/V有效域为立方域内且 `abs(s_mesh) <= udf.band_width`；TorchScript默�
 
 - `valid` 描述可查询性与有限性，`saturated` 描述截断／负值等不能可靠用于定位的值。
 - absent通道用 `2*sqrt(3)` 哨兵且标invalid，不能把它当几何距离；`checked_values()`只要求SDF及present通道有效、未饱和、有限。
-- 需要有限差分时，各轴正负扰动也必须落在有效域内。
+- 每次计算E/V梯度时，中心及各轴正负扰动都必须落在有效域内；先检查完整采样范围，再调用decoder。
 - 定位移动用 `bounded_update()` 在越带时最多16次二分回退，仍无效则回到当前位置，不把候选吸附到原网格掩盖误差。
 
 默认 `save_queries=True`，包装器将部分实际调用记录到 `queries/`，包括坐标、metric值、valid和saturated；仅SDF查询的E/V列为NaN。梯度内部查询并非全部由该记录器拦截，不能把日志视作所有底层运算的完整追踪或新的完整训练集。
 
+**从采样UDF计算梯度。** 以顶点场为例，固定模型权重、condition和latent，在当前位置 $p$ 周围沿三个坐标轴各取两个空间点：$p\pm h e_x$、$p\pm h e_y$、$p\pm h e_z$。对这6个位置直接解码距离，再计算：
+
+$$
+\nabla d_V(p)\approx\left(
+\frac{d_V(p+h e_x)-d_V(p-h e_x)}{2h},
+\frac{d_V(p+h e_y)-d_V(p-h e_y)}{2h},
+\frac{d_V(p+h e_z)-d_V(p-h e_z)}{2h}
+\right).
+$$
+
+通俗地说，就是分别向左右、前后、上下挪一小步，比较每个方向两侧的距离变化。边场同样计算，只需把 $d_V$ 换成 $d_E$。当前默认 `h=1e-5`，单位与归一化模型坐标一致；`gradient(..., step=...)` 可显式指定正的有限步长，主流程使用默认值。过小步长会放大解码舍入误差，过大步长会混合更远位置的变化；默认值并不保证适用于所有模型精度。
+
+每个待求梯度的位置先查中心UDF，再查6个邻点，最多查询7个位置。中心用于检查距离和mask，不进入上述差分公式；中心距离不大于 `1e-8` 时不用于定位。中心或任一邻点无效、饱和、非有限，或差分梯度长度不大于 `1e-8`，均返回无效梯度。内部按 `query_batch_size` 分批，越界时不改用单侧差分或解析梯度。
+
+这些邻点是**空间采样点**，即使中心位于网格表面，也不把邻点投影回表面；它们通常偏离表面，但必须位于有效带。模型接入与当前CAD场实验共用这一计算路径，CAD实验仅提供采样位置上的距离值。它不要求预存空间UDF数组，也不从已有表面点的离散UDF拟合梯度。该方法测量的是模型在附近空间的实际预测变化，不能弥补模型在这些位置预测不准的问题；最近目标切换处也不能保证存在唯一真实梯度。历史实验仍按当时的解析梯度口径解释，见[实验记录](Experiment.md)。
+
 ### 3.4 近场细分的选择与停止
 
-默认 `refinement_target_edge=0.005`，E/V半径分别为 `refinement_rho_edge=0.02`、`refinement_rho_vertex=0.03`。每轮在顶点和三角形中心查询场。
+默认 `refinement_target_edge=0.005`、`refinement_rho_edge=0.02`。自2026-11-06起，细加密只用E场判断近场，不再用V场增加选区；必要顶点属于目标边，故顶点零集也包含在边零集中。旧 `refinement_rho_vertex` 参数仅为读取已有配置保留，不再影响细加密。
 
-对present通道c，令一个三角形最长边为L、三顶点最小距离为m、中心距离为d，则近场判断为：
+当E存在时，令一个三角形最长边为L、三顶点最小dE为m、中心dE为d，则近场判断为：
 
 $$
-\mathrm{near}_c=(m-L\le\rho_c)\ \lor\ (d\le\rho_c),\qquad
-\mathrm{near}=\mathrm{near}_E\lor\mathrm{near}_V.
+\mathrm{near}=(m-L\le\rho_E)\ \lor\ (d\le\rho_E).
 $$
 
-`m-L`让长三角形即使中心没落在低距离区，也能保守进入候选；精确距离的Lipschitz解释不能直接当作学习场误差保证。代码实际选择为：
+`m-L`让长三角形即使中心没落在低距离区，也能保守进入候选。对精确欧氏距离场，距离变化不超过空间位移，三角形内任意位置到其顶点的距离不超过L，因此三角形内的距离至少为 `m-L`。若三角形包含零集，必有 `m-L <= 0`，不会被判为非近场；这个结论对相邻三角形同样成立。学习场高估距离时可能误排除，不能把上述精确距离性质当作预测场保证。若另有可信的绝对误差上界ε，应采用更保守的 `m-L-ε`；当前代码没有这样的误差证书。
+
+代码实际选择为：
 
 ```text
 selected_face = near AND longest_edge > fine_edge*(1+1e-10)
@@ -184,6 +201,10 @@ marked_edge = touches_selected_face AND edge_length > fine_edge*(1+1e-10)
 ```
 
 只切选中面中的超长边，邻面仍作必要过渡。原顶点字段复用，新增顶点重新查询；每一轮重新查询当前全部中心。没有selected面时停止，报告 `target_reached=True` 和近场最长边。粗／细阶段都没有轮数、三角形数或RSS硬上限，受单样本总时间预算控制。
+
+注意“不入选细分”与“非近场”不同：近场中已经足够小的三角形也不入选，但仍可能经过零集。邻面过渡细分用于避免裂缝，不构成学习场零集的覆盖保证。
+
+**当前查询接口的范围。** 本次调整的是选区依据。现有provider仍在顶点和三角形中心联合查询、校验 `[s_mesh,dE,dV]`，最后一轮保留完整中心字段供后续复用，并未实现按需分通道解码。因此它尚不支持“边带外V无效、仅在边带内查询V”的完整推理契约；实现该契约还需同步调整decoder接口、presence推断、中心缓存及面分割后V查询的位置，不能仅改近场公式就声称已经支持。
 
 ### 3.5 保存最终网格与中心字段
 
@@ -200,7 +221,7 @@ original_parent = coarse_parent[fine_parent]
 <a id="bands"></a>
 ## 4. `bands`：分割面核心，再建立边带与顶点域
 
-代码：入口为 [bands.py](../band_brep_reconstruction/bandbrep/bands.py) 的 `build_bands()`，调用 [dualbrep_segmentation.py](../band_brep_reconstruction/bandbrep/vendor/dualbrep_segmentation.py) 的两阶段分割，以及 [vertex_domains.py](../band_brep_reconstruction/bandbrep/vertex_domains.py) 的局部域构建。
+代码：入口为 [bands.py](../band_brep_reconstruction/bandbrep/bands.py) 的 `build_bands()`，调用 [dualbrep_segmentation.py](../band_brep_reconstruction/bandbrep/vendor/dualbrep_segmentation.py) 的面分割，以及 [vertex_domains.py](../band_brep_reconstruction/bandbrep/vertex_domains.py) 的局部域构建。面分割默认执行两阶段，也可只执行第一阶段。
 
 **输入。** 最终工作网格和经过核验的三角形中心场；没有 `CenterFields` 时自行查询。每个图节点是一个三角形中心，不是网格顶点。
 
@@ -216,9 +237,21 @@ original_parent = coarse_parent[fine_parent]
 
 ### 4.2 第二阶段：有条件拆分父核心
 
+开关为 `face_second_pass`，默认 `true`。只做第一阶段时，任选一种方式：
+
+- Python：`Config(face_second_pass=False)`。
+- `--config` 对应的JSON：`{"face_second_pass": false}`。
+- 原CLI运行命令追加：`--no-face-second-pass`。对应的 `--face-second-pass` 可显式开启，CLI优先于JSON。
+
+关闭后，在第4.1节的大小和均值过滤之后直接返回保留的完整父核心，跳过第二阶段图构建、阈值筛选和拆分。输出face ID仍重编号为连续整数；不产生排除原因2或5，第一阶段的原因1、3、4照常保留。后续边带、局部顶点域与关联恢复使用这份面核心，不会补做第二阶段。配置变化会改变缓存键，切换时使用新输出目录。
+
+开启时按以下规则执行：
+
 对合格父分量，在其内部保留 `dE >= face_threshold2=0.01` 再求共享边连通分量。只有至少两个子分量满足最小大小，才用子分量替换父分量；否则保留完整父核心。最后将face ID重编号为连续整数。
 
-这个拆分判据只使用距离和连通性，没有验证分隔处一定存在真实边。窄面无核心、细颈面被误拆等仍会发生；代码不按GT面数修复、合并或回填。
+阶段报告 `segmentation.second_pass_enabled` 保存开关状态；`method` 为 `dualbrep_two_pass_triangle_components` 或 `dualbrep_first_pass_triangle_components`。只做第一阶段时 `split_parents` 为空。`face_threshold2` 不再参与第二阶段分割，但仍保留在配置中并接受原有合法性校验。
+
+这个拆分判据只使用距离和连通性，没有验证分隔处一定存在真实边。窄面无核心、细颈面被误拆等仍会发生；关闭第二阶段可保留原父核心，但也可能保留本应拆开的面域。代码不按GT面数修复、合并或回填。
 
 ### 4.3 排除原因与传播／支撑的区别
 
@@ -557,8 +590,9 @@ pcurve附着到共享Edge的具体Face，并设置与OCC三维曲线一致的参
 |---|---|
 | `refinement_coarse_edge=0.02` | 全网格纯几何粗目标 |
 | `refinement_target_edge=0.005` | 近场细目标，须不大于粗目标 |
-| `refinement_rho_edge=0.02`、`refinement_rho_vertex=0.03` | 近场选区，不是模型有效带或最终拟合误差 |
+| `refinement_rho_edge=0.02` | 仅按E场选近场；旧 `refinement_rho_vertex` 不再影响选区 |
 | `face_threshold1/2=0.005/0.01`、`face_filter_size=10`、`face_avg_udf_threshold=0.003` | 两阶段核心提取 |
+| `face_second_pass=true` | 默认启用第二阶段拆分；设为false时只保留第一阶段过滤后的核心 |
 | `tau_vertex=0.02`、局部域系数0.45/1.5、`vertex_min_votes=3` | 顶点候选和局部截断 |
 | `tau_edge=0.025` | 边定位／覆盖半径、面内部可信点筛选，不定义传播边带 |
 | `localization_tolerance=0.001`、`curve_tolerance=0.001` | 距离中心、边支撑、排序、曲线及覆盖检查 |

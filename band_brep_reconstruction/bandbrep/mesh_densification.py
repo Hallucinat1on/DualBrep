@@ -87,10 +87,11 @@ def local_selection(mesh, vertex_values, center_values, presence, cfg):
     p = mesh.vertices[mesh.triangles]
     length = np.linalg.norm(p-p[:, [1, 2, 0]], axis=2).max(axis=1)
     near = np.zeros(len(length), bool)
-    for channel, rho, exists in ((1, cfg.refinement_rho_edge, presence[0]), (2, cfg.refinement_rho_vertex, presence[1])):
-        if exists == 'present':
-            minimum = vertex_values[mesh.triangles, channel].min(axis=1)
-            near |= (minimum-length <= rho) | (center_values[:, channel] <= rho)
+    # Necessary vertices lie on target edges; refine from E without relying on V.
+    if presence[0] == 'present':
+        minimum = vertex_values[mesh.triangles, 1].min(axis=1)
+        near = ((minimum-length <= cfg.refinement_rho_edge)
+                | (center_values[:, 1] <= cfg.refinement_rho_edge))
     return near & (length > cfg.refinement_target_edge*(1+1e-10)), near, length
 
 
@@ -147,7 +148,7 @@ def coarse_refine_surface(mesh, target_edge, progress=None):
 
 
 def fine_refine_surface(mesh, provider, cfg, progress=None):
-    """UDF near-field selection; split only overlong edges, returning final queries."""
+    """E-only near-field selection; split overlong edges, returning final queries."""
     cfg.validate()
     started = time.monotonic()
     original = mesh_metrics(mesh)
@@ -177,7 +178,7 @@ def fine_refine_surface(mesh, provider, cfg, progress=None):
         vertex_values = np.vstack((vertex_values,
             evaluate_batched(provider, mesh.vertices[old_vertices:], cfg.query_batch_size)))
     settings = dict(target_edge=cfg.refinement_target_edge, rho_edge=cfg.refinement_rho_edge,
-                    rho_vertex=cfg.refinement_rho_vertex, query_batch=cfg.query_batch_size,
+                    selection='edge_udf_only', query_batch=cfg.query_batch_size,
                     pruning='long_edges_only')
     report = refinement_report(mesh, original, history, settings, started)
     report.update(target_reached=True, local_max_edge=local_max)

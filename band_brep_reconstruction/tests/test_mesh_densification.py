@@ -82,6 +82,30 @@ class DensificationTests(unittest.TestCase):
         selected,_,_=local_selection(mesh,vertices,center,('absent','absent'),Config())
         self.assertFalse(selected[0])
 
+    def test_selector_uses_only_edge_distance(self):
+        mesh=SurfaceMesh(np.array([[0.,0,0],[.01,0,0],[0,.01,0]]),np.array([[0,1,2]]))
+        for vertex_distance in (0.,.5,float('nan')):
+            vertices=np.tile([0.,.2,vertex_distance],(3,1))
+            center=np.array([[0.,.2,vertex_distance]])
+            selected,near,_=local_selection(mesh,vertices,center,('present','present'),Config())
+            self.assertFalse(near[0]);self.assertFalse(selected[0])
+            vertices[:,1]=.001
+            selected,near,_=local_selection(mesh,vertices,center,('present','present'),Config())
+            self.assertTrue(near[0]);self.assertTrue(selected[0])
+
+    def test_exact_distance_keeps_adjacent_triangles_touching_zero_set(self):
+        mesh=SurfaceMesh(np.array([[0.,0,0],[1.,0,0],[0,1.,0],[1.,1.,0]]),
+                         np.array([[0,1,2],[1,3,2]]))
+        # A target line through the shared edge midpoint crosses both triangles.
+        def values(points):
+            distance=np.abs(points[:,0]-.5)
+            return np.column_stack((np.zeros(len(points)),distance,np.full(len(points),np.nan)))
+        centers=mesh.vertices[mesh.triangles].mean(1)
+        self.assertTrue((values(centers)[:,1]>Config().refinement_rho_edge).all())
+        selected,near,_=local_selection(mesh,values(mesh.vertices),values(centers),
+                                        ('present','present'),Config())
+        self.assertTrue(near.all());self.assertTrue(selected.all())
+
     def test_coarse_geometry_only_target_and_parent_mapping(self):
         source=tetrahedron()
         with patch('bandbrep.mesh_densification.evaluate_batched', side_effect=AssertionError('field used')):

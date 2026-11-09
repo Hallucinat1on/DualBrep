@@ -2,7 +2,7 @@
 
 更新：2026-11-01，模块 0.5.0。
 
-`bandbrep/vendor/dualbrep_segmentation.py` 复制自根目录 `clustering.py::hierarchical_segmentation`，增加排除原因、成功拆分父域和统计输出，标签决策保持一致。原 `clustering.py` SHA-256 为 `c76ce8b8022691fc003b1bbb1229aa9c175d4d23a10267da59865d9f79267432`；测试通过 AST 提取原函数进行随机图对照。运行时不导入根目录模块。
+`bandbrep/vendor/dualbrep_segmentation.py` 复制自根目录 `clustering.py::hierarchical_segmentation`，增加排除原因、成功拆分父域和统计输出，以及可跳过第二阶段的开关。默认两阶段模式的标签决策保持一致；显式设置 `second_pass=False` 时只返回第一阶段过滤后的连续面标签。原 `clustering.py` SHA-256 为 `c76ce8b8022691fc003b1bbb1229aa9c175d4d23a10267da59865d9f79267432`；测试通过 AST 提取原函数进行随机图对照。运行时不导入根目录模块。
 
 `surface_fitting.py` 的采样格式改编自 `rebuild.py::sample_faces`，改用本地 NumPy 面积采样并支持单面。OCC 曲面构造组织借鉴 `brep_post/utils.py::create_surface`。原项目权利与许可仍适用。
 

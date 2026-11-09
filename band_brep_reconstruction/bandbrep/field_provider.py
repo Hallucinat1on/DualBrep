@@ -11,6 +11,7 @@ from .schemas import require
 from .deadline import checkpoint
 
 EMPTY_DISTANCE = 2 * np.sqrt(3.)
+UDF_GRADIENT_STEP = 1e-5
 
 
 @dataclass
@@ -41,19 +42,59 @@ class CenterFields:
         return self.values
 
 
-class CallableUDFProvider:
-    """Continuous metric [dE,dV]. Gradients use channel 0=E, 1=V.
+def sampled_udf_gradient(evaluate, xyz, channel, step=UDF_GRADIENT_STEP,
+                         *, domain_mask=None, batch_size=8192):
+    """Central differences of E/V values only; never call a gradient backend.
 
-    ``gradient`` optionally returns (N,3) derivatives and an (N,) validity mask.
-    Without it, derivatives are evaluated by central differences. Presence may
-    be omitted and inferred on deterministic mesh-surface samples.
+    The center and all six spatial probes must be usable. A zero center value
+    or a vanishing difference is unsuitable for distance-based localization.
     """
-    def __init__(self, fn, *, fingerprint, presence=None, gradient=None, band_width=.02):
+    require(channel in (0,1), 'field_channel', 'UDF gradient channel must be E=0 or V=1')
+    require(np.isfinite(step) and step > 0, 'gradient_step', 'Gradient step must be finite and positive')
+    q = np.asarray(xyz, float).reshape(-1,3)
+    g = np.zeros_like(q); valid = np.zeros(len(q), bool)
+    deltas = np.eye(3)*step
+    for start in range(0,len(q),batch_size):
+        checkpoint('field_gradient')
+        points = q[start:start+batch_size]
+        mask = np.isfinite(points).all(1)
+        if domain_mask is not None:
+            mask &= domain_mask(points)
+            for delta in deltas:
+                mask &= domain_mask(points+delta) & domain_mask(points-delta)
+        ids = np.flatnonzero(mask)
+        if not len(ids):continue
+        center = evaluate(points[ids])
+        good = (center.valid[:,channel] & ~center.saturated[:,channel]
+                & np.isfinite(center.values[:,channel]) & (center.values[:,channel]>1e-8))
+        ids = ids[good]
+        if not len(ids):continue
+        probes = points[ids]
+        slopes = np.empty_like(probes); good = np.ones(len(ids),bool)
+        for axis,delta in enumerate(deltas):
+            plus,minus = evaluate(probes+delta),evaluate(probes-delta)
+            slopes[:,axis] = (plus.values[:,channel]-minus.values[:,channel])/(2*step)
+            good &= (plus.valid[:,channel] & minus.valid[:,channel]
+                     & ~plus.saturated[:,channel] & ~minus.saturated[:,channel]
+                     & (plus.values[:,channel]>=0) & (minus.values[:,channel]>=0))
+        good &= np.isfinite(slopes).all(1) & (np.linalg.norm(slopes,axis=1)>1e-8)
+        g[start+ids[good]] = slopes[good]
+        valid[start+ids[good]] = True
+    return g,valid
+
+
+class CallableUDFProvider:
+    """Continuous metric [dE,dV]; gradients sample values at spatial offsets.
+
+    Gradient channels are 0=E, 1=V. Presence may be omitted and inferred on
+    deterministic mesh-surface samples. No derivative callback is accepted.
+    """
+    def __init__(self, fn, *, fingerprint, presence=None, band_width=.02):
         require(isinstance(fingerprint, str) and bool(fingerprint), 'field_identity', 'Supply a field fingerprint')
         require(np.isfinite(band_width) and band_width > 0, 'field_domain', 'Invalid field band width')
         require(presence is None or (len(presence) == 2 and all(v in ('present','absent','unknown') for v in presence)),
                 'invalid_presence', 'Expected E/V presence')
-        self.fn, self.gradfn = fn, gradient
+        self.fn = fn
         self.fingerprint, self.band_width = fingerprint, float(band_width)
         self._presence = tuple(presence) if presence is not None else None
 
@@ -77,21 +118,8 @@ class CallableUDFProvider:
         valid = valid & np.isfinite(values)
         return FieldEvaluation(values, valid, saturated, np.zeros_like(values))
 
-    def gradient(self, xyz, channel, step=1e-5):
-        require(channel in (0,1), 'field_channel', 'UDF gradient channel must be E=0 or V=1')
-        q = np.asarray(xyz, float).reshape(-1,3)
-        if self.gradfn is not None:
-            g, valid = self.gradfn(q, channel)
-            g, valid = np.asarray(g, float), np.asarray(valid, bool)
-            require(g.shape == q.shape and valid.shape == (len(q),), 'gradient_shape', 'Invalid UDF gradient shape')
-            return g, valid & np.isfinite(g).all(1) & (np.linalg.norm(g,axis=1)>1e-8)
-        g = np.empty_like(q); valid = np.ones(len(q),bool)
-        for axis in range(3):
-            delta = np.eye(3)[axis]*step
-            plus, minus = self.evaluate(q+delta), self.evaluate(q-delta)
-            g[:,axis] = (plus.values[:,channel]-minus.values[:,channel])/(2*step)
-            valid &= plus.valid[:,channel] & minus.valid[:,channel] & ~plus.saturated[:,channel] & ~minus.saturated[:,channel]
-        return g, valid & np.isfinite(g).all(1) & (np.linalg.norm(g,axis=1)>1e-8)
+    def gradient(self, xyz, channel, step=UDF_GRADIENT_STEP):
+        return sampled_udf_gradient(self.evaluate, xyz, channel, step)
 
 
 class ProductionUDFProvider(CallableUDFProvider):
@@ -103,14 +131,11 @@ class ProductionUDFProvider(CallableUDFProvider):
         def evaluate(q):
             r = adapter.evaluate(q)
             return FieldEvaluation(r.values[:,1:],r.valid[:,1:],r.saturated[:,1:],r.error[:,1:])
-        # The production gradient method intentionally does not take ``step``.
-        def gradient(q, channel):
-            return adapter.gradient(q, channel+1)
         policy = dict(band_width=adapter.band_width, presence=adapter.presence(),
                       presence_support=np.asarray(getattr(adapter,'presence_support',[])).tolist())
         digest = hashlib.sha256((adapter.fingerprint+json.dumps(policy,sort_keys=True)).encode()).hexdigest()
         super().__init__(evaluate, fingerprint='production:'+digest, presence=adapter.presence(),
-                         gradient=gradient, band_width=adapter.band_width)
+                         band_width=adapter.band_width)
         self.normalization = getattr(adapter,'normalization',None)
 
 
@@ -149,6 +174,7 @@ class MeshFieldProvider:
         require(self._presence != ('absent','present'),'invalid_presence','Vertices require edges')
         policy = dict(mesh=mesh_hash(mesh.vertices,mesh.triangles), udf=udf.fingerprint,
                       band_width=self.band_width, presence=self._presence,
+                      udf_gradient=dict(method='central_difference',step=UDF_GRADIENT_STEP),
                       normalization=self.normalization, presence_support=self.presence_support)
         self.fingerprint = 'mesh-udf:'+hashlib.sha256(json.dumps(policy,sort_keys=True).encode()).hexdigest()
 
@@ -189,26 +215,15 @@ class MeshFieldProvider:
                 values[:,c] = EMPTY_DISTANCE;valid[:,c] = False
         return FieldEvaluation(values,valid,saturated,np.zeros_like(values))
 
-    def gradient(self, xyz, channel, step=1e-5):
+    def gradient(self, xyz, channel, step=UDF_GRADIENT_STEP):
         checkpoint("field_gradient")
         q = np.asarray(xyz,float).reshape(-1,3)
         require(channel in (0,1,2),'field_channel','Unknown channel')
         if channel==0:return self.oracle.gradient(q)
         g = np.zeros_like(q);valid = np.zeros(len(q),bool)
         if self._presence[channel-1]=='absent':return g,valid
-        mask = self.domain_mask(q)
-        # Finite differences require valid positions on both sides of each axis.
-        if isinstance(self.udf,CallableUDFProvider) and self.udf.gradfn is None:
-            for axis in range(3):
-                d = np.eye(3)[axis]*step
-                mask &= self.domain_mask(q+d)&self.domain_mask(q-d)
-        ids = np.flatnonzero(mask)
-        if len(ids):
-            r = self.udf.evaluate(q[ids])
-            good = r.valid[:,channel-1]&~r.saturated[:,channel-1]&(r.values[:,channel-1]>1e-8)
-            ids = ids[good]
-            if len(ids):g[ids],valid[ids] = self.udf.gradient(q[ids],channel-1,step)
-        return g,valid
+        return sampled_udf_gradient(self.udf.evaluate, q, channel-1, step,
+                                    domain_mask=self.domain_mask, batch_size=self.batch_size)
 
 
 def checked_values(provider, xyz, batch=8192):

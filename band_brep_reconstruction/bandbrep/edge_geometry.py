@@ -13,16 +13,28 @@ from .schemas import EdgeInstance, LogicalGraph, require
 from .curve_fitting import fit_circle
 
 
-def project_support(points, provider, radius, cfg):
+def project_support(points, provider, radius, cfg, *, max_iterations=32, stats=None):
     original=np.asarray(points,float);q=original.copy()
-    for _ in range(32):
-        d=evaluate_batched(provider,q)[:,1];g,valid=provider.gradient(q,1)
-        norm=np.linalg.norm(g,axis=1);active=valid&(norm>1e-10)&(d>cfg.curve_tolerance*.02)
-        if not active.any():break
-        proposed=q-.8*np.minimum(d,radius*.3)[:,None]*g/np.maximum(norm[:,None],1e-12)
-        proposed=bounded_update(provider,q,proposed)
-        safe=np.linalg.norm(proposed-original,axis=1)<=radius
-        q[active&safe]=proposed[active&safe]
+    values=evaluate_batched(provider,q);movable=np.ones(len(q),bool)
+    if stats is not None:stats.update(iterations=0,gradient_rows=0)
+    for _ in range(max_iterations):
+        ids=np.flatnonzero(movable&(values[:,1]>cfg.curve_tolerance*.02))
+        if not len(ids):break
+        if stats is not None:
+            stats['iterations']+=1;stats['gradient_rows']+=len(ids)
+        if hasattr(provider,'gradient_from_values'):
+            g,valid=provider.gradient_from_values(q[ids],1,values[ids])
+        else:g,valid=provider.gradient(q[ids],1)
+        norm=np.linalg.norm(g,axis=1);good=valid&(norm>1e-10)
+        movable[ids[~good]]=False;ids=ids[good]
+        if not len(ids):continue
+        proposed=q[ids]-.8*np.minimum(values[ids,1],radius*.3)[:,None]*g[good]/norm[good,None]
+        proposed=bounded_update(provider,q[ids],proposed)
+        safe=(np.linalg.norm(proposed-original[ids],axis=1)<=radius)
+        moved=np.linalg.norm(proposed-q[ids],axis=1)>1e-14
+        movable[ids[~safe|~moved]]=False
+        ids=ids[safe&moved];q[ids]=proposed[safe&moved]
+        if len(ids):values[ids]=evaluate_batched(provider,q[ids])
     v=evaluate_batched(provider,q)
     valid=(v[:,1]<=cfg.curve_tolerance)&(np.abs(v[:,0])<=cfg.feature_sdf_limit)
     require(valid.sum()>=3 and valid.mean()>=.8,'edge_localization_failed',

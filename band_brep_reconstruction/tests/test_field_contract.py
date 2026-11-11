@@ -67,12 +67,13 @@ class ContractTests(unittest.TestCase):
         q=np.array([[.1,.2,.3]])
         g,valid=udf.gradient(q,1)
         np.testing.assert_allclose(g,[[4,5,6]],atol=1e-9)
-        self.assertTrue(valid[0]);self.assertEqual(len(calls),7)
+        self.assertTrue(valid[0]);self.assertEqual(len(calls),2)
         np.testing.assert_array_equal(calls[0],q)
+        probes=np.concatenate(calls[1:])
         for axis in range(3):
             delta=np.eye(3)[axis]*1e-5
-            np.testing.assert_array_equal(calls[1+2*axis],q+delta)
-            np.testing.assert_array_equal(calls[2+2*axis],q-delta)
+            np.testing.assert_array_equal(probes[2*axis:2*axis+1],q+delta)
+            np.testing.assert_array_equal(probes[2*axis+1:2*axis+2],q-delta)
         for step in (0.,-1.,float('nan'),float('inf')):
             with self.assertRaises(ReconstructionError):udf.gradient(q,0,step)
 
@@ -95,6 +96,18 @@ class ContractTests(unittest.TestCase):
         g,valid=p.gradient([[.57-5e-6,.1,.1]],2)
         self.assertFalse(valid[0]);self.assertEqual(calls,[])
         np.testing.assert_array_equal(g,[[0,0,0]])
+
+    def test_gradient_reuses_checked_centers_but_still_samples_six_offsets(self):
+        mesh,udf=box();provider=MeshFieldProvider(mesh,udf,Config())
+        q=np.array([[.551,.53,.52]])
+        values=checked_values(provider,q);source=udf.fn;calls=[]
+        def record(points):calls.append(points.copy());return source(points)
+        udf.fn=record
+        g,valid=provider.gradient_from_values(q,2,values)
+        self.assertTrue(valid[0]);self.assertEqual(sum(map(len,calls)),6)
+        self.assertFalse(any(np.array_equal(p,q) for p in calls))
+        expected=q-[.55,.55,.55];expected/=np.linalg.norm(expected,axis=1)[:,None]
+        np.testing.assert_allclose(g,expected,atol=1e-7)
 
     def test_gradient_rejects_bad_probe_values_and_zero_distance(self):
         q=np.array([[.1,.2,.3]])
@@ -160,6 +173,7 @@ class ContractTests(unittest.TestCase):
         key,_=cache_key(mesh,udf,cfg)
         self.assertEqual(key,cache_key(mesh,udf,replace(cfg,stop_after='seeds'))[0])
         self.assertNotEqual(key,cache_key(mesh,udf,replace(cfg,face_second_pass=False))[0])
+        self.assertNotEqual(key,cache_key(mesh,udf,replace(cfg,curve_recovery='direct_distance'))[0])
         udf.band_width=.03;self.assertNotEqual(key,cache_key(mesh,udf,cfg)[0]);udf.band_width=.02
         mesh.vertices[0,0]+=.001;self.assertNotEqual(key,cache_key(mesh,udf,cfg)[0]);mesh.vertices[0,0]-=.001
         with tempfile.TemporaryDirectory() as tmp:

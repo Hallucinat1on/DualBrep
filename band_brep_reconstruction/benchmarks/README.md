@@ -43,4 +43,18 @@ python band_brep_reconstruction/benchmarks/analyze_mesh_input_experiment.py \
 
 `preflight_mesh_inputs.py --output /path/to/new_preflight.json` 可在当前仓库依赖下重新核验全部20例的源哈希、输入网格、归一化及目标数量。预检记录依赖代码哈希，冻结时拒绝已变化的预检来源。上游生产目录变更时需记录差异；精确距离实验不能静默切换为截断UDF。
 
+`replay_curve_recovery.py` 从历史实验的已验哈希产物读取工作网格、边带、关联与顶点，跳过加密及拓扑恢复，只重做曲线和可选的曲面／STEP。使用全新输出目录，冻结当前代码，并在子进程中从快照运行；原依赖版本须与缓存观测一致。它不通过修改旧缓存身份强行 `--resume`。例如：
+
+```bash
+PYTHONPATH="$PWD/veudf/src:$PWD/band_brep_reconstruction" python \
+  band_brep_reconstruction/benchmarks/replay_curve_recovery.py \
+  --input-group band_brep_reconstruction/outputs/single_pass_t003_20261106_v1/coarse_003 \
+  --id 00009843 --output /data/new_curve_replay \
+  --method direct_distance --stop-after solid
+```
+
+`--method projected` 可生成旧投影算法的独立对照；`--stop-after curves` 只验收到曲线覆盖，`solid` 继续STEP导出读回及几何评分。`result.json` 分开记录曲线恢复与全局覆盖耗时，包含逐边距离拟合报告和查询计数；全局覆盖仍使用有限差分梯度。
+
+`run_curve_replay_batch.py` 将同一历史组的20个dev冻结为 `direct_distance` 曲线到STEP回放，要求粗0.03／细0.003／单阶段阈值0.003。先用 `--initialize --input-group <历史coarse_003目录> --output <新目录>` 冻结，再用 `--run --output <新目录>` 运行；`--report` 刷新汇总。两个CPU worker，每例总超时10800秒，失败保留分母，`active/`、`runs/<id>/worker.log` 和 `state.json` 提供进度。固定拓扑的面／图评分只作为输入背景，新的成绩是STEP、几何及曲线耗时。11-09批次协议见[实验记录§5.12](../../docs/Experiment.md#512-11-09固定粗目标003网格重跑曲线与step)。
+
 2026-11-02 的实际协议、证据和实时入口见[两级粗目标对照](../../docs/ThreeFieldReconstructionExperiments.md#coarse-fine-comparison)。

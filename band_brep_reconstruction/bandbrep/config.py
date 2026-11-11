@@ -44,6 +44,11 @@ class Config:
     infer_short_edges: bool = True
     surface_candidates: str = 'revolution'
     curve_candidates: str = 'arcs'
+    curve_recovery: str = 'projected'
+    curve_init_samples: int = 256
+    curve_fit_samples: int = 512
+    curve_refine_samples: int = 2048
+    curve_distance_iterations: int = 15
     periodic_frame_planning: bool = True
     feature_sdf_tolerance: float = None
 
@@ -60,6 +65,8 @@ class Config:
             raise ValueError('invalid band_connectivity')
         if self.curve_candidates not in ('basic', 'arcs'):
             raise ValueError('invalid curve_candidates')
+        if self.curve_recovery not in ('projected','direct_distance'):
+            raise ValueError('invalid curve_recovery')
         if self.vertex_domains not in ('threshold', 'local'):
             raise ValueError('invalid vertex_domains')
         if self.surface_candidates not in ('basic', 'revolution'):
@@ -76,11 +83,14 @@ class Config:
         if self.band_propagation not in ('distance_only', 'noncore'):
             raise ValueError('invalid band_propagation')
         for key in ('presence_samples','presence_min_points','query_batch_size','max_segments',
-                    'face_samples','spline_controls','max_spline_controls','uv_iterations','face_filter_size'):
+                    'face_samples','spline_controls','max_spline_controls','uv_iterations','face_filter_size',
+                    'curve_init_samples','curve_fit_samples','curve_refine_samples','curve_distance_iterations'):
             v = getattr(self,key)
             if type(v) is not int or v < 1: raise ValueError(f'{key} must be a positive integer')
         if self.spline_controls < 4 or self.max_spline_controls < self.spline_controls:
             raise ValueError('invalid spline controls')
+        if not (8 <= self.curve_init_samples <= self.curve_fit_samples <= self.curve_refine_samples):
+            raise ValueError('Require 8 <= curve_init_samples <= curve_fit_samples <= curve_refine_samples')
         if self.face_threshold2 < self.face_threshold1:
             raise ValueError('face_threshold2 must be >= face_threshold1')
         for key in ('sample_timeout_seconds','refinement_coarse_edge','refinement_target_edge','refinement_rho_edge','refinement_rho_vertex','presence_tau','tau_edge','tau_vertex','face_threshold1','face_threshold2','face_avg_udf_threshold','field_error','surface_tolerance',

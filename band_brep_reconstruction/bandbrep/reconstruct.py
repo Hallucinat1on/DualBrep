@@ -145,8 +145,13 @@ def reconstruct(mesh,udf,cfg,output_dir,resume=False):
         if cfg.stop_after=='vertices':return finish('vertices_ready')
         stage='curves'
         checkpoint(stage)
+        distance_report=None
         if stage in accepted:
             graph=load_graph(out/'logical_graph.json');curves=load_records(out/'curves.json','curve')
+        elif cfg.curve_recovery=='direct_distance':
+            from .curve_distance_fitting import recover_distance_curves
+            graph,curves,distance_report=recover_distance_curves(topology,bands,vertices,provider,cfg,
+                progress=lambda data:write_json(out/'curve_recovery_progress.json',data))
         else:
             graph=build_edge_geometry(topology,bands,vertices,provider,cfg)
             curves=fit_shared_curves(graph,provider,cfg)
@@ -155,6 +160,7 @@ def reconstruct(mesh,udf,cfg,output_dir,resume=False):
             vertices=np.array([v.position for v in vertices]).reshape(-1,3))
         coverage=accepted.get(stage,{}).get('coverage') if stage in accepted else validate_structure_coverage(mesh,bands,curves,provider,cfg)
         mark(stage,{'coverage':coverage,'kinds':{i:c.kind for i,c in curves.items()},
+            'method':cfg.curve_recovery,'distance_fitting':distance_report or graph.report.get('distance_fitting'),
             'max_fit_error':max((c.residual for c in curves.values()),default=0.)})
         if cfg.stop_after=='curves':return finish('curves_ready')
         stage='postprocess'

@@ -43,7 +43,7 @@ class CenterFields:
 
 
 def sampled_udf_gradient(evaluate, xyz, channel, step=UDF_GRADIENT_STEP,
-                         *, domain_mask=None, batch_size=8192):
+                         *, domain_mask=None, batch_size=8192, center_values=None):
     """Central differences of E/V values only; never call a gradient backend.
 
     The center and all six spatial probes must be usable. A zero center value
@@ -52,6 +52,9 @@ def sampled_udf_gradient(evaluate, xyz, channel, step=UDF_GRADIENT_STEP,
     require(channel in (0,1), 'field_channel', 'UDF gradient channel must be E=0 or V=1')
     require(np.isfinite(step) and step > 0, 'gradient_step', 'Gradient step must be finite and positive')
     q = np.asarray(xyz, float).reshape(-1,3)
+    if center_values is not None:
+        center_values=np.asarray(center_values,float)
+        require(center_values.shape==(len(q),2),'field_shape','Expected aligned checked E/V center values')
     g = np.zeros_like(q); valid = np.zeros(len(q), bool)
     deltas = np.eye(3)*step
     for start in range(0,len(q),batch_size):
@@ -64,19 +67,28 @@ def sampled_udf_gradient(evaluate, xyz, channel, step=UDF_GRADIENT_STEP,
                 mask &= domain_mask(points+delta) & domain_mask(points-delta)
         ids = np.flatnonzero(mask)
         if not len(ids):continue
-        center = evaluate(points[ids])
-        good = (center.valid[:,channel] & ~center.saturated[:,channel]
-                & np.isfinite(center.values[:,channel]) & (center.values[:,channel]>1e-8))
+        if center_values is None:
+            center=evaluate(points[ids])
+            good=(center.valid[:,channel] & ~center.saturated[:,channel]
+                  & np.isfinite(center.values[:,channel]) & (center.values[:,channel]>1e-8))
+        else:
+            values=center_values[start:start+batch_size][ids,channel]
+            good=np.isfinite(values)&(values>1e-8)
         ids = ids[good]
         if not len(ids):continue
         probes = points[ids]
-        slopes = np.empty_like(probes); good = np.ones(len(ids),bool)
-        for axis,delta in enumerate(deltas):
-            plus,minus = evaluate(probes+delta),evaluate(probes-delta)
-            slopes[:,axis] = (plus.values[:,channel]-minus.values[:,channel])/(2*step)
-            good &= (plus.valid[:,channel] & minus.valid[:,channel]
-                     & ~plus.saturated[:,channel] & ~minus.saturated[:,channel]
-                     & (plus.values[:,channel]>=0) & (minus.values[:,channel]>=0))
+        # Pack all six directions while respecting the backend query batch size.
+        # Small active sets now require one decoder call instead of six.
+        positions=np.concatenate([probes+sign*delta for delta in deltas for sign in (1,-1)])
+        distances=np.empty(len(positions));usable=np.empty(len(positions),bool)
+        for offset in range(0,len(positions),batch_size):
+            r=evaluate(positions[offset:offset+batch_size]);end=offset+len(r.values)
+            distances[offset:end]=r.values[:,channel]
+            usable[offset:end]=(r.valid[:,channel]&~r.saturated[:,channel]
+                                &(r.values[:,channel]>=0)&np.isfinite(r.values[:,channel]))
+        pairs=distances.reshape(3,2,len(ids))
+        slopes=((pairs[:,0]-pairs[:,1])/(2*step)).T
+        good=usable.reshape(6,len(ids)).all(0)
         good &= np.isfinite(slopes).all(1) & (np.linalg.norm(slopes,axis=1)>1e-8)
         g[start+ids[good]] = slopes[good]
         valid[start+ids[good]] = True
@@ -215,7 +227,7 @@ class MeshFieldProvider:
                 values[:,c] = EMPTY_DISTANCE;valid[:,c] = False
         return FieldEvaluation(values,valid,saturated,np.zeros_like(values))
 
-    def gradient(self, xyz, channel, step=UDF_GRADIENT_STEP):
+    def gradient(self, xyz, channel, step=UDF_GRADIENT_STEP, *, _center_values=None):
         checkpoint("field_gradient")
         q = np.asarray(xyz,float).reshape(-1,3)
         require(channel in (0,1,2),'field_channel','Unknown channel')
@@ -223,7 +235,19 @@ class MeshFieldProvider:
         g = np.zeros_like(q);valid = np.zeros(len(q),bool)
         if self._presence[channel-1]=='absent':return g,valid
         return sampled_udf_gradient(self.udf.evaluate, q, channel-1, step,
-                                    domain_mask=self.domain_mask, batch_size=self.batch_size)
+                                    domain_mask=self.domain_mask, batch_size=self.batch_size,
+                                    center_values=_center_values)
+
+    def gradient_from_values(self, xyz, channel, values, step=UDF_GRADIENT_STEP):
+        """Reuse aligned centers already accepted by checked_values().
+
+        All six spatial probes still undergo domain, mask and saturation checks.
+        This internal optimization must not receive unchecked model outputs.
+        """
+        q=np.asarray(xyz,float).reshape(-1,3);v=np.asarray(values,float)
+        require(v.shape==q.shape,'field_shape','Expected checked [SDF,E,V] centers')
+        require(channel in (1,2),'field_channel','Expected E or V gradient')
+        return self.gradient(q,channel,step,_center_values=v[:,1:])
 
 
 def checked_values(provider, xyz, batch=8192):

@@ -385,8 +385,33 @@ $$
 
 代码：[edge_geometry.py](../band_brep_reconstruction/bandbrep/edge_geometry.py)、[curve_fitting.py](../band_brep_reconstruction/bandbrep/curve_fitting.py)、[geometry_refinement.py](../band_brep_reconstruction/bandbrep/geometry_refinement.py)。
 
-调用顺序为 `build_edge_geometry()` → `fit_shared_curves()` → `validate_structure_coverage()`：先把宽边带定位到一维边、建立单条边的点列顺序，再拟合唯一共享曲线并检查覆盖。全局面环的顺序和方向留到第9步。
-   
+`curve_recovery='projected'` 保留原路径作为默认；`curve_recovery='direct_distance'` 启用原始距离观测拟合。CLI可加 `--curve-recovery direct_distance`，或在JSON中设置同名配置。两种方法都为一个逻辑边实例输出一条 `CurveRecord`，相邻两面共用。曲线内部可以包含多个连续三次段，不据此增加拓扑边或顶点。全局面环的顺序和方向留到第9步。
+
+### 8.1 投影路径与梯度查询优化
+
+原路径调用 `build_edge_geometry()` → `fit_shared_curves()`。从边带支撑取点，按E-UDF和空间差分梯度向边定位，再按直线、圆或邻接图主路径排序；依次尝试直线、圆弧／整圆、分段三次Bézier。
+
+`project_support()`每轮只为距离仍大于 `0.02*curve_tolerance` 的可移动点求梯度，已收敛、梯度无效或因域／位移限制不能继续移动的点退出活动集合。内部复用已经通过 `checked_values()` 的中心值，六个扰动方向合并后按查询batch分批，仍逐点检查邻点的有效域、valid和saturated。普通路径最多32轮；直接距离路径只在少量初始化点上使用最多8轮投影。所有UDF梯度仍来自空间采样值，不调用autograd或CAD解析导数。
+
+### 8.2 原始距离观测拟合路径
+
+实现：[curve_distance_fitting.py](../band_brep_reconstruction/bandbrep/curve_distance_fitting.py)。使用窄边实例支撑近似：该实例点的全局E-UDF近似视为到此实例曲线的距离，不读取最近真实CAD边ID进行归属筛选。
+
+1. **准备观测。** 复用边带已有坐标与metric距离 `(x_i,d_i)`。拟合只用空间分布均匀的代表点，完整原始支撑留作逐点验收。默认初始化256点、首轮距离优化512点，必要时加入高残差点，最多2048点；小实例直接使用全部点。
+2. **先验证固定端点直线。** 两个不同端点的开放边直接生成线段，检查原始距离残差、曲线上E-UDF／SDF、固定端点及观测覆盖。通过后不做梯度投影。端点支撑的短边仍可缺少原始距离点，但须通过线段上的场与支撑检查。
+3. **复杂边初始化。** 只投影代表点，记录梯度处理点数；尝试固定端点圆弧或完整圆，并用原始距离观测优化其少量几何参数。圆不通过时，沿用圆排序／邻接图排序生成折线，以Huber迭代加权的约束最小二乘构建样条初值。
+4. **直接距离优化。** 对每个观测点求候选曲线上的最近参数，再调整曲线控制点，使 `dist(x_i,C)-d_i` 接近零，使用Huber损失与弱平滑项。曲线最近点采用粗全局种子、上一轮参数及带回退的局部Newton搜索，并比较端点。默认每次优化最多15次残差评估；不是保证15步收敛。
+5. **按需局部加段。** 开放自由曲线先试一段三次Bézier；先补充高残差观测，再在最差参数区间二分插入节点，最多 `max_segments` 段。de Casteljau细分保持当前形状不变；必要时另构造小规模鲁棒投影初值，并按原始距离残差选更好的初值，避免低段数局部极小。内部接点可移动，逻辑端点固定，内部位置和按参数尺度计算的切向导数连续。无逻辑顶点的通用闭环从4段开始，额外保持首尾位置和切向连续；单顶点自环使用同一固定顶点作为两端。
+6. **完整验收。** 分批检查全部原始支撑的最大距离残差不超过 `curve_tolerance`；对曲线追加密集采样，E-UDF不超过 `2*curve_tolerance`，SDF不超过特征相容性门槛，并检查端点和各段附近的原始观测支撑。原始点允许位于曲线外，不能沿用“原始点到曲线距离接近零”的投影点验收标准。
+
+样条优化的控制点Jacobian来自候选曲线表达式；圆参数优化使用候选几何的数值导数。这些优化阶段不查询UDF、不计算UDF空间梯度；追加UDF只发生于初始化和独立场验证。验收失败时明确报错，不自动退回全量投影掩盖失败。
+
+所有方法仍输出现有 `line / circle / bezier_spline` 格式，装配时转换为唯一OCC曲线。`CurveRecord.residual`在直接距离模式下表示原始距离残差，报告标记 `residual_kind='distance_observation'`，不能与投影点拟合误差直接混为同一指标。
+
+阶段报告 `distance_fitting` 包括观测准备、初始化、优化、验收计时，以及逐边候选、段数、拟合样本量、残差和初始化梯度点数；`curve_recovery_progress.json` 保存活动边与已完成边，是进度文件，不参与阶段缓存恢复。此模式仍保留下面的独立全局覆盖探针，因此不代表整个后处理完全没有梯度。
+
+2026-11-09实现验证：86项回归和8个子测试通过。固定原网格、拓扑及顶点回放 `00009843` 后，36条曲线全部恢复为直线，曲面与STEP装配读回通过，采样表面最大误差约2.10e-14。曲线恢复与全局覆盖合计约48.92秒，历史对应阶段约1499秒；计时边界和运行负载存在差异，仅为单例观测，不代表20例新成功率。证据、快照及输入身份见[验证报告](../band_brep_reconstruction/outputs/curve_distance_validation_20261109_v2/REPORT.md)。
+
 ### 8.5 独立结构覆盖检查
 
 `validate_structure_coverage()`从工作网格中心中选 `dE<0.6*tau_edge` 的点，最多2048个，不依赖已恢复face标签选点。做最多8步受域约束的e-UDF定位，再将有效探针与所有曲线每条4097个采样比较，最远距离须不超过 `3*curve_tolerance`。
@@ -593,6 +618,9 @@ pcurve附着到共享Edge的具体Face，并设置与OCC三维曲线一致的参
 | `refinement_rho_edge=0.02` | 仅按E场选近场；旧 `refinement_rho_vertex` 不再影响选区 |
 | `face_threshold1/2=0.005/0.01`、`face_filter_size=10`、`face_avg_udf_threshold=0.003` | 两阶段核心提取 |
 | `face_second_pass=true` | 默认启用第二阶段拆分；设为false时只保留第一阶段过滤后的核心 |
+| `curve_recovery='projected'` | 旧投影路径；`direct_distance`启用原始距离观测拟合 |
+| `curve_init_samples/curve_fit_samples/curve_refine_samples=256/512/2048` | 直接距离路径的初始化／拟合／逐步补充样本预算，要求8≤初始化≤拟合≤补充上限 |
+| `curve_distance_iterations=15` | 每次距离优化的最大残差评估次数 |
 | `tau_vertex=0.02`、局部域系数0.45/1.5、`vertex_min_votes=3` | 顶点候选和局部截断 |
 | `tau_edge=0.025` | 边定位／覆盖半径、面内部可信点筛选，不定义传播边带 |
 | `localization_tolerance=0.001`、`curve_tolerance=0.001` | 距离中心、边支撑、排序、曲线及覆盖检查 |

@@ -78,6 +78,8 @@ python band_brep_reconstruction/reconstruct.py \
 
 面分割默认 `face_second_pass=true`，执行两阶段核心提取。只做第一阶段时，在 Python 中使用 `Config(face_second_pass=False)`，在配置 JSON 中设置 `"face_second_pass": false`，或在原运行命令后加 `--no-face-second-pass`；`--face-second-pass` 可显式重新开启。关闭后仍执行第一阶段距离阈值、连通分量、大小和均值过滤，保留通过过滤的完整父核心，跳过第二阶段拆分；面标签继续重编号为连续整数。`bands`／`seeds` 阶段报告中的 `segmentation.second_pass_enabled` 记录开关状态。切换开关会改变缓存身份，应使用新的输出目录。
 
+曲线恢复默认 `curve_recovery='projected'`。加 `--curve-recovery direct_distance`、JSON `"curve_recovery": "direct_distance"` 或 `Config(curve_recovery='direct_distance')` 可启用直接距离拟合：先验收固定端点直线，复杂边只投影少量代表点，随后用原始距离残差优化圆或自由曲线。开放自由曲线从一段三次Bézier开始，按需局部细分；保持单条共享曲线、固定端点和内部C1连续。默认初始化／拟合／补充预算为256／512／2048点，优化最多15次残差评估。完整支撑和追加场查询独立验收；全局覆盖检查仍保留有限的梯度探针。窄边带E距离近似属于当前实例距离，未引入CAD最近边ID。逐边过程和计时见 `curve_recovery_progress.json` 与 `run.json` 的 `distance_fitting`，详情见[曲线阶段](../docs/Post.md#5-顶点与共享曲线)。
+
 SDF 无需模型预测：内部按需计算到原始网格的距离，用于特征与曲面相容性检查、查询带判定和方向探测。E/V 在训练带与坐标域内查询；带外梯度更新回退，顶点壳层缩小，仍无有效支撑则失败。
 
 ## 输出与续跑

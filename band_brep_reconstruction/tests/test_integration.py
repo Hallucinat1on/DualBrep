@@ -11,6 +11,18 @@ from helpers import box,cylinder,hollow_sphere,sphere_with_bore
 
 
 class PipelineTests(unittest.TestCase):
+    def test_direct_distance_box_and_closed_circle_step(self):
+        for factory,expected in ((box,(6,12,8)),(cylinder,(3,2,0))):
+            with self.subTest(shape=factory.__name__),tempfile.TemporaryDirectory() as tmp:
+                mesh,udf=factory()
+                result=reconstruct(mesh,udf,Config(face_samples=400,save_queries=False,
+                    curve_recovery='direct_distance'),tmp)
+                graph=result['graph']
+                self.assertEqual((graph.face_count,len(graph.edges),len(graph.vertices)),expected)
+                self.assertEqual(result['report']['status'],'solid_validated')
+                report=next(s['report'] for s in result['report']['stages'] if s['stage']=='curves')
+                self.assertEqual(report['method'],'direct_distance')
+                self.assertEqual(report['distance_fitting']['residual_kind'],'distance_observation')
     def test_box_resume_vertices_to_step(self):
         mesh,udf=box()
         from veudf.geometry.sampling import mesh_hash

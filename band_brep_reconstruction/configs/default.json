@@ -38,6 +38,11 @@
   "infer_short_edges": true,
   "surface_candidates": "revolution",
   "curve_candidates": "arcs",
+  "curve_recovery": "projected",
+  "curve_init_samples": 256,
+  "curve_fit_samples": 512,
+  "curve_refine_samples": 2048,
+  "curve_distance_iterations": 15,
   "periodic_frame_planning": true,
   "feature_sdf_tolerance": null
 }

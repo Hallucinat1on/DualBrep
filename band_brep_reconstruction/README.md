@@ -16,6 +16,13 @@ conda install -c conda-forge pythonocc-core=7.7
 
 ## 输入与运行
 
+单阶段 `E<=0.005`、`V<=0.008` 分割可使用 `configs/single_pass_E005_V008.json`。
+该配置令边带为 `dE<=0.005`，顶点带为边带内的 `dV<=0.008`：启用包含等号的比较、
+`band_propagation=distance_only`，并用 `vertex_domains=threshold` 避免局部域扩张改变阈值范围。
+它不改变前置 presence 规则，也不改变顶点精定位后的最终验收：`localization_tolerance=0.001`
+仍同时检查候选中心的 E/V 值，`|mesh SDF|` 另受 `feature_sdf_limit` 约束。
+默认配置仍使用严格小于比较，旧实验的冻结代码和记录保持各自原有语义。
+
 网格可传 `condition/`、包含它的资产目录，或已处于模型坐标系的三角网格文件。condition 包含 `vertices.npy`、`triangles.npy`、`meta.json`；读取时检查版本、dtype 和 mesh hash。坐标范围为 `[-1,1]`，不自动重新归一化；网格必须闭合、方向一致、没有零面积面，腔体内壳方向相反。
 
 模型应在同一坐标系及距离尺度上查询 `[dE,dV]`。固定顶点的预测数组不足以支持加密、顶点壳层和曲线连续检查。截断归一化的模型需要在 decoder 中还原 metric 距离；负值、无效值和饱和平台不能作为有效零距离。

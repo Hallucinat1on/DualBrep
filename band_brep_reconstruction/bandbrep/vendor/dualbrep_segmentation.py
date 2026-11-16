@@ -9,7 +9,8 @@ from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import connected_components
 
 def hierarchical_segmentation(mesh, face_udf, threshold1=0.003, threshold2=0.01,
-                              filter_size=5, avg_udf_threshold=0.003, *, second_pass=True):
+                              filter_size=5, avg_udf_threshold=0.003, *, second_pass=True,
+                              inclusive=False):
     """
     Two-pass hierarchical segmentation mirroring C++ segment_mode3.
 
@@ -28,6 +29,7 @@ def hierarchical_segmentation(mesh, face_udf, threshold1=0.003, threshold2=0.01,
     - filter_size: Int. Minimum cluster size.
     - avg_udf_threshold: Float. Minimum average UDF for a cluster to survive.
     - second_pass: Bool. If False, return filtered pass-1 clusters without splitting.
+    - inclusive: Bool. If True, the first-pass edge mask includes UDF == threshold1.
 
     Returns:
     - n_clusters: int, number of clusters found.
@@ -37,15 +39,17 @@ def hierarchical_segmentation(mesh, face_udf, threshold1=0.003, threshold2=0.01,
     """
     if type(second_pass) is not bool:
         raise ValueError('second_pass must be a boolean')
+    if type(inclusive) is not bool:
+        raise ValueError('inclusive must be a boolean')
     udf = np.abs(face_udf[:, 0]) if face_udf.ndim == 2 else np.abs(face_udf)
     n_faces = len(udf)
 
     reasons = np.ones(n_faces, dtype=np.int8)  # 0 core, 1 first threshold, 2 split threshold, 3 size, 4 mean, 5 sub-size
     split_parents = []
     report = dict(split_parents=split_parents, pass1_components=0, pass1_valid=0,
-                  second_pass_enabled=second_pass)
+                  second_pass_enabled=second_pass, threshold1_inclusive=inclusive)
     # --- Pass 1: threshold masking + connected components ---
-    active = udf >= threshold1
+    active = udf > threshold1 if inclusive else udf >= threshold1
     labels = np.full(n_faces, -1, dtype=np.int32)
 
     active_indices = np.where(active)[0]

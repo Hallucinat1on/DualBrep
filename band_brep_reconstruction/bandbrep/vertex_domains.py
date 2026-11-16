@@ -34,7 +34,9 @@ def vertex_candidates(points, distances, provider, cfg):
 def local_vertex_domains(points, values, edge_band, support, provider, cfg):
     """Return (vertex_labels, centers, report); labels are -1 outside vertex domains."""
     labels = np.full(len(points), -1, np.int64)
-    seeds = np.flatnonzero(edge_band & support & (values[:, 2] < cfg.tau_vertex))
+    vertex_near = (values[:, 2] <= cfg.tau_vertex if cfg.band_threshold_inclusive
+                   else values[:, 2] < cfg.tau_vertex)
+    seeds = np.flatnonzero(edge_band & support & vertex_near)
     centers, votes, merge = vertex_candidates(points[seeds], values[seeds, 2], provider, cfg)
     report = dict(method='nearest_candidate_local_radius', seed_nodes=len(seeds), candidates=len(centers),
                   merge_radius=merge, radius_fraction=cfg.vertex_radius_fraction, cut_factor=cfg.vertex_cut_factor)

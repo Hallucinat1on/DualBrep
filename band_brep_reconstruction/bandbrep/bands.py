@@ -18,13 +18,15 @@ def build_bands(mesh, provider, cfg, center_fields=None):
         SimpleNamespace(face_adjacency=face_adjacency(mesh.triangles)), udf,
         threshold1=cfg.face_threshold1, threshold2=cfg.face_threshold2,
         filter_size=cfg.face_filter_size, avg_udf_threshold=cfg.face_avg_udf_threshold,
-        second_pass=cfg.face_second_pass)
+        second_pass=cfg.face_second_pass, inclusive=cfg.band_threshold_inclusive)
     # A rejected high-distance component is not evidence of an edge.
     eb = np.isin(reasons, [1, 2]) if presence[0] == 'present' else np.zeros(len(points), bool)
     core = labels >= 0
     if cfg.band_propagation == 'noncore' and presence[0] == 'present':
         eb = ~core
-    vb = eb & (values[:, 2] < cfg.tau_vertex) if presence[1] == 'present' else np.zeros(len(points), bool)
+    vertex_near = (values[:, 2] <= cfg.tau_vertex if cfg.band_threshold_inclusive
+                   else values[:, 2] < cfg.tau_vertex)
+    vb = eb & vertex_near if presence[1] == 'present' else np.zeros(len(points), bool)
     vertex_labels = vertex_centers = None
     vertex_report = {'method': 'global_threshold', 'tau_vertex': cfg.tau_vertex}
     if cfg.vertex_domains == 'local' and presence[1] == 'present':

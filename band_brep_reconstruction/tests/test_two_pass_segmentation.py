@@ -22,6 +22,33 @@ def chain(n):
 
 
 class TwoPassTests(unittest.TestCase):
+    def test_inclusive_threshold_is_opt_in(self):
+        values=np.array([.005,.006])
+        _,old,_,_=hierarchical_segmentation(chain(2),values,.005,.01,1,second_pass=False)
+        _,new,_,report=hierarchical_segmentation(chain(2),values,.005,.01,1,
+                                               second_pass=False,inclusive=True)
+        np.testing.assert_array_equal(old,[0,0])
+        np.testing.assert_array_equal(new,[-1,0])
+        self.assertTrue(report['threshold1_inclusive'])
+
+    def test_single_pass_E005_V008_preset_uses_exact_nested_thresholds(self):
+        preset=Path(__file__).resolve().parents[1]/'configs/single_pass_E005_V008.json'
+        cfg=load_config(preset,{'face_filter_size':1})
+        self.assertEqual(cfg.localization_tolerance,.001)
+        self.assertEqual(cfg.vertex_domains,'threshold')
+        x=np.arange(8,dtype=float)
+        mesh=SurfaceMesh(np.column_stack((x,x*x,np.zeros(8))),
+                         np.array([[0,i+1,i+2] for i in range(6)]))
+        edge=np.array([.005,.004,.004,.005+1e-8,.006,.006])
+        vertex=np.array([.008,.008+1e-8,.007,.001,0.,0.])
+        provider=AnalyticFields(lambda q:np.column_stack((np.zeros(6),edge,vertex)),
+                                presence=('present','present'))
+        _,bands=build_bands(mesh,provider,cfg)
+        np.testing.assert_array_equal(bands.edge_band,[True,True,True,False,False,False])
+        np.testing.assert_array_equal(bands.vertex_band,[True,False,True,False,False,False])
+        np.testing.assert_array_equal(bands.core_mask,[False,False,False,True,True,True])
+        self.assertEqual(bands.report['vertex_domains']['method'],'global_threshold')
+
     def test_first_pass_only_keeps_parent_without_building_split_graph(self):
         d=np.array([.02,.02,.007,.02,.02])
         with patch('bandbrep.vendor.dualbrep_segmentation.connected_components',

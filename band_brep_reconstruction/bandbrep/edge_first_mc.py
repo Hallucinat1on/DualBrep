@@ -1,4 +1,4 @@
-"""Local marching cubes and distance-projection skeleton samples."""
+"""Local marching cubes on fully observed E or V cells."""
 from itertools import product
 
 import numpy as np
@@ -6,20 +6,21 @@ import numpy as np
 from .deadline import checkpoint
 
 
-def extract_shell(grid, cfg):
+def extract_shell(grid, cfg, *, channel=1):
     from skimage.measure import marching_cubes
 
     vertices, faces = [], []
     offset = 0
     factor = grid.block_indices.shape[1] - 1
-    h, r = cfg.fine_spacing, cfg.shell_radius
+    h = cfg.fine_spacing
+    r = cfg.shell_radius if channel == 1 else cfg.vertex_level
     corner_slices = [tuple(slice(i, factor + i) for i in corner)
                      for corner in product((0, 1), repeat=3)]
     valid_cells = clipped_cells = 0
     for block, indices in zip(grid.blocks, grid.block_indices):
         checkpoint('edge_first_marching_cubes')
-        valid = grid.valid[indices, 1]
-        values = grid.values[indices, 1]
+        valid = grid.valid[indices, channel]
+        values = grid.values[indices, channel]
         all_valid = np.logical_and.reduce([valid[key] for key in corner_slices])
         inside = np.logical_or.reduce([(valid & (values < r))[key] for key in corner_slices])
         outside = np.logical_or.reduce([(valid & (values >= r))[key] for key in corner_slices])

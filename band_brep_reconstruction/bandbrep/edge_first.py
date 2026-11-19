@@ -1,20 +1,21 @@
-"""Mesh + continuous E/V -> parameterized wireframe -> mesh cut -> STEP."""
+"""Mesh + continuous E/V -> parameterized wireframe -> mesh regions -> STEP."""
+import shutil
 import time
-from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
 
 from .cache import cache_key, file_hash
-from .deadline import checkpoint, timed_reconstruction
+from .deadline import timed_reconstruction
 from .edge_first_embedding import cut_surface
 from .edge_first_graph import recover_wireframe
 from .edge_first_grid import sample_grid
 from .edge_first_mc import extract_shell
+from .face_patches import fit_with_patch_fallback
+from .fast_faces import coarse_paths, recover_planar_faces
 from .field_provider import MeshFieldProvider
-from .schemas import require, write_json
-from .surface_fitting import initialize_face_surfaces
-from .surface_mesh import validate_mesh
+from .schemas import ReconstructionError, require, write_json
+from .surface_mesh import mesh_edges, validate_mesh
 
 
 class Run:
@@ -27,7 +28,7 @@ class Run:
         self.out = out
         self.start = self.tick = time.monotonic()
         self.stage = 'mesh'
-        self.report = dict(status='running', extraction=cfg.extraction, config=cfg.to_dict(),
+        self.report = dict(status='running', extraction='shell_sections', config=cfg.to_dict(),
                            input_identity=identity, inputs=inputs, stages={})
         if 'source_step_sha256' in mesh.report:
             self.report['source_step_sha256'] = mesh.report['source_step_sha256']
@@ -57,17 +58,59 @@ class Run:
         self.finish('failed')
 
 
+def export(graph, curves, patches, cfg, out):
+    from .occ_assembly import assemble_brep, verify_export_and_roundtrip
+
+    solid, mapping = assemble_brep(graph, curves, patches, cfg, out)
+    cad = verify_export_and_roundtrip(solid, graph, curves, patches, mapping, cfg, out)
+    return solid, mapping, cad
+
+
+def try_fast(mesh, graph, curves, cfg, run):
+    out = run.out
+    run.stage = 'fast_faces'
+    try:
+        proposed, patches, labels = recover_planar_faces(mesh, graph, curves, cfg)
+    except (ReconstructionError, np.linalg.LinAlgError) as exc:
+        if getattr(exc, 'code', None) == 'sample_timeout':
+            raise
+        run.record(dict(accepted=False, reason=getattr(exc, 'code', type(exc).__name__),
+                        details=getattr(exc, 'details', {})))
+        return None
+    run.record(dict(accepted=True, faces=proposed.face_count, **proposed.report['coarse_projection']))
+    run.stage = 'cad'
+    trial = out/'planar_trial'
+    trial.mkdir()
+    try:
+        solid,mapping,cad=export(proposed,curves,patches,cfg,trial)
+    except ReconstructionError as exc:
+        if exc.code=='sample_timeout':
+            raise
+        run.stage='fast_cad'
+        run.record(dict(accepted=False,reason=exc.code))
+        return None
+    for item in trial.iterdir():
+        shutil.move(item,out/item.name)
+    trial.rmdir()
+    np.savez_compressed(out/'face_regions.npz',vertices=mesh.vertices,triangles=mesh.triangles,face_labels=labels)
+    write_json(out/'logical_graph.json',proposed)
+    write_json(out/'face_patches.json',patches)
+    write_json(out/'logical_to_cad.json',mapping)
+    run.record(cad)
+    run.report.update(step_sha256=file_hash(out/'reconstruction.step'),face_method='coarse_projection')
+    return run.finish('solid_validated',solid=solid,graph=proposed,curves=curves,patches=patches)
+
+
 def run_route(mesh, provider, grid, cfg, run):
     out = run.out
     run.stage = 'wireframe'
-    shell = None
-    shell_report = {}
-    if cfg.extraction == 'mc' and provider.presence()[0] == 'present':
-        tick = time.monotonic()
-        shell, triangles, shell_report = extract_shell(grid, cfg)
-        shell_report['seconds'] = time.monotonic() - tick
-        np.savez_compressed(out / 'edge_shell.npz', vertices=shell, triangles=triangles)
-    graph, curves, support = recover_wireframe(grid, provider, cfg, shell)
+    tick = time.monotonic()
+    shell, triangles, e_report = extract_shell(grid,cfg,channel=1)
+    v_shell, v_faces, v_report = extract_shell(grid,cfg,channel=2)
+    shell_report = dict(edge=e_report, vertex=v_report, seconds=time.monotonic()-tick)
+    np.savez_compressed(out/'edge_shell.npz',vertices=shell,triangles=triangles)
+    np.savez_compressed(out/'vertex_shell.npz',vertices=v_shell,triangles=v_faces)
+    graph, curves, support = recover_wireframe(grid,provider,cfg,shell,triangles,v_shell,v_faces)
     write_json(out / 'wireframe.json', graph)
     write_json(out / 'curves.json', curves)
     np.savez_compressed(out / 'edge_support.npz', points=support)
@@ -80,12 +123,28 @@ def run_route(mesh, provider, grid, cfg, run):
         return run.finish(status, graph=graph, curves=curves)
     require(not incomplete, 'wireframe_unresolved', 'Unresolved branches remain in the wireframe')
 
+    if cfg.fast_faces and not cfg.hybrid_projection and cfg.stop_after=='solid':
+        fast = try_fast(mesh,graph,curves,cfg,run)
+        if fast is not None:
+            return fast
+
     def save_cut(cut, constraints):
         np.savez_compressed(out / 'split_mesh.npz', vertices=cut.vertices,
                             triangles=cut.triangles, constraints=constraints)
 
+    paths = {}
+    if cfg.hybrid_projection:
+        run.stage = 'coarse_projection'
+        radius = min(cfg.fine_spacing, cfg.feature_sdf_limit)
+        paths, _, projection = coarse_paths(mesh, graph, curves, radius, cfg.fine_spacing,
+                                            mesh_edges(mesh.triangles), allow_partial=True,
+                                            anchor_tolerance=min(radius, cfg.boundary_tolerance))
+        run.record(dict(coarse_edges=sorted(paths), precise_edges=sorted(set(curves) - paths.keys()),
+                        **projection))
+
     run.stage = 'split_mesh'
-    cut, labels, constraints = cut_surface(mesh, provider.oracle, graph, curves, cfg, save_partial=save_cut)
+    cut, labels, constraints = cut_surface(mesh, provider.oracle, graph, curves, cfg,
+                                          save_partial=save_cut, coarse_paths=paths)
     np.savez_compressed(out / 'split_mesh.npz', vertices=cut.vertices, triangles=cut.triangles,
                         face_labels=labels, constraints=constraints)
     write_json(out / 'logical_graph.json', graph)
@@ -94,18 +153,22 @@ def run_route(mesh, provider, grid, cfg, run):
         return run.finish('split_mesh_ready', graph=graph, curves=curves, mesh=cut, face_labels=labels)
 
     run.stage = 'surfaces'
-    patches = initialize_face_surfaces(cut, labels, graph, curves, provider, cfg)
+    patches, assembly_graph, assembly_curves, face_map, seams = fit_with_patch_fallback(
+        cut,labels,constraints,graph,curves,provider,cfg)
     write_json(out / 'face_patches.json', patches)
-    run.record(dict(faces=len(patches)))
+    run.record(dict(faces=len(patches),patch_seams=seams))
 
     run.stage = 'cad'
-    from .occ_assembly import assemble_brep, verify_export_and_roundtrip
-
-    solid, mapping = assemble_brep(graph, curves, patches, cfg, out)
-    cad = verify_export_and_roundtrip(solid, graph, curves, patches, mapping, cfg, out)
+    solid, mapping, cad = export(assembly_graph,assembly_curves,patches,cfg,out)
+    mapping['patch_to_logical_face']=face_map
+    mapping['internal_patch_seams']=seams
+    if seams:
+        write_json(out/'assembly_graph.json',assembly_graph)
+        write_json(out/'assembly_curves.json',assembly_curves)
     write_json(out / 'logical_to_cad.json', mapping)
     run.record(cad)
-    run.report['step_sha256'] = file_hash(out / 'reconstruction.step')
+    method = 'hybrid_projection' if cfg.hybrid_projection else 'cut_mesh'
+    run.report.update(step_sha256=file_hash(out / 'reconstruction.step'), face_method=method)
     return run.finish('solid_validated', solid=solid, graph=graph, curves=curves, patches=patches)
 
 
@@ -125,31 +188,7 @@ def reconstruct(mesh, udf, cfg, output_dir):
         run.record(grid.report)
         if cfg.stop_after == 'scout':
             return run.finish('scout_ready')
-        if cfg.extraction != 'both':
-            return run_route(mesh, provider, grid, cfg, run)
-
-        run.stage = 'comparison'
-        results = {}
-        for method in ('trace', 'mc'):
-            checkpoint(run.stage)
-            route_cfg = replace(cfg, extraction=method)
-            route = Run(run.out / method, mesh, udf, route_cfg)
-            route.report['scout_artifact'] = '../scout.npz'
-            route.write()
-            try:
-                results[method] = run_route(mesh, provider, grid, route_cfg, route)
-            except Exception as exc:
-                route.fail(exc)
-                results[method] = dict(report=route.report)
-                if getattr(exc, 'code', None) == 'sample_timeout':
-                    raise
-            run.report.setdefault('routes', {})[method] = route.report['status']
-            run.write()
-        failed = [name for name, status in run.report['routes'].items() if status == 'failed']
-        require(not failed, 'edge_first_comparison_failed', 'At least one route failed; see route reports',
-                routes=failed)
-        partial = any(status == 'wireframe_partial' for status in run.report['routes'].values())
-        return run.finish('comparison_partial' if partial else 'comparison_complete', routes=results)
+        return run_route(mesh, provider, grid, cfg, run)
     except Exception as exc:
         run.fail(exc)
         raise

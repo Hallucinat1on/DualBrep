@@ -17,7 +17,7 @@ from helpers import box,hollow_sphere
 class ContractTests(unittest.TestCase):
     def test_edge_first_defaults_and_removed_config(self):
         cfg=Config().validate()
-        self.assertEqual((cfg.coarse_spacing,cfg.fine_spacing,cfg.band_width,cfg.sample_timeout_seconds),(.012,.003,.02,10800.))
+        self.assertEqual((cfg.coarse_spacing,cfg.fine_spacing,cfg.band_width,cfg.sample_timeout_seconds),(.03,.003,.02,10800.))
         self.assertEqual(cfg.to_dict(), load_config(Path(__file__).resolve().parents[1] / 'configs/default.json').to_dict())
         for obsolete in ('resolution','refinement_max_rounds','max_triangles','face_second_pass','curve_recovery','region_repair','save_queries'):
             with self.assertRaises(ValueError):load_config(overrides={obsolete:257})
@@ -166,7 +166,7 @@ class ContractTests(unittest.TestCase):
         mesh,udf=box();cfg=Config()
         key,_=cache_key(mesh,udf,cfg)
         self.assertEqual(key,cache_key(mesh,udf,replace(cfg,stop_after='scout'))[0])
-        self.assertNotEqual(key,cache_key(mesh,udf,replace(cfg,extraction="mc"))[0])
-        self.assertNotEqual(key,cache_key(mesh,udf,replace(cfg,curve_fit_samples=800))[0])
+        self.assertNotEqual(key,cache_key(mesh,udf,replace(cfg,mc_udf_refine="sparse"))[0])
+        self.assertNotEqual(key,cache_key(mesh,udf,replace(cfg,middle_spacing=.006))[0])
         udf.band_width=.03;self.assertNotEqual(key,cache_key(mesh,udf,cfg)[0]);udf.band_width=.02
         mesh.vertices[0,0]+=.001;self.assertNotEqual(key,cache_key(mesh,udf,cfg)[0]);mesh.vertices[0,0]-=.001

@@ -6,6 +6,7 @@
 | 当前网格到 STEP 入口 | [边优先重建 README](../band_brep_reconstruction/README.md) |
 | 历史面优先流程 | [Post1109.md](Post1109.md) |
 | 粗网格与扫描件条件下的边优先方案 | [ScanEdgeFirst.md](ScanEdgeFirst.md) |
+| 边优先流程优化：分层查询、MC 中心线、分面及 patch | [MCShellCenterline.md](MCShellCenterline.md) |
 | 目录归属与可清理项 | [Cleanup.md](Cleanup.md) |
 | 原 DualBrep 源码和原理解读 | [原版 README](../legacy_dualbrep/README.md) · [DualBrep.md](../legacy_dualbrep/DualBrep.md) |
 | 历史成绩、协议和冻结命令 | [Experiment.md](Experiment.md) · [Post1116.md](Post1116.md) |

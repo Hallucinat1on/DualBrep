@@ -34,7 +34,8 @@ def evaluate(source_step, output):
     _, oracle = weld(raw, cfg)
     source = offline_source(targets, raw, oracle, normalization)
 
-    with np.load(output / 'split_mesh.npz', allow_pickle=False) as archive:
+    region_file = 'face_regions.npz' if run.get('face_method') == 'coarse_projection' else 'split_mesh.npz'
+    with np.load(output / region_file, allow_pickle=False) as archive:
         mesh = SurfaceMesh(archive['vertices'], archive['triangles'])
         face_labels = archive['face_labels']
     data = json.loads((output / 'logical_graph.json').read_text())

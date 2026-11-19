@@ -1,12 +1,16 @@
 {
-  "coarse_spacing": 0.012,
+  "coarse_spacing": 0.03,
+  "middle_spacing": 0.015,
   "fine_spacing": 0.003,
   "band_width": 0.02,
   "shell_radius": 0.005,
   "coarse_error_margin": 0.0,
   "support_radius": 0.007,
   "scout_point_budget": 4000000,
-  "extraction": "trace",
+  "vertex_level": 0.005,
+  "mc_udf_refine": "off",
+  "fast_faces": true,
+  "patch_budget": 4,
   "query_batch_size": 65536,
   "sample_timeout_seconds": 10800.0,
   "field_error": 0.0002,
@@ -22,9 +26,5 @@
   "uv_iterations": 4,
   "seed": 0,
   "stop_after": "solid",
-  "curve_init_samples": 256,
-  "curve_fit_samples": 512,
-  "curve_refine_samples": 2048,
-  "curve_distance_iterations": 15,
   "feature_sdf_tolerance": 0.004
 }

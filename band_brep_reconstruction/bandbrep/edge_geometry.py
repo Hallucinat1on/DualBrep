@@ -1,44 +1,9 @@
-"""UDF localization inside instantiated supports, followed by geometric ordering.
-
-No arrival-cost interface or vertex port is used to create edge identities.
-Closed/self-loop handling here belongs to geometric postprocessing, not incidence.
-"""
-from .field_provider import bounded_update
-from .surface_mesh import evaluate_batched
+"""Order spatial samples of geometric shell sections."""
 import numpy as np
 from scipy.spatial import cKDTree
 from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import minimum_spanning_tree, dijkstra, connected_components
 from .schemas import require
-
-
-def project_support(points, provider, radius, cfg, *, max_iterations=8, stats=None):
-    original=np.asarray(points,float);q=original.copy()
-    values=evaluate_batched(provider,q);movable=np.ones(len(q),bool)
-    if stats is not None:stats.update(iterations=0,gradient_rows=0)
-    for _ in range(max_iterations):
-        ids=np.flatnonzero(movable&(values[:,1]>cfg.curve_tolerance*.02))
-        if not len(ids):break
-        if stats is not None:
-            stats['iterations']+=1;stats['gradient_rows']+=len(ids)
-        if hasattr(provider,'gradient_from_values'):
-            g,valid=provider.gradient_from_values(q[ids],1,values[ids])
-        else:g,valid=provider.gradient(q[ids],1)
-        norm=np.linalg.norm(g,axis=1);good=valid&(norm>1e-10)
-        movable[ids[~good]]=False;ids=ids[good]
-        if not len(ids):continue
-        proposed=q[ids]-.8*np.minimum(values[ids,1],radius*.3)[:,None]*g[good]/norm[good,None]
-        proposed=bounded_update(provider,q[ids],proposed)
-        safe=(np.linalg.norm(proposed-original[ids],axis=1)<=radius)
-        moved=np.linalg.norm(proposed-q[ids],axis=1)>1e-14
-        movable[ids[~safe|~moved]]=False
-        ids=ids[safe&moved];q[ids]=proposed[safe&moved]
-        if len(ids):values[ids]=evaluate_batched(provider,q[ids])
-    v=evaluate_batched(provider,q)
-    valid=(v[:,1]<=cfg.curve_tolerance)&(np.abs(v[:,0])<=cfg.feature_sdf_limit)
-    require(valid.sum()>=3 and valid.mean()>=.8,'edge_localization_failed',
-            'Band samples do not consistently localize to an edge',localized=int(valid.sum()),total=len(q))
-    return q[valid]
 
 
 def circle_order(points, data, ends, cfg):

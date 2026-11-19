@@ -48,6 +48,7 @@ class SurfaceCut:
         self.edge_nodes = defaultdict(set)
         self.cuts = defaultdict(list)
         self.barriers = {}
+        self.coarse_barriers = {}
 
     @staticmethod
     def key(point):
@@ -124,9 +125,18 @@ class SurfaceCut:
             last, dst = before, node
         return [(last, src, dst)] + parts[::-1]
 
-    def embed(self, graph, curves, spacing):
-        shared = {}
+    def embed(self, graph, curves, spacing, coarse_paths):
+        mesh_anchors = {}
         for edge in graph.edges:
+            if edge.id in coarse_paths:
+                path = coarse_paths[edge.id]
+                mesh_anchors.update(zip(edge.vertices, (path[0], path[-1])))
+                for u, v in zip(path, path[1:]):
+                    self.coarse_barriers[(min(u, v), max(u, v))] = (edge.id, u, v)
+        shared = {vertex: (node, self.vertex_faces[node]) for vertex, node in mesh_anchors.items()}
+        for edge in graph.edges:
+            if edge.id in coarse_paths:
+                continue
             checkpoint('edge_first_embedding')
             curve = curves[edge.id]
             coarse = curve.evaluate(np.linspace(0, 1, 129))
@@ -136,7 +146,18 @@ class SurfaceCut:
             sq, tids, projected = self.oracle.closest(q)
             require(sq.max() <= self.tolerance ** 2, 'curve_embedding_offset',
                     'Curve is too far from the input surface', edge=edge.id, offset=float(np.sqrt(sq.max())))
-            anchors = [self.locate(f, p) for f, p in zip(tids, projected)]
+            endpoints = dict(zip((0, len(q) - 1), edge.vertices))
+            anchors = []
+            for i, (f, p) in enumerate(zip(tids, projected)):
+                vertex = endpoints.get(i)
+                if vertex in mesh_anchors:
+                    anchor = shared[vertex]
+                    require(np.linalg.norm(self.points[anchor[0]] - p) <= self.tolerance,
+                            'curve_embedding_vertex_conflict', 'Coarse endpoint and exact projection differ',
+                            vertex=vertex, edge=edge.id)
+                    anchors.append(anchor)
+                else:
+                    anchors.append(self.locate(f, p))
             if edge.vertices:
                 for index, vertex in zip((0, -1), edge.vertices):
                     anchor = shared.setdefault(vertex, anchors[index])
@@ -166,7 +187,18 @@ class SurfaceCut:
                 return [node for _, node in sorted(nodes)]
         return [a, b]
 
+    def add_barrier(self, u, v, eid):
+        key = (min(u, v), max(u, v))
+        old = self.barriers.setdefault(key, (eid, u, v))
+        require(old == (eid, u, v), 'curve_embedding_overlap',
+                'Barriers overlap or backtrack on the surface', edge=eid, other_edge=old[0])
+
     def triangulate(self):
+        for key, (eid, u, v) in self.coarse_barriers.items():
+            face = self.edge_faces[key][0]
+            nodes = self._expanded(face, u, v)
+            for a, b in zip(nodes, nodes[1:]):
+                self.add_barrier(a, b, eid)
         triangles = []
         for fid, face in enumerate(self.mesh.triangles):
             if fid % 512 == 0:
@@ -190,9 +222,7 @@ class SurfaceCut:
                     key = tuple(sorted((u, v)))
                     segments.add(key)
                     if eid is not None:
-                        old = self.barriers.setdefault(key, (eid, u, v))
-                        require(old == (eid, u, v), 'curve_embedding_overlap',
-                                'Barriers overlap or backtrack on the surface', edge=eid)
+                        self.add_barrier(u, v, eid)
 
             for u, v in zip(face, np.roll(face, -1)):
                 add_segments(self._expanded(fid, u, v))
@@ -211,41 +241,50 @@ class SurfaceCut:
                     triangles.append([uv_to_id[tuple(p)] for p in coordinates])
         return SurfaceMesh(np.asarray(self.points), np.array(triangles), dict(self.mesh.report))
 
-    def label(self, cut, graph):
-        incidence = defaultdict(list)
-        internal = []
-        for fid, triangle in enumerate(cut.triangles):
-            for u, v in zip(triangle, np.roll(triangle, -1)):
-                incidence[tuple(sorted((u, v)))].append((fid, u, v))
-        for key, uses in incidence.items():
-            require(len(uses) == 2 and uses[0][1:] == uses[1][1:][::-1], 'cut_mesh_nonmanifold',
-                    'Cutting produced incompatible shared triangle edges')
-            if key not in self.barriers:
-                internal.append([use[0] for use in uses])
-        graph.face_count, labels = components(np.asarray(internal, dtype=int).reshape(-1, 2), len(cut.triangles))
-        sides = defaultdict(set)
-        for key, (eid, u, v) in self.barriers.items():
-            require(key in incidence, 'curve_embedding_missing_cut', 'Constraint was not embedded into the mesh', edge=eid)
-            left, right = incidence[key]
-            if left[1:] != (u, v):
-                left, right = right, left
-            sides[eid].add((int(labels[left[0]]), int(labels[right[0]])))
-        for edge in graph.edges:
-            pair = sides[edge.id]
-            require(len(pair) == 1 and all(a != b for a, b in pair), 'edge_neighbors_unresolved',
-                    'Projected boundary must separate two consistently oriented faces', edge=edge.id, sides=sorted(pair))
-            edge.faces = next(iter(pair))
-            edge.left_face = edge.faces[0]
-        complete_face_regions_and_cycles(graph)
-        return labels
+def label_barriers(triangles, graph, barriers, edge_index=None):
+    """Group original or cut triangles and assign the oriented sides of each barrier."""
+    edges, inverse, counts = mesh_edges(triangles) if edge_index is None else edge_index
+    require(np.all(counts == 2), 'cut_mesh_nonmanifold',
+            'Each mesh edge must have two incident triangles')
+    halfedges = np.argsort(inverse.ravel(), kind='stable').reshape(-1, 2)
+    starts = triangles.ravel()[halfedges]
+    require(np.all(starts[:, 0] != starts[:, 1]), 'cut_mesh_nonmanifold',
+            'Shared edges must have opposite triangle directions')
+    adjacent = halfedges // 3
+
+    keys = np.asarray(list(barriers), dtype=np.int64).reshape(-1, 2)
+    base = int(triangles.max()) + 1
+    edge_keys = edges[:, 0] * base + edges[:, 1]
+    barrier_keys = keys[:, 0] * base + keys[:, 1]
+    selected = np.searchsorted(edge_keys, barrier_keys)
+    require(np.all(selected < len(edges)) and np.array_equal(edges[selected], keys),
+            'curve_embedding_missing_cut', 'Constraint was not embedded into the mesh')
+    allowed = np.ones(len(edges), dtype=bool)
+    allowed[selected] = False
+    graph.face_count, labels = components(adjacent[allowed], len(triangles))
+
+    sides = defaultdict(set)
+    for index, (eid, start, _) in zip(selected, barriers.values()):
+        left, right = labels[adjacent[index]]
+        if starts[index, 0] != start:
+            left, right = right, left
+        sides[eid].add((int(left), int(right)))
+    for edge in graph.edges:
+        pair = sides[edge.id]
+        require(len(pair) == 1 and all(a != b for a, b in pair), 'edge_neighbors_unresolved',
+                'Projected boundary must separate two consistently oriented faces', edge=edge.id, sides=sorted(pair))
+        edge.faces = next(iter(pair))
+        edge.left_face = edge.faces[0]
+    complete_face_regions_and_cycles(graph)
+    return labels
 
 
-def cut_surface(mesh, oracle, graph, curves, cfg, *, save_partial=None):
+def cut_surface(mesh, oracle, graph, curves, cfg, *, save_partial=None, coarse_paths=None):
     cutter = SurfaceCut(mesh, oracle, cfg.feature_sdf_limit)
-    cutter.embed(graph, curves, cfg.fine_spacing)
+    cutter.embed(graph, curves, cfg.fine_spacing, coarse_paths or {})
     cut = cutter.triangulate()
     # Preserve the constraint-to-curve map, including on label failure.
     constraints = np.asarray(list(cutter.barriers.values()), dtype=int).reshape(-1, 3)
     if save_partial is not None:
         save_partial(cut, constraints)
-    return cut, cutter.label(cut, graph), constraints
+    return cut, label_barriers(cut.triangles, graph, cutter.barriers), constraints

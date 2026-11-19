@@ -5,14 +5,19 @@ from pathlib import Path
 
 @dataclass
 class Config:
-    coarse_spacing: float = 0.012
+    coarse_spacing: float = 0.03
+    middle_spacing: float = 0.015
     fine_spacing: float = 0.003
     band_width: float = 0.02
     shell_radius: float = 0.005
     coarse_error_margin: float = 0.0
     support_radius: float = 0.007
     scout_point_budget: int = 4000000
-    extraction: str = 'trace'
+    vertex_level: float = 0.005
+    mc_udf_refine: str = 'off'
+    fast_faces: bool = True
+    hybrid_projection: bool = False
+    patch_budget: int = 4
     query_batch_size: int = 65536
     sample_timeout_seconds: float = 10800.0
     field_error: float = 0.0002
@@ -28,10 +33,6 @@ class Config:
     uv_iterations: int = 4
     seed: int = 0
     stop_after: str = 'solid'
-    curve_init_samples: int = 256
-    curve_fit_samples: int = 512
-    curve_refine_samples: int = 2048
-    curve_distance_iterations: int = 15
     feature_sdf_tolerance: float = 0.004
 
     @property
@@ -39,29 +40,28 @@ class Config:
         return self.feature_sdf_tolerance
 
     def validate(self):
-        for key in ('query_batch_size','max_segments','scout_point_budget',
-                    'face_samples','spline_controls','max_spline_controls','uv_iterations',
-                    'curve_init_samples','curve_fit_samples','curve_refine_samples','curve_distance_iterations'):
+        for key in ('query_batch_size','max_segments','scout_point_budget','patch_budget',
+                    'face_samples','spline_controls','max_spline_controls','uv_iterations'):
             v = getattr(self,key)
             if type(v) is not int or v < 1: raise ValueError(f'{key} must be a positive integer')
         if self.spline_controls < 4 or self.max_spline_controls < self.spline_controls:
             raise ValueError('invalid spline controls')
-        if not (8 <= self.curve_init_samples <= self.curve_fit_samples <= self.curve_refine_samples):
-            raise ValueError('Require 8 <= curve_init_samples <= curve_fit_samples <= curve_refine_samples')
-        for key in ('coarse_spacing','fine_spacing','band_width','shell_radius','support_radius',
+        for key in ('coarse_spacing','middle_spacing','fine_spacing','band_width','shell_radius','vertex_level','support_radius',
                     'sample_timeout_seconds','field_error','surface_tolerance','localization_tolerance',
                     'curve_tolerance','feature_sdf_tolerance','boundary_tolerance','cad_tolerance'):
             v = getattr(self,key)
             if isinstance(v,bool) or not math.isfinite(v) or v <= 0: raise ValueError(f'invalid {key}')
-        factor = self.coarse_spacing / self.fine_spacing
-        if not (1 <= round(factor) <= 16 and math.isclose(factor, round(factor))):
-            raise ValueError('coarse_spacing must be an integer multiple (1–16) of fine_spacing')
-        if self.shell_radius >= self.band_width:
-            raise ValueError('shell_radius must be smaller than band_width')
+        for factor in (self.coarse_spacing/self.middle_spacing, self.middle_spacing/self.fine_spacing):
+            if not (1 <= round(factor) <= 16 and math.isclose(factor, round(factor))):
+                raise ValueError('Each grid spacing must be an integer multiple (1–16) of the next')
+        if max(self.shell_radius, self.vertex_level) >= self.band_width:
+            raise ValueError('Shell levels must be smaller than band_width')
         if not math.isfinite(self.coarse_error_margin) or self.coarse_error_margin < 0:
             raise ValueError('coarse_error_margin must be non-negative')
-        if self.extraction not in ('trace', 'mc', 'both'):
-            raise ValueError('extraction must be trace, mc, or both')
+        if type(self.hybrid_projection) is not bool:
+            raise ValueError('hybrid_projection must be a boolean')
+        if self.mc_udf_refine not in ('off', 'sparse') or type(self.fast_faces) is not bool:
+            raise ValueError('Use mc_udf_refine=off or sparse and a boolean fast_faces')
         if self.stop_after not in ('scout','wireframe','split_mesh','solid'):
             raise ValueError('invalid stop_after')
         return self

@@ -22,22 +22,24 @@ def offline_source(targets, raw, oracle, normalization):
     )
 
 
-def dominant(component, truth, count, truth_count):
+def dominant(component, truth, count, truth_count, weights):
     active=(component>=0)&(truth>=0)
     if not count:return np.empty(0,int),np.empty(0,int),np.empty(0,bool)
-    h=coo_matrix((np.ones(active.sum()),(component[active],truth[active])),shape=(count,max(truth_count,1))).toarray()
-    size=h.sum(1).astype(int);sorted_h=np.sort(h,axis=1)
+    h=coo_matrix((weights[active],(component[active],truth[active])),shape=(count,max(truth_count,1))).toarray()
+    size=h.sum(1);sorted_h=np.sort(h,axis=1)
     second=sorted_h[:,-2] if h.shape[1]>1 else np.zeros(count)
     owner=h.argmax(1);owner[size==0]=-1
-    return owner,size,second>=np.maximum(3,.05*size)
+    return owner,size,(size>0)&(second>=.05*size)
 
 
 def score(mesh, face_labels, graph, curves, source, tolerance=.002):
     """Offline instance matching on the actual cut mesh and fitted wireframe."""
     targets = source.targets
     nf, ne, nv = len(targets.faces), len(targets.edges), len(targets.vertices)
-    centers = mesh.vertices[mesh.triangles].mean(axis=1)
-    face_map, sizes, mixed = dominant(face_labels, source.truth_face(centers), graph.face_count, nf)
+    tri = mesh.vertices[mesh.triangles]
+    centers = tri.mean(axis=1)
+    weights = .5*np.linalg.norm(np.cross(tri[:,1]-tri[:,0],tri[:,2]-tri[:,0]),axis=1)
+    face_map, sizes, mixed = dominant(face_labels, source.truth_face(centers), graph.face_count, nf, weights)
     face_map[(sizes == 0) | mixed] = -1
     vertex_map = np.full(len(graph.vertices), -1, int)
     if nv and len(vertex_map):

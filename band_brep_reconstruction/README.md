@@ -1,26 +1,23 @@
-# 从网格和 E/V-UDF 恢复边、面及 STEP
+# 从 E/V 管壳到 B-rep
 
-当前分支实现 [边优先方案](../docs/ScanEdgeFirst.md)。首版输入为闭合、方向一致、已归一化的三角网格与可连续查询的 E/V。历史面优先流程见 [Post1109](../docs/Post1109.md)。
+实现 [边优先优化方案](../docs/MCShellCenterline.md)。当前输入为闭合、方向一致、已归一化的三角网格与连续 E/V 查询。STEP 入口用一次归一化得到网格和生产 v3 的精确 CAD E/V 查询，真值拓扑只用于评分。
 
-在具备 Python 3.10+、OCC 7.7 和 libigl 2.6.3 的环境从仓库根目录安装：
+在含 Python 3.10+、OCC 7.7 和 libigl 2.6.3 的环境，从仓库根目录运行：
 
 ```bash
 python -m pip install -e ./veudf -e './band_brep_reconstruction[test]'
-band-brep-reconstruct --step source.step --extraction trace --output trace_run
-band-brep-reconstruct --step source.step --extraction mc --output mc_run
-# 共用一份粗细查询，分别写出两路产物
-band-brep-reconstruct --step source.step --extraction both --output paired_run
+band-brep-reconstruct --step source.step --output run
 ```
-
-STEP 入口用同一次归一化得到输入网格和生产 v3 的精确 CAD E/V 查询。全直边模型用批量有限线段距离，其他曲线沿用生产参考 oracle。重建器只接收网格、标量场及其有效性与存在性。CAD 实例 ID 和关联保留在离线评分侧。
 
 | 阶段 | 方法与产物 |
 |---|---|
-| `scout` | 近表面稀疏粗块 (H=0.012) 与候选细格 (h=0.003)，E/V 查询位置按整型格点去重。距输入网格 0.015 内优先，外层仍查询，中心无效时探查角点。有效带最多 0.02。输出 `scout.npz` |
-| `wireframe` | `trace` 投影带内低 E 样本，沿局部切向双向连接。 `mc` 提取有效单元中的 (E=0.005) 管壳，再将壳顶点向 E 低谷投影和去重，形成骨架支撑。两者通过 V 定位、验证短边候选及固定端点距离拟合得到 `wireframe.json`、`curves.json`。MC 另存 `edge_shell.npz` |
-| `split_mesh` | 将三维曲线嵌入网格副本，沿局部路径插入边界约束。由切口的有向两侧确定面标签、E–F 关系和有向环。输出 `split_mesh.npz` 和 `logical_graph.json` |
-| `solid` | 解析面或有约束的 B 样条、共享边装配及 STEP 读回。通过时输出 `reconstruction.step` |
+| `scout` | 按 `0.03 → 0.015 → 0.003` 分层筛选近表面块，整数格点去重并记录各层查询量。输出 `scout.npz` |
+| `wireframe` | 在角值均有效的细格上分别提取 E 管壳和 V 球壳。从管壳几何截面估计中心线，从球壳拟合球心和半径，再做球面切断及固定端点的参数边拟合。输出 `edge_shell.npz`、`vertex_shell.npz`、`wireframe.json` 和 `curves.json` |
+| 面拓扑及拟合 | 将线框粗投影到原网格的边，按屏障划分面域，在面域内按面积采点做平面 RANSAC。通过边界和装配验收时写 `face_regions.npz`，其中保存原网格及面标签。其余样本用 `split_mesh.npz`，自由面拟合失败时尝试在已有边界顶点之间增加内部 patch 接缝 |
+| `solid` | 共享边和 pcurve、周期面接缝及 STEP 导出读回。裁剪结果写 `logical_graph.json`。若增加内部 patch，另存装配图及 CAD patch 到逻辑面映射 |
 
-`--stop-after` 可指定上述阶段。数值配置见 [default.json](configs/default.json)，`--config` 可覆盖参数。`scout_point_budget` 限制粗块数量和细格去重前的角点分配量。每次使用空输出目录。 `run.json`、`quality.json` 记录输入身份、阶段用时及失败诊断，失败时保留上游已生成的几何。使用 `both` 时，父目录保留通用查询数据，`trace/` 和 `mc/` 分别记录重建结果及耗时。任一路失败时，配对命令返回失败。
+`mc_udf_refine` 默认 `off`，出壳后提取、拟合及验收线框时只用几何和缓存 E/V。启用 `sparse` 可在有限中心点补查标量 E，按横向对称性接受位置修正。可用 `fast_faces=false` 直接走精确切面，`patch_budget=1` 禁用内部接缝回退。其他参数见 [default.json](configs/default.json)。
 
-Python 入口为 `bandbrep.edge_first.reconstruct(mesh, udf, Config(), output_dir)`。可通过 `CallableUDFProvider` 接入已归一化坐标中的连续 E/V，明确通道是否存在。首版针对同源 STEP 网格和精确场。开放点云、预测噪声与扫描纠偏需要另行验证。MC 的管壳投影是近似骨架方法，近邻分支合并、截断区和缺失支撑需查看诊断。离线评分见 [benchmarks/](benchmarks/README.md)。
+`--stop-after scout|wireframe|split_mesh|solid` 控制实验终点，`split_mesh` 强制走切面路径。每次使用空输出目录。通过时写出 `reconstruction.step`。失败保留上游几何和 `run.json`、`quality.json`。Python 入口为 `bandbrep.edge_first.reconstruct(mesh, udf, Config(), output_dir)`。
+
+实现的截面提取以三轴切片覆盖不同方向，接受稳定的闭合截面。无可信截面、管壳融合、自由面缺少可切内部路径等情况会保留失败诊断。开放扫描和带模型噪声的完整重建仍需独立验证。离线评分见 [benchmarks/](benchmarks/README.md)。

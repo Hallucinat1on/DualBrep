@@ -14,11 +14,10 @@ def main():
     parser.add_argument("--step", type=Path, required=True, help="source CAD used for the mesh and exact E/V")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--config", type=Path, help="override numerical reconstruction parameters")
-    parser.add_argument("--extraction", choices=("trace", "mc", "both"), help="wireframe extraction method")
     parser.add_argument("--stop-after", choices=("scout", "wireframe", "split_mesh", "solid"))
     args = parser.parse_args()
     try:
-        cfg = load_config(args.config, {"stop_after": args.stop_after, "extraction": args.extraction})
+        cfg = load_config(args.config, {"stop_after": args.stop_after})
         with sample_budget(cfg.sample_timeout_seconds):
             mesh, udf = load_cad_source(args.step, file_hash(args.step))
             reconstruct(mesh, udf, cfg, args.output)

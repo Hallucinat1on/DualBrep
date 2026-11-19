@@ -2,7 +2,7 @@
 
 更新：2026-11-19。后续数据处理以 `/opt/data/private/yihengxu/Hunyuan3D/veudf` 为唯一生产来源，本仓库使用同步的 [veudf/](../veudf/README.md)。
 
-源码、测试、配置、打包文件和生产工具按 [SOURCE.json](../veudf/SOURCE.json) 记录 SHA-256。同步命令为 `python scripts/sync_veudf.py --apply`，只读检查为 `--check`；新功能在生产目录开发后再同步。安装与命令行示例维护在[模块 README](../veudf/README.md)。
+源码、测试、配置、打包文件和生产工具按 [SOURCE.json](../veudf/SOURCE.json) 记录 SHA-256。同步命令为 `python sync_veudf.py --apply`，只读检查为 `--check`；新功能在生产目录开发后再同步。安装与命令行示例维护在[模块 README](../veudf/README.md)。
 
 当前 schema 为 `edge_vertex_neighborhood_pools_v3`。历史 v1 和 F30 数据保留在原批次，见[实验记录](Experiment.md)。
 
@@ -45,7 +45,7 @@ E/V 仍对应 CAD，网格表面不一定精确经过 CAD 边，因此不能无�
 
 独立评估调用 `ReferenceEdgeOracle` 和 `ReferenceVertexOracle` 查询完整距离。审计还会对有限采样用穷举 CAD 边核验标签。生产第一通道始终取 `s_mesh`，CAD SDF 用于参考审计。[精确距离实现](../veudf/src/veudf/preprocess/reference.py)
 
-产物保存标量距离和有效标签信息。Post1109 通过空间邻点查询连续 E/V，再用中心差分计算梯度。[后处理流程](Post1109.md#field-query)
+产物保存标量距离和有效标签信息。边优先重建通过空间邻点查询连续 E/V，再用中心差分计算梯度。[后处理流程](ScanEdgeFirst.md)
 
 ## 4. 普通点池、零集与独立评估
 
@@ -124,4 +124,4 @@ manifest 按 ABC 源文档分组、处理字节重复并固定 split。构建逐
 
 v3 构建使用新数据根目录。发布索引会校验 schema，续跑会校验配置、代码、清单和依赖身份。历史 v1 数据作为归档保留。几何 condition 的版本和数组契约保持一致。
 
-Post1109 的 STEP 入口调用生产版的精确 reference 距离。新实验从源 STEP 或 v3 几何 condition 起跑，使用当前代码重新计算前缀。训练点池用于离散监督，重建时需提供能在任意查询位置求值的连续 E/V。预测适配器应保留 E/V 存在性和饱和掩码。若必需的查询点落在饱和区，模板会拒绝该查询。[重建入口](../band_brep_reconstruction/README.md)
+重建的 STEP 入口调用生产版的精确 reference 距离。新实验从源 STEP 或 v3 几何 condition 起跑，使用当前代码重新计算前缀。训练点池用于离散监督，重建时需提供能在任意查询位置求值的连续 E/V。预测适配器应保留 E/V 存在性和饱和掩码。若必需的查询点落在饱和区，模板会拒绝该查询。[重建入口](../band_brep_reconstruction/README.md)

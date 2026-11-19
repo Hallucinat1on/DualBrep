@@ -1,99 +1,28 @@
-import json
-import tempfile
-import unittest
-from dataclasses import replace
-from pathlib import Path
+"""Both extraction routes must produce a strictly shared edge graph and STEP."""
 import numpy as np
+import pytest
+
 from bandbrep.config import Config
-from bandbrep.reconstruct import reconstruct
-from bandbrep.schemas import ReconstructionError
-from helpers import box,cylinder,hollow_sphere,sphere_with_bore
+from bandbrep.edge_first import reconstruct
+from helpers import box, cylinder
 
 
-class PipelineTests(unittest.TestCase):
-    def test_direct_distance_box_and_closed_circle_step(self):
-        for factory,expected in ((box,(6,12,8)),(cylinder,(3,2,0))):
-            with self.subTest(shape=factory.__name__),tempfile.TemporaryDirectory() as tmp:
-                mesh,udf=factory()
-                result=reconstruct(mesh,udf,Config(face_samples=400),tmp)
-                graph=result['graph']
-                self.assertEqual((graph.face_count,len(graph.edges),len(graph.vertices)),expected)
-                self.assertEqual(result['report']['status'],'solid_validated')
-                report=next(s['report'] for s in result['report']['stages'] if s['stage']=='curves')
-                self.assertEqual(report['method'],'direct_distance')
-                self.assertEqual(report['distance_fitting']['residual_kind'],'distance_observation')
-    def test_box_resume_vertices_to_step(self):
-        mesh,udf=box()
-        from veudf.geometry.sampling import mesh_hash
-        udf.mesh_fingerprint=mesh_hash(mesh.vertices,mesh.triangles)
-        cfg=Config(face_samples=400,stop_after='vertices')
-        with tempfile.TemporaryDirectory() as tmp:
-            result=reconstruct(mesh,udf,cfg,tmp)
-            self.assertEqual(result['status'],'vertices_ready')
-            result=reconstruct(mesh,udf,replace(cfg,stop_after='solid'),tmp,resume=True)
-            g=result['graph']
-            self.assertEqual((g.face_count,len(g.edges),len(g.vertices)),(6,12,8))
-            self.assertEqual(result['report']['status'],'solid_validated')
-            self.assertTrue((Path(tmp)/'reconstruction.step').exists())
-            a=np.load(Path(tmp)/'input_mesh.npz');np.testing.assert_array_equal(a['vertices'],mesh.vertices)
-            self.assertFalse((Path(tmp)/'sdf_surface.npz').exists())
-            self.assertEqual(json.loads((Path(tmp)/'run.json').read_text())['stages'][0]['stage'],'mesh')
-            run=json.loads((Path(tmp)/'run.json').read_text())
-            self.assertEqual([s['stage'] for s in run['stages'][:3]],['mesh','coarse_refinement','fine_refinement'])
-            band_report=next(s['report'] for s in run['stages'] if s['stage']=='bands')
-            self.assertTrue(band_report['reused_center_queries'])
-            self.assertEqual(band_report['field_query_points'],0)
-            self.assertTrue((Path(tmp)/'coarse_mesh.npz').exists())
-            self.assertTrue((Path(tmp)/'center_fields.npz').exists())
-            self.assertFalse((Path(tmp)/'refinement_progress.json').exists())
-            # Refinement preserves the original geometry, with each child tied to a parent.
-            a=np.load(Path(tmp)/'working_mesh.npz');self.assertEqual(len(a['triangles']),len(a['parent_triangles']))
-
-    def test_cylinder_full_step(self):
-        mesh,udf=cylinder()
-        with tempfile.TemporaryDirectory() as tmp:
-            result=reconstruct(mesh,udf,Config(face_samples=400),tmp)
-            g=result['graph'];self.assertEqual((g.face_count,len(g.edges),len(g.vertices)),(3,2,0))
-            self.assertEqual(result['report']['status'],'solid_validated')
-
-    def test_cavity_absent_fields_and_resume(self):
-        mesh,udf=hollow_sphere();cfg=Config(stop_after='seeds')
-        with tempfile.TemporaryDirectory() as tmp:
-            reconstruct(mesh,udf,cfg,tmp)
-            result=reconstruct(mesh,udf,replace(cfg,stop_after='solid'),tmp,resume=True)
-            g=result['graph'];self.assertEqual((g.face_count,len(g.edges),len(g.vertices)),(2,0,0))
-            self.assertEqual(result['report']['status'],'solid_validated')
-
-    def test_sample_timeout_writes_failure(self):
-        mesh,udf=box()
-        with tempfile.TemporaryDirectory() as tmp:
-            with self.assertRaises(ReconstructionError) as ctx:reconstruct(mesh,udf,Config(sample_timeout_seconds=.001),tmp)
-            self.assertEqual(ctx.exception.code,'sample_timeout')
-            report=json.loads((Path(tmp)/'quality.json').read_text())
-            self.assertIn(report['failed_stage'],('mesh','coarse_refinement'));self.assertEqual(report['status'],'failed')
-            self.assertFalse((Path(tmp)/'reconstruction.step').exists())
-
-    def test_same_face_pair_two_loops_step(self):
-        mesh,udf=sphere_with_bore()
-        with tempfile.TemporaryDirectory() as tmp:
-            result=reconstruct(mesh,udf,Config(face_samples=400),tmp)
-            g=result['graph'];self.assertEqual((g.face_count,len(g.edges),len(g.vertices)),(2,2,0))
-            self.assertEqual(g.edges[0].faces,g.edges[1].faces)
-            self.assertEqual(result['report']['status'],'solid_validated')
-
-    def test_resume_after_fine_failure_reuses_completed_coarse_stage(self):
-        from unittest.mock import patch
-        mesh,udf=hollow_sphere()
-        cfg=Config(stop_after='seeds',refinement_coarse_edge=.1,refinement_target_edge=.05)
-        with tempfile.TemporaryDirectory() as tmp:
-            with patch('bandbrep.reconstruct.fine_refine_surface',side_effect=ReconstructionError('probe_failure','test failure')):
-                with self.assertRaises(ReconstructionError):reconstruct(mesh,udf,cfg,tmp)
-            run=json.loads((Path(tmp)/'run.json').read_text())
-            self.assertEqual(run['failed_stage'],'fine_refinement')
-            self.assertEqual([s['stage'] for s in run['stages']],['mesh','coarse_refinement'])
-            self.assertNotIn('coarse_refinement_progress.json',run['artifacts'])
-            # Ephemeral progress is excluded from immutable stage caches.
-            (Path(tmp)/'coarse_refinement_progress.json').write_text('{}')
-            with patch('bandbrep.reconstruct.coarse_refine_surface',side_effect=AssertionError('coarse rerun')):
-                result=reconstruct(mesh,udf,cfg,tmp,resume=True)
-            self.assertEqual(result['status'],'face_seeds_ready')
+@pytest.mark.parametrize('extraction', ['trace', 'mc'])
+@pytest.mark.parametrize('factory,expected', [(box, (6, 12, 8)), (cylinder, (3, 2, 0))])
+def test_edge_first_step(tmp_path, extraction, factory, expected):
+    mesh, udf = factory()
+    result = reconstruct(mesh, udf, Config(extraction=extraction, face_samples=200), tmp_path)
+    graph = result['graph']
+    assert (graph.face_count, len(graph.edges), len(graph.vertices)) == expected
+    assert result['report']['stages']['cad']['roundtrip_checked']
+    assert (tmp_path / 'reconstruction.step').is_file()
+    assert (tmp_path / 'edge_shell.npz').exists() == (extraction == 'mc')
+    for edge in graph.edges:
+        assert len(set(edge.faces)) == 2
+        if edge.vertices:
+            np.testing.assert_allclose(
+                result['curves'][edge.id].evaluate(np.array([0., 1.])),
+                [graph.vertices[i].position for i in edge.vertices], atol=1e-8,
+            )
+    if extraction == 'mc':
+        assert result['report']['stages']['wireframe']['shell']['triangles'] > 0

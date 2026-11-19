@@ -1,12 +1,11 @@
 import unittest
-from types import SimpleNamespace
 from unittest.mock import patch
 import numpy as np
 from scipy.spatial import cKDTree
 from bandbrep.config import Config
 from bandbrep.schemas import VertexNode, ReconstructionError
 from bandbrep.curve_fitting import CurveRecord
-from bandbrep.curve_distance_fitting import (recover_distance_curves,closest_parameters,
+from bandbrep.curve_distance_fitting import (fit_edge_distances,closest_parameters,
     split_bezier,refine_bezier_distance,curve_derivatives,continuity_nullspace)
 from helpers import AnalyticFields
 from bandbrep.edge_geometry import project_support
@@ -29,30 +28,26 @@ class DistanceCurveTests(unittest.TestCase):
         points=np.column_stack((x,.002*np.sin(np.arange(len(x))),np.zeros(len(x))))
         provider=AnalyticFields(lambda q:np.column_stack((q[:,2],np.hypot(q[:,1],q[:,2]),np.ones(len(q)))))
         provider.gradient=lambda *args: self.fail('A valid fixed line must not query a UDF gradient')
-        bands=SimpleNamespace(points=points,values=provider.evaluate(points).values)
         vertices=[VertexNode(i,p,0.,.01) for i,p in enumerate([[-.4,0,0],[.4,0,0]])]
-        topo=SimpleNamespace(face_count=2,edges=[dict(id=0,faces=[0,1],vertices=[0,1],nodes=list(range(len(x))))])
-        graph,curves,report=recover_distance_curves(topo,bands,vertices,provider,Config())
-        self.assertEqual(curves[0].kind,'line')
-        self.assertLess(curves[0].residual,1e-12)
-        self.assertEqual(report['edges'][0]['initialization_points'],0)
-        self.assertEqual(graph.edges[0].vertices,[0,1])
+        curve, report = fit_edge_distances(0, points, provider.evaluate(points).values[:, 1],
+                                           np.asarray([v.position for v in vertices]), False, provider, Config())
+        self.assertEqual(curve.kind,'line')
+        self.assertLess(curve.residual,1e-12)
+        self.assertEqual(report['initialization_points'],0)
 
     def test_direct_circle_and_self_loop_keep_one_logical_curve(self):
         angles=np.linspace(0,2*np.pi,300,endpoint=False)
         radius=.4+.002*np.cos(angles*5)
         points=np.column_stack((radius*np.cos(angles),radius*np.sin(angles),np.zeros(len(angles))))
         provider=AnalyticFields(lambda q:np.column_stack((q[:,2],np.hypot(np.linalg.norm(q[:,:2],axis=1)-.4,q[:,2]),np.ones(len(q)))))
-        bands=SimpleNamespace(points=points,values=provider.evaluate(points).values)
         for anchored in (False,True):
-            topo=SimpleNamespace(face_count=2,edges=[dict(id=0,faces=[0,1],vertices=[0] if anchored else [],nodes=list(range(len(points))))])
             vertices=[VertexNode(0,np.array([.4,0,0]),0.,.01)] if anchored else []
-            graph,curves,report=recover_distance_curves(topo,bands,vertices,provider,
-                Config(curve_init_samples=64,curve_fit_samples=128))
-            self.assertEqual(curves[0].kind,'circle')
-            self.assertLess(curves[0].residual,1e-5)
-            self.assertEqual(len(graph.edges),1)
-            if anchored:np.testing.assert_allclose(curves[0].evaluate(np.array([0.,1.])),[[.4,0,0]]*2,atol=1e-10)
+            curve, _ = fit_edge_distances(0, points, provider.evaluate(points).values[:, 1],
+                                          np.asarray([v.position for v in vertices]).reshape(-1, 3),
+                                          not anchored, provider, Config(curve_init_samples=64, curve_fit_samples=128))
+            self.assertEqual(curve.kind,'circle')
+            self.assertLess(curve.residual,1e-5)
+            if anchored:np.testing.assert_allclose(curve.evaluate(np.array([0.,1.])),[[.4,0,0]]*2,atol=1e-10)
 
     def test_single_cubic_distance_optimization_needs_no_udf(self):
         controls=np.array([[[0.,0,0],[.3,.4,0],[.7,-.4,0],[1.,0,0]]])
@@ -80,28 +75,24 @@ class DistanceCurveTests(unittest.TestCase):
         normal/=np.linalg.norm(normal,axis=1)[:,None]
         points=true.evaluate(t)+(.002*np.cos(np.arange(len(t))*2.4))[:,None]*normal
         provider=AnalyticFields(lambda q:np.column_stack((q[:,2],tree.query(q)[0],np.ones(len(q)))))
-        bands=SimpleNamespace(points=points,values=provider.evaluate(points).values)
         ends=true.evaluate(np.array([0.,1.]));vertices=[VertexNode(i,p,0.,.01) for i,p in enumerate(ends)]
-        topo=SimpleNamespace(face_count=2,edges=[dict(id=0,faces=[0,1],vertices=[0,1],nodes=list(range(len(points))))])
-        graph,curves,report=recover_distance_curves(topo,bands,vertices,provider,
-            Config(curve_init_samples=128,curve_distance_iterations=30))
-        self.assertEqual(curves[0].kind,'bezier_spline')
-        self.assertEqual(len(curves[0].data['controls']),1)
-        self.assertEqual(len(graph.edges),1)
-        np.testing.assert_allclose(curves[0].evaluate(np.array([0.,1.])),ends,atol=1e-10)
-        self.assertLess(curves[0].residual,.001)
+        curve, _ = fit_edge_distances(0, points, provider.evaluate(points).values[:, 1], ends, False,
+                                      provider, Config(curve_init_samples=128, curve_distance_iterations=30))
+        self.assertEqual(curve.kind,'bezier_spline')
+        self.assertEqual(len(curve.data['controls']),1)
+        np.testing.assert_allclose(curve.evaluate(np.array([0.,1.])),ends,atol=1e-10)
+        self.assertLess(curve.residual,.001)
 
     def test_open_arc_keeps_fixed_endpoints_and_correct_branch(self):
         t=np.linspace(0,np.pi/2,200);radius=.4+.002*np.cos(np.arange(len(t))*2.4)
         points=np.column_stack((radius*np.cos(t),radius*np.sin(t),np.zeros(len(t))))
         provider=AnalyticFields(lambda q:np.column_stack((q[:,2],np.hypot(np.linalg.norm(q[:,:2],axis=1)-.4,q[:,2]),np.ones(len(q)))))
-        bands=SimpleNamespace(points=points,values=provider.evaluate(points).values)
         vertices=[VertexNode(i,np.array(p),0.,.01) for i,p in enumerate([[.4,0,0],[0,.4,0]])]
-        topo=SimpleNamespace(face_count=2,edges=[dict(id=0,faces=[0,1],vertices=[0,1],nodes=list(range(len(t))))])
-        _,curves,_=recover_distance_curves(topo,bands,vertices,provider,Config())
-        self.assertEqual(curves[0].kind,'circle')
-        self.assertAlmostEqual(abs(curves[0].data['sweep']),np.pi/2,places=3)
-        np.testing.assert_allclose(curves[0].evaluate(np.array([0.,1.])),[v.position for v in vertices],atol=1e-10)
+        curve, _ = fit_edge_distances(0, points, provider.evaluate(points).values[:, 1],
+                                      np.asarray([v.position for v in vertices]), False, provider, Config())
+        self.assertEqual(curve.kind,'circle')
+        self.assertAlmostEqual(abs(curve.data['sweep']),np.pi/2,places=3)
+        np.testing.assert_allclose(curve.evaluate(np.array([0.,1.])),[v.position for v in vertices],atol=1e-10)
 
     def test_complex_open_curve_adds_local_spans_within_one_edge(self):
         x=np.linspace(-.4,.4,50001)
@@ -112,16 +103,13 @@ class DistanceCurveTests(unittest.TestCase):
         normal=np.column_stack((-slope,np.ones(len(t)),t*0));normal/=np.linalg.norm(normal,axis=1)[:,None]
         points=np.column_stack((t,y,t*0))+(.0015*np.cos(np.arange(len(t))*2.4))[:,None]*normal
         provider=AnalyticFields(lambda q:np.column_stack((q[:,2],tree.query(q)[0],np.ones(len(q)))))
-        bands=SimpleNamespace(points=points,values=provider.evaluate(points).values)
         vertices=[VertexNode(i,p,0.,.01) for i,p in enumerate(dense[[0,-1]])]
-        topo=SimpleNamespace(face_count=2,edges=[dict(id=0,faces=[0,1],vertices=[0,1],nodes=list(range(len(t))))])
-        graph,curves,report=recover_distance_curves(topo,bands,vertices,provider,
-            Config(max_segments=12,curve_distance_iterations=30))
-        self.assertEqual(len(graph.edges),1)
-        self.assertGreater(len(curves[0].data['controls']),1)
-        self.assertLessEqual(len(curves[0].data['controls']),12)
-        self.assertLessEqual(curves[0].residual,.001)
-        np.testing.assert_allclose(curves[0].evaluate(np.array([0.,1.])),dense[[0,-1]],atol=1e-10)
+        curve, _ = fit_edge_distances(0, points, provider.evaluate(points).values[:, 1], dense[[0,-1]], False,
+                                      provider, Config(max_segments=12,curve_distance_iterations=30))
+        self.assertGreater(len(curve.data['controls']),1)
+        self.assertLessEqual(len(curve.data['controls']),12)
+        self.assertLessEqual(curve.residual,.001)
+        np.testing.assert_allclose(curve.evaluate(np.array([0.,1.])),dense[[0,-1]],atol=1e-10)
 
     def test_local_split_preserves_geometry_and_c1_steps_allow_join_motion(self):
         curve=CurveRecord(0,'bezier_spline',dict(breaks=np.array([0.,1.]),
@@ -145,13 +133,11 @@ class DistanceCurveTests(unittest.TestCase):
         radius=.4+.001*np.cos(np.arange(len(angles))*2.4)
         points=np.column_stack((radius*np.cos(angles),radius*np.sin(angles),angles*0))
         provider=AnalyticFields(lambda q:np.column_stack((q[:,2],np.hypot(np.linalg.norm(q[:,:2],axis=1)-.4,q[:,2]),np.ones(len(q)))))
-        bands=SimpleNamespace(points=points,values=provider.evaluate(points).values)
-        topology=SimpleNamespace(face_count=2,edges=[dict(id=0,faces=[0,1],vertices=[],nodes=list(range(len(points))))])
         with patch('bandbrep.curve_distance_fitting._circle_candidate', return_value=None):
-            graph,curves,_=recover_distance_curves(topology,bands,[],provider,
-                Config(max_segments=8, curve_init_samples=128,curve_fit_samples=256,
-                       curve_refine_samples=512,curve_distance_iterations=30))
-        curve=curves[0];self.assertTrue(graph.edges[0].closed)
+            curve, _ = fit_edge_distances(0, points, provider.evaluate(points).values[:, 1],
+                                          np.empty((0, 3)), True, provider,
+                Config(max_segments=8, curve_init_samples=128, curve_fit_samples=256,
+                       curve_refine_samples=512, curve_distance_iterations=30))
         self.assertEqual(curve.kind,'bezier_spline')
         np.testing.assert_allclose(curve.evaluate(np.array([0.])),curve.evaluate(np.array([1.])),atol=1e-10)
         first=curve_derivatives(curve,np.array([0.,1.]))[0]

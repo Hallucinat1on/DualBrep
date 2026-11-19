@@ -1,7 +1,6 @@
 """One cooperative wall-clock budget per sample, including nested field calls.
 
-Native calls may delay Python checkpoints; the batch runner also supervises each
-sample in a separate process to enforce the same deadline externally.
+Native calls may delay Python checkpoints.
 """
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -37,7 +36,7 @@ def checkpoint(stage=None):
 
 def timed_reconstruction(fn):
     @wraps(fn)
-    def wrapped(mesh,udf,cfg,output_dir,resume=False):
+    def wrapped(mesh,udf,cfg,output_dir):
         with sample_budget(cfg.sample_timeout_seconds):
-            return fn(mesh,udf,cfg,output_dir,resume=resume)
+            return fn(mesh,udf,cfg,output_dir)
     return wrapped

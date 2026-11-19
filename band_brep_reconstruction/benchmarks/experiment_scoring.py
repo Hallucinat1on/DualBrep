@@ -32,61 +32,53 @@ def dominant(component, truth, count, truth_count):
     return owner,size,second>=np.maximum(3,.05*size)
 
 
-def score(topology, bands, source):
-    targets=source.targets;gt=targets.topology
-    nf,ne,nv=len(targets.faces),len(targets.edges),len(targets.vertices)
-    points=bands.points;labels=topology.face_labels
-    cached=getattr(source,'_scoring_truth',None)
-    if cached is None or cached[0] is not points:
-        cached=(points,source.truth_face(points),
-            source.edge.query(points)[2] if source.edge else np.full(len(points),-1),
-            source.vtree.query(points)[1] if source.vtree else np.full(len(points),-1))
-        source._scoring_truth=cached
-    face_truth=cached[1]
-    fd,fs,fm=dominant(labels,face_truth,topology.face_count,nf)
-    perface=np.bincount(fd[fd>=0],minlength=nf)
-    face_good=bool(topology.face_count==nf and np.all(fs>0) and not fm.any() and np.all(perface==1))
-    et,vt=cached[2:]
-    ed,es,em=dominant(topology.edge_labels,et,len(topology.edges),ne)
-    centers=getattr(bands,'vertex_centers',None)
-    if source.edge is not None and centers is not None:
-        t=np.linspace(.1,.9,9)
-        for c,item in enumerate(topology.edges):
-            if item.get('status')!='inferred_short' or es[c]>0:continue
-            a,b=centers[item['vertices'][0]],centers[item['vertices'][1]]
-            owners=source.edge.query((1-t[:,None])*a+t[:,None]*b)[2]
-            counts=np.bincount(owners,minlength=ne)
-            ed[c]=int(counts.argmax());es[c]=len(t);em[c]=bool(np.sort(counts)[-2]>=3) if ne>1 else False
-    vd,vs,vm=dominant(topology.vertex_labels,vt,len(topology.vertices),nv)
-    pec=np.bincount(ed[ed>=0],minlength=ne);pvc=np.bincount(vd[vd>=0],minlength=nv)
-    eok=np.zeros(ne,bool);vok=np.zeros(nv,bool)
-    for eid in range(ne):
-        ids=np.flatnonzero(ed==eid)
-        if len(ids)==1:
-            c=int(ids[0]);item=topology.edges[c]
-            eok[eid]=not em[c] and {int(fd[f]) for f in item['faces']}==set(gt['edges'][eid]['face_ids']) and len(item['faces'])==2
-    for vid in range(nv):
-        ids=np.flatnonzero(vd==vid)
-        if len(ids)==1:
-            c=int(ids[0]);item=topology.vertices[c]
-            vok[vid]=not vm[c] and {int(ed[e]) for e in item['edges']}==set(gt['vertices'][vid]['edge_ids'])
-    edge_vertices_ok=True
-    for c,item in enumerate(topology.edges):
-        if ed[c]<0 or ed[c]>=ne:
-            edge_vertices_ok=False;continue
-        expected=set(gt['edges'][ed[c]]['vertex_ids'])
-        if {int(vd[v]) for v in item['vertices']}!=expected:edge_vertices_ok=False
-    graph_good=bool(face_good and len(ed)==ne and eok.all() and len(vd)==nv and vok.all() and edge_vertices_ok)
-    return {'truth':{'faces':nf,'edges':ne,'vertices':nv},
-        'predicted':{'faces':topology.face_count,'edges':len(ed),'vertices':len(vd)},
-        'face_good':face_good,'missing_faces':int((perface==0).sum()),'split_faces':int((perface>1).sum()),'mixed_cores':int(fm.sum()),
-        'edge_ok':int(eok.sum()),'vertex_ok':int(vok.sum()),'missing_edges':int((pec==0).sum()),'fragmented_edges':int((pec>1).sum()),
-        'missing_vertices':int((pvc==0).sum()),'duplicated_vertices':int((pvc>1).sum()),
-        'mixed_edges':int(em.sum()),'mixed_vertices':int(vm.sum()),'tiny_edges':int((es<3).sum()),
-        'unresolved_edges':sum(len(e['faces'])!=2 for e in topology.edges),'graph_good':graph_good,
-        'edge_vertex_relation_good':edge_vertices_ok,
-        'face_map':fd.tolist(),'edge_map':ed.tolist(),'vertex_map':vd.tolist(),
-        'method':'All triangle centers; nearest source triangle / dense edge / vertex. Mixed if second owner >=max(3,5%). Not exact geometry certification.'}
+def score(mesh, face_labels, graph, curves, source, tolerance=.002):
+    """Offline instance matching on the actual cut mesh and fitted wireframe."""
+    targets = source.targets
+    nf, ne, nv = len(targets.faces), len(targets.edges), len(targets.vertices)
+    centers = mesh.vertices[mesh.triangles].mean(axis=1)
+    face_map, sizes, mixed = dominant(face_labels, source.truth_face(centers), graph.face_count, nf)
+    face_map[(sizes == 0) | mixed] = -1
+    vertex_map = np.full(len(graph.vertices), -1, int)
+    if nv and len(vertex_map):
+        d, index = source.vtree.query([v.position for v in graph.vertices])
+        vertex_map[d <= tolerance] = index[d <= tolerance]
+    edge_map = np.full(len(graph.edges), -1, int)
+    if ne:
+        for edge in graph.edges:
+            samples = curves[edge.id].evaluate(np.linspace(.05, .95, 65))
+            distances, _, indices = source.edge.query(samples)
+            ids = indices[distances <= tolerance]
+            counts = np.bincount(ids, minlength=ne)
+            if counts.max() >= np.ceil(.95 * len(samples)):
+                edge_map[edge.id] = counts.argmax()
+
+    def matched_counts(mapping, total):
+        counts = np.bincount(mapping[mapping >= 0], minlength=total)
+        return dict(matched=int((counts == 1).sum()), missing=int((counts == 0).sum()),
+                    duplicated=int((counts > 1).sum()), unmatched=int((mapping < 0).sum()))
+
+    face_counts = matched_counts(face_map, nf)
+    edge_counts = matched_counts(edge_map, ne)
+    vertex_counts = matched_counts(vertex_map, nv)
+    ev_ok = ef_ok = 0
+    for edge in graph.edges:
+        target_id = edge_map[edge.id]
+        if target_id < 0:
+            continue
+        truth = targets.topology['edges'][target_id]
+        ev_ok += {int(vertex_map[v]) for v in edge.vertices} == set(truth['vertex_ids'])
+        ef_ok += {int(face_map[f]) for f in edge.faces} == set(truth['face_ids'])
+    result = dict(faces=face_counts, edges=edge_counts, vertices=vertex_counts,
+                  edge_vertex_matches=ev_ok, edge_face_matches=ef_ok,
+                  edge_map=edge_map.tolist(), vertex_map=vertex_map.tolist(), face_map=face_map.tolist())
+    result['graph_good'] = bool(
+        face_counts['matched'] == nf == graph.face_count
+        and edge_counts['matched'] == ne == len(graph.edges)
+        and vertex_counts['matched'] == nv == len(graph.vertices)
+        and ev_ok == ef_ok == ne
+    )
+    return result
 
 
 def fidelity_score(solid, source, deflection=5e-4):

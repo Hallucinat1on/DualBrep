@@ -1,14 +1,11 @@
 import unittest
 import numpy as np
-from bandbrep.face_seeds import core_components
 from bandbrep.vertex_localization import distance_center
 from bandbrep.curve_fitting import fit_circle
 from bandbrep.surface_fitting import constrained_lstsq
 from bandbrep.schemas import ReconstructionError
 
 class CoreTests(unittest.TestCase):
-    def test_isolated_core_preserved(self):
-        r=core_components(np.array([[0,1]]),np.array([True,True,False,True]));self.assertEqual(r[0],r[1]);self.assertNotEqual(r[0],r[3]);self.assertEqual(r[2],-1)
     def test_distance_center_not_centroid(self):
         v=np.array([.2,-.1,.3]);p=np.random.default_rng(1).uniform(0,.2,(100,3))+v;r,e,rank=distance_center(p,np.linalg.norm(p-v,axis=1))
         np.testing.assert_allclose(r,v,atol=1e-8);self.assertEqual(rank,3);self.assertGreater(np.linalg.norm(p.mean(axis=0)-v),.1)

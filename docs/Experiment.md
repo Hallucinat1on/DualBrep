@@ -575,6 +575,14 @@ L5剩余13例为准备5（预算3、原输入退化2）、图错误6（面错4�
 
 105项测试及8个子测试通过；315份冻结身份文件哈希核验通过，60份成功STEP独立读回有效。终版另补prepared前缀缓存键和失败STEP草稿归档检查，未改变冻结批次的几何算法；差异及证据保存在该批次post_freeze_cache_validation.json和final_metadata.patch。
 
+### 5.14 11-19：双向追踪与局部 MC 配对
+
+批次见[阶段耗时及历史对比](../band_brep_reconstruction/outputs/edge_first_paired_20261119_v1/REPORT.md)、[逐例 CSV](../band_brep_reconstruction/outputs/edge_first_paired_20261119_v1/metrics.csv)和[运行状态](../band_brep_reconstruction/outputs/edge_first_paired_20261119_v1/state.json)。沿用 11-06／11-09／11-16 同源同哈希的 20 个 dev，20 个单线程 CPU worker，每例双路总预算 10800 秒。源 STEP 重新生成生产 v3 网格和精确 E/V。两路共用同一份 `0.012 → 0.003` 的稀疏查询，独立执行线框拟合、切网格、曲面和 STEP 读回。MC 等值半径为 0.005，查询域受距输入表面 0.02 的有效带限制。
+
+按 20 例固定分母比较 STEP 和图+STEP，待结算样本另列。记录共享的准备、粗查与细查时间，并对两路分别统计线框、切面、曲面、CAD 和离线评分。阶段中位只统计完成该阶段者，报告给出样本数。两路阶段差只取同一例均完成该阶段的配对样本。11-06 完整流程、11-09 固定顶点回放和 11-16 固定网格／中心场 baseline 的比较按各自计时边界披露，不能把历史 worker 总耗时直接当作同工作量的加速比。本轮为精确场实验。
+
+默认角点分配预算为 400 万，计数发生在细格去重前。原批预算失败保留在原结果中。单独的 `edge_first_budget_retry_20261119_v1` 等待原批结算，只重跑触及粗块或角点预算的样本，将预算提高至 1600 万。几何和有效域参数采用同一源码与设置，其余样本的记录沿用并标记 `carried_from`。评估算法失败与默认资源失败时须区分两份报告。
+
 <a id="alignment-contract"></a>
 ## 6. 历史 F30 对齐约定与候选配置
 

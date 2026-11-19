@@ -1,7 +1,6 @@
-from .surface_mesh import evaluate_batched
 import numpy as np
 from scipy.optimize import least_squares
-from .schemas import VertexNode,require
+from .schemas import require
 
 def distance_center(points,distances,initial=None,weights=None):
     points=np.asarray(points,float);d=np.asarray(distances,float)
@@ -13,34 +12,3 @@ def distance_center(points,distances,initial=None,weights=None):
     w=np.ones(len(d)) if weights is None else np.sqrt(weights)
     result=least_squares(lambda v:w*(np.linalg.norm(points-v,axis=1)-d),center,loss='soft_l1',f_scale=max(1e-6,np.median(d)*.02))
     return result.x,float(np.max(np.abs(np.linalg.norm(points-result.x,axis=1)-d))),rank
-
-def localize_vertices(provider, bands, topology, cfg):
-    """One distance-center fit per instantiated absorbing vertex domain."""
-    candidates=[];rng=np.random.default_rng(cfg.seed)
-    for domain in topology.vertices:
-        ids=np.asarray(domain.get('support_nodes',domain['nodes']),int)
-        require(len(ids)>0,'vertex_support_insufficient','No distance-supported vertex nodes',vertex=domain['id'])
-        pts=bands.points[ids];d=bands.values[ids,2]
-        g,valid=provider.gradient(pts,2);norm=np.linalg.norm(g,axis=1)
-        valid &= norm>1e-10
-        votes=pts[valid]-d[valid,None]*g[valid]/norm[valid,None]
-        require(len(votes)>0,'vertex_gradient_invalid','No usable vertex votes',vertex=domain['id'])
-        v=np.median(votes,axis=0)
-        radius=max(cfg.localization_tolerance*8,min(cfg.tau_vertex*.2,.01))
-        center=v.copy();residual=1e100
-        for _ in range(8):
-            direction=rng.normal(size=(120,3));direction/=np.linalg.norm(direction,axis=1)[:,None]
-            shell=v+direction*radius*rng.uniform(.5,1,(len(direction),1))
-            if hasattr(provider,"domain_mask") and not provider.domain_mask(shell).all():
-                radius*=.5;continue
-            ds=evaluate_batched(provider,shell)[:,2]
-            center,residual,rank=distance_center(shell,ds,v)
-            if residual<=cfg.localization_tolerance and np.linalg.norm(center-v)<radius:break
-            radius*=.5;v=center
-        require(residual<=cfg.localization_tolerance,'vertex_mixed_support',
-                'Vertex domain does not support a single distance center',vertex=domain['id'],residual=residual)
-        values=evaluate_batched(provider,center[None])[0]
-        require(values[2]<=cfg.localization_tolerance and values[1]<=cfg.localization_tolerance and abs(values[0])<=cfg.feature_sdf_limit,
-                'vertex_geometry_invalid','Localized vertex fails field checks',vertex=domain['id'],values=values.tolist())
-        candidates.append(VertexNode(domain['id'],center,residual,radius))
-    return candidates

@@ -10,16 +10,36 @@ class ExactUDF:
     """Query finite CAD edges and necessary vertices in normalized coordinates."""
 
     def __init__(self, targets, cfg):
+        from OCC.Core.BRepAdaptor import BRepAdaptor_Curve
+        from OCC.Core.GeomAbs import GeomAbs_Line
+        from veudf.preprocess.cad import xyz
         from veudf.preprocess.reference import ReferenceEdgeOracle, ReferenceVertexOracle
 
-        self.edge = ReferenceEdgeOracle(targets.edges, cfg)
+        adaptors = [BRepAdaptor_Curve(edge) for edge in targets.edges]
+        self.lines = None
+        self.edge = None
+        if adaptors and all(curve.GetType() == GeomAbs_Line for curve in adaptors):
+            self.lines = [(np.asarray(xyz(curve.Value(curve.FirstParameter()))),
+                           np.asarray(xyz(curve.Value(curve.LastParameter())))) for curve in adaptors]
+        else:
+            self.edge = ReferenceEdgeOracle(targets.edges, cfg)
         self.vertex = ReferenceVertexOracle(targets.vertices, cfg)
         self.last_points = None
         self.last_distances = None
 
     def values(self, points):
         if self.last_points is None or not np.array_equal(points, self.last_points):
-            edge = self.edge.query(points)["distance"]
+            if self.lines is None:
+                edge = self.edge.query(points)["distance"]
+            else:
+                # Exact finite-segment distance in a bounded vectorized batch.
+                d2 = np.full(len(points), np.inf)
+                for start, end in self.lines:
+                    direction = end - start
+                    t = np.clip((points - start) @ direction / (direction @ direction), 0, 1)
+                    delta = points - start - t[:, None] * direction
+                    np.minimum(d2, np.einsum('ij,ij->i', delta, delta), out=d2)
+                edge = np.sqrt(d2)
             vertex = self.vertex.query(points)["distance"]
             self.last_points = points.copy()
             self.last_distances = np.column_stack((edge, vertex))
@@ -42,7 +62,7 @@ def load_cad_source(path, fingerprint):
     validate_geometry(targets, cfg)
     audit_shape(solid, targets, cfg)
     (vertices, triangles), _ = weld(triangulate(targets, cfg), cfg)
-    mesh = SurfaceMesh(vertices, triangles, {"normalization": normalization})
+    mesh = SurfaceMesh(vertices, triangles, {"normalization": normalization, "source_step_sha256": fingerprint})
     oracle = ExactUDF(targets, cfg)
     presence = (
         "present" if targets.edges else "absent",

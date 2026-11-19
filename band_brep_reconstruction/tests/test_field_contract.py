@@ -10,19 +10,19 @@ from bandbrep.schemas import ReconstructionError,SurfaceMesh
 from bandbrep.field_provider import (CallableUDFProvider,MeshFieldProvider,
                                     FieldEvaluation,checked_values,bounded_update)
 from bandbrep.surface_mesh import load_mesh,validate_mesh
-from bandbrep.reconstruct import reconstruct
+from bandbrep.edge_first import reconstruct
 from helpers import box,hollow_sphere
 
 
 class ContractTests(unittest.TestCase):
-    def test_post1109_defaults_and_removed_config(self):
+    def test_edge_first_defaults_and_removed_config(self):
         cfg=Config().validate()
-        self.assertEqual((cfg.refinement_coarse_edge,cfg.refinement_target_edge,cfg.refinement_rho_edge,cfg.sample_timeout_seconds),(.03,.003,.02,10800.))
+        self.assertEqual((cfg.coarse_spacing,cfg.fine_spacing,cfg.band_width,cfg.sample_timeout_seconds),(.012,.003,.02,10800.))
         self.assertEqual(cfg.to_dict(), load_config(Path(__file__).resolve().parents[1] / 'configs/default.json').to_dict())
         for obsolete in ('resolution','refinement_max_rounds','max_triangles','face_second_pass','curve_recovery','region_repair','save_queries'):
             with self.assertRaises(ValueError):load_config(overrides={obsolete:257})
         for coarse in (True, 0., -.01, float('nan'), .001):
-            with self.assertRaises(ValueError):Config(refinement_coarse_edge=coarse).validate()
+            with self.assertRaises(ValueError):Config(coarse_spacing=coarse).validate()
         with tempfile.TemporaryDirectory() as tmp:
             p=Path(tmp)/'config.json';p.write_text('{"sample_timeout_seconds": 9}')
             self.assertEqual(load_config(p,{'sample_timeout_seconds':10}).sample_timeout_seconds,10)
@@ -161,17 +161,12 @@ class ContractTests(unittest.TestCase):
             with self.assertRaises(ReconstructionError):reconstruct(mesh,udf,Config(),tmp)
             self.assertEqual(json.loads((Path(tmp)/'quality.json').read_text())['failed_stage'],'mesh')
 
-    def test_cache_identity_mesh_field_domain_and_corruption(self):
+    def test_input_identity_mesh_field_domain_and_routes(self):
         from bandbrep.cache import cache_key
         mesh,udf=box();cfg=Config()
         key,_=cache_key(mesh,udf,cfg)
-        self.assertEqual(key,cache_key(mesh,udf,replace(cfg,stop_after='seeds'))[0])
-        self.assertNotEqual(key,cache_key(mesh,udf,replace(cfg,face_threshold1=.004))[0])
+        self.assertEqual(key,cache_key(mesh,udf,replace(cfg,stop_after='scout'))[0])
+        self.assertNotEqual(key,cache_key(mesh,udf,replace(cfg,extraction="mc"))[0])
         self.assertNotEqual(key,cache_key(mesh,udf,replace(cfg,curve_fit_samples=800))[0])
         udf.band_width=.03;self.assertNotEqual(key,cache_key(mesh,udf,cfg)[0]);udf.band_width=.02
         mesh.vertices[0,0]+=.001;self.assertNotEqual(key,cache_key(mesh,udf,cfg)[0]);mesh.vertices[0,0]-=.001
-        with tempfile.TemporaryDirectory() as tmp:
-            out=Path(tmp);(out/'x.json').write_text('{}')
-            (out/'run.json').write_text(json.dumps({'cache_key':cache_key(mesh,udf,cfg)[0],'status':'failed','artifacts':{'x.json':'wrong'}}))
-            with self.assertRaises(ReconstructionError) as error:reconstruct(mesh,udf,cfg,tmp,resume=True)
-            self.assertEqual(error.exception.code,'cache_corrupt')

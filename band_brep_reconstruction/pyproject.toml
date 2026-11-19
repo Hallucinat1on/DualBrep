@@ -5,9 +5,9 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "band-brep-reconstruction"
 version = "0.5.0"
-description = "Mesh and continuous E/V band-label reconstruction"
+description = "Edge-first reconstruction from a mesh and continuous E/V"
 requires-python = ">=3.10"
-dependencies = ["numpy>=1.24,<2", "scipy>=1.10", "veudf==2.0.0"]
+dependencies = ["numpy>=1.24,<2", "scipy>=1.10", "veudf==2.0.0", "scikit-image>=0.22", "shapely>=2.1"]
 
 [project.optional-dependencies]
 test = ["pytest>=8"]

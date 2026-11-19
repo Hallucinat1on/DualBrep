@@ -12,7 +12,7 @@ from pathlib import Path
 import shutil
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parent
 DEFAULT_SOURCE = Path('/opt/data/private/yihengxu/Hunyuan3D/veudf')
 TOP_LEVEL = ('pyproject.toml', 'requirements.txt', 'environment.yml',
              'adaptive_build.py', 'benchmarks/README.md')

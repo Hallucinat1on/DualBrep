@@ -1,0 +1,80 @@
+<div id="edge-shell-scales">
+  <div class="viz-row">
+    <label class="form-label" for="edge-shell-radius">示例半径</label>
+    <output class="tabular-nums" for="edge-shell-radius">0.0050</output>
+  </div>
+  <input class="form-range" id="edge-shell-radius" type="range" min="0.001" max="0.007" step="0.0005" value="0.005">
+  <svg width="100%" height="230" role="img" aria-label="间距为 0.008 的平行边截面和长度为 0.008 的直边。圆盘随半径改变。">
+    <text x="0" y="17">两条平行边的截面 · 间距 0.008</text>
+    <text x="0" y="128">一条短直边 · 长度 0.008</text>
+    <circle data-domain="left" cx="calc(50% - 26px)" cy="68" r="32.5" class="edge-domain"/>
+    <circle data-domain="right" cx="calc(50% + 26px)" cy="68" r="32.5" class="edge-domain"/>
+    <circle data-domain="left" cx="calc(50% - 26px)" cy="179" r="32.5" class="vertex-domain"/>
+    <circle data-domain="right" cx="calc(50% + 26px)" cy="179" r="32.5" class="vertex-domain"/>
+    <line id="edge-shell-segment" x1="calc(50% - 26px)" x2="calc(50% + 26px)" y1="179" y2="179"/>
+    <line id="edge-shell-exposed" y1="179" y2="179" style="display: none"/>
+    <circle data-center="left" cx="calc(50% - 26px)" cy="68" r="3.5"/>
+    <circle data-center="right" cx="calc(50% + 26px)" cy="68" r="3.5"/>
+    <circle data-center="left" cx="calc(50% - 26px)" cy="179" r="3.5"/>
+    <circle data-center="right" cx="calc(50% + 26px)" cy="179" r="3.5"/>
+  </svg>
+  <p class="text-small" id="edge-shell-status" aria-live="polite">边管重叠 · 顶点域覆盖整条短边</p>
+</div>
+<style>
+  #edge-shell-scales svg { display: block; overflow: visible; }
+  #edge-shell-scales svg text, #edge-shell-scales svg [data-center] { fill: var(--foreground); }
+  #edge-shell-scales .edge-domain, #edge-shell-scales .vertex-domain { fill-opacity: .22; stroke-width: 1.5; }
+  #edge-shell-scales .edge-domain { fill: var(--viz-series-1, var(--blue)); stroke: var(--viz-series-1, var(--blue)); }
+  #edge-shell-scales .vertex-domain { fill: var(--viz-series-2, var(--orange)); stroke: var(--viz-series-2, var(--orange)); }
+  #edge-shell-segment { stroke: var(--muted-foreground); stroke-dasharray: 4 3; stroke-width: 2; }
+  #edge-shell-exposed { stroke: var(--foreground); stroke-width: 3; }
+</style>
+<script>
+  (() => {
+    const root = document.getElementById('edge-shell-scales');
+    const slider = root.querySelector('input');
+    const value = root.querySelector('output');
+    const svg = root.querySelector('svg');
+    const status = root.querySelector('#edge-shell-status');
+    const segment = root.querySelector('#edge-shell-segment');
+    const exposed = root.querySelector('#edge-shell-exposed');
+    const domains = [...root.querySelectorAll('[data-domain]')];
+    const centers = [...root.querySelectorAll('[data-center]')];
+    const gap = 0.008;
+    const scale = 6500;
+
+    function render() {
+      const r = Number(slider.value);
+      const middle = svg.clientWidth / 2;
+      const x = {left: middle - gap * scale / 2, right: middle + gap * scale / 2};
+      value.value = r.toFixed(4);
+      for (const circle of domains) {
+        circle.setAttribute('cx', x[circle.dataset.domain]);
+        circle.setAttribute('r', r * scale);
+      }
+      for (const circle of centers) circle.setAttribute('cx', x[circle.dataset.center]);
+      segment.setAttribute('x1', x.left);
+      segment.setAttribute('x2', x.right);
+      const remaining = Math.max(0, gap - 2 * r);
+      exposed.style.display = remaining > 0 ? '' : 'none';
+      exposed.setAttribute('x1', x.left + r * scale);
+      exposed.setAttribute('x2', x.right - r * scale);
+      const tube = 2 * r < gap ? '边管分离' : 2 * r === gap ? '边管相切' : '边管重叠';
+      status.textContent = remaining > 0 ? tube + ' · 短边剩余 ' + remaining.toFixed(4) : tube + ' · 顶点域覆盖整条短边';
+    }
+
+    function restore(state) {
+      const radius = state?.modelContent?.radius;
+      if (Number.isFinite(radius)) slider.value = radius;
+      render();
+    }
+
+    slider.addEventListener('input', render);
+    slider.addEventListener('change', () => {
+      window.openai?.setWidgetState?.({modelContent: {radius: Number(slider.value)}, privateContent: null})?.catch(() => {});
+    });
+    window.addEventListener('openai:set_globals', event => restore(event.detail?.globals?.widgetState));
+    new ResizeObserver(render).observe(svg);
+    restore(window.openai?.widgetState);
+  })();
+</script>

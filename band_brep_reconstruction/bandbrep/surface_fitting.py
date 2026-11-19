@@ -215,12 +215,7 @@ def initialize_face_surfaces(mesh,face_labels,graph,curves,provider,cfg):
     for face in range(graph.face_count):
         require(face in regions,'missing_face_region','No sampled region for face',face=face)
         p,n=regions[face]
-        # Core triangles provide face-interior samples; shared curves supply boundaries.
-        # Initialize from trustworthy interior samples, with frozen boundaries
-        # supplying the full trim extent; never fit leaked points across a sharp edge.
-        fv=evaluate_batched(provider,p)
-        safe=fv[:,1]>cfg.tau_edge*.5 if provider.presence()[0]=='present' else np.ones(len(p),bool)
-        if np.sum(safe)>=20:p,n=p[safe],n[safe]
+        # The cut mesh already provides intra-region samples, including narrow faces.
         related=[curves[e.id] for e in graph.edges if face in e.faces]
         boundary=np.vstack([c.evaluate(np.linspace(0,1,65)) for c in related]) if related else np.empty((0,3))
         candidates=analytic_candidates(p,n,boundary)

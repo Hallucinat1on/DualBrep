@@ -26,8 +26,8 @@ python -m veudf.cli.build_dataset build --root /data/new_mesh_pools_v3 \
 | `scripts/visualize_assets.py` | 数据资产可视化 |
 
 ```bash
-python scripts/sync_veudf.py --check
+python sync_veudf.py --check
 python -m pytest veudf/tests -q
 ```
 
-[Post1109 重建](../band_brep_reconstruction/README.md)使用几何 condition 和连续 E/V 查询。源 STEP 重建调用精确 CAD reference 接口。新实验使用 v3 数据根目录和当前重建入口。
+[边优先重建](../band_brep_reconstruction/README.md)使用几何 condition 和连续 E/V 查询。源 STEP 重建调用精确 CAD reference 接口。新实验使用 v3 数据根目录和当前重建入口。

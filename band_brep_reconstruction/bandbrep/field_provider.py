@@ -23,25 +23,6 @@ class FieldEvaluation:
     strict_error_bound: bool = False
 
 
-@dataclass
-class CenterFields:
-    """Validated final triangle-center queries, bound to one continuous provider."""
-    points: np.ndarray
-    values: np.ndarray
-    provider_fingerprint: str
-
-    def validate(self, points, provider):
-        require(self.provider_fingerprint == provider.fingerprint,
-                'center_fields_identity', 'Center queries belong to another provider')
-        require(np.array_equal(self.points, points) and self.values.shape == points.shape,
-                'center_fields_alignment', 'Center queries do not match the triangle ordering')
-        required = np.array([True] + [p == 'present' for p in provider.presence()])
-        require(np.isfinite(self.values[:, required]).all()
-                and (self.values[:, 1:][:, required[1:]] >= 0).all(),
-                'invalid_field_query', 'Cached center fields are invalid')
-        return self.values
-
-
 def sampled_udf_gradient(evaluate, xyz, channel, step=UDF_GRADIENT_STEP,
                          *, domain_mask=None, batch_size=8192, center_values=None):
     """Central differences of E/V values only; never call a gradient backend.

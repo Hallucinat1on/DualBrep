@@ -24,15 +24,6 @@ def face_adjacency(triangles, edge_index=None):
     return np.column_stack((ids[starts[shared]] // 3, ids[starts[shared] + 1] // 3))
 
 
-def vertex_adjacency(triangles):
-    n=len(triangles)
-    if not n:return np.empty((0,2),dtype=np.int64)
-    incidence=coo_matrix((np.ones(triangles.size,dtype=np.int8),
-        (np.repeat(np.arange(n),3),triangles.ravel())),shape=(n,int(triangles.max())+1)).tocsr()
-    graph=(incidence@incidence.T).tocoo();keep=graph.row<graph.col
-    return np.column_stack((graph.row[keep],graph.col[keep])).astype(np.int64)
-
-
 def components(pairs,n):
     graph=coo_matrix((np.ones(len(pairs)),(pairs[:,0],pairs[:,1])),shape=(n,n)).tocsr()
     return connected_components(graph,directed=False)

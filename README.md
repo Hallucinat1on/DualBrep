@@ -1,9 +1,9 @@
 # E/V-UDF 数据处理与 B-rep 重建
 
-本分支包含 [veudf v3 数据预处理](veudf/README.md) 和 [Post1109 重建模板](band_brep_reconstruction/README.md)。原 DualBrep 的 GVD-UDF、模型和脚本集中在 [legacy_dualbrep/](legacy_dualbrep/README.md)。
+本分支包含 [veudf v3 数据预处理](veudf/README.md) 和 [边优先重建](band_brep_reconstruction/README.md)。原 DualBrep 的 GVD-UDF、模型和脚本集中在 [legacy_dualbrep/](legacy_dualbrep/README.md)。
 
 ```bash
-python scripts/sync_veudf.py --check
+python sync_veudf.py --check
 python -m pip install -e './veudf[jobs,postprocess]' -e ./band_brep_reconstruction
 band-brep-reconstruct --step /path/to/source.step --output /path/to/new_run
 ```

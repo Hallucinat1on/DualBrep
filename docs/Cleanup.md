@@ -5,7 +5,7 @@
 | 路径 | 归属与用途 |
 |---|---|
 | [veudf/](../veudf/README.md) | 现行生产预处理镜像，含 v3 代码、配置、工具及测试 |
-| [scripts/sync_veudf.py](../scripts/sync_veudf.py) | 生产镜像同步及哈希检查 |
+| [sync_veudf.py](../sync_veudf.py) | 生产镜像同步及哈希检查 |
 | [band_brep_reconstruction/](../band_brep_reconstruction/README.md) | 现行 Post1109 重建、独立评分、配置及测试 |
 | [legacy_dualbrep/](../legacy_dualbrep/README.md) | 原 DualBrep 源码、原版 README、原理解读、配套样例和本地资产 |
 | [docs/](README.md) | 现行说明、E/V 历史实验和设计备忘 |

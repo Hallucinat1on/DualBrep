@@ -10,7 +10,7 @@ from scipy.optimize import least_squares
 from scipy.spatial import cKDTree
 from .curve_fitting import CurveRecord, arclength_parameters, fit_circle, fit_fixed_arc
 from .deadline import checkpoint
-from .schemas import EdgeInstance, LogicalGraph, ReconstructionError, require
+from .schemas import ReconstructionError, require
 from .surface_mesh import evaluate_batched
 
 
@@ -284,9 +284,13 @@ def validate_distance_curve(record,points,distances,ends,provider,cfg):
     require(np.abs(v[:,0]).max()<=cfg.feature_sdf_limit,'curve_surface_failed','Fitted curve violates SDF')
     # Every part of the candidate must have nearby original support; a small
     # global E value alone could otherwise accept an unrelated zero branch.
-    nearest=cKDTree(points).query(test)[1]
-    cover=np.linalg.norm(test-points[nearest],axis=1)-distances[nearest]
-    require(cover.max()<=cfg.tau_edge,'curve_support_unobserved','Curve leaves the observed instance support',error=float(cover.max()))
+    # Endpoints belong to the branch even where global E cannot assign
+    # neighboring off-curve samples to a single incident edge.
+    support = np.vstack((points, ends))
+    support_distances = np.r_[distances, np.zeros(len(ends))]
+    nearest=cKDTree(support).query(test)[1]
+    cover=np.linalg.norm(test-support[nearest],axis=1)-support_distances[nearest]
+    require(cover.max()<=cfg.support_radius,'curve_support_unobserved','Curve leaves the observed instance support',error=float(cover.max()))
     record.residual=maximum
     return dict(max_distance_residual=maximum,field_samples=count,observations=len(points))
 
@@ -308,116 +312,91 @@ def _initial_bezier(ordered,ends,edge_id,periodic):
     return CurveRecord(edge_id,'bezier_spline',dict(breaks=breaks,controls=np.asarray(nets)),0.)
 
 
-def recover_distance_curves(topology,bands,vertices,provider,cfg,progress=None):
+def fit_edge_distances(edge_id, points, distances, ends, closed, provider, cfg, *, path=None):
+    """Fit one curve from instance observations, without face IDs."""
     from .edge_geometry import project_support, circle_order, order_general
-    edges=[];curves={};reports={};timings=dict(observations=0.,initialization=0.,optimization=0.,validation=0.)
-    for item in topology.edges:
-        checkpoint('curve_distance_recovery');started=time.monotonic()
-        edge_id=item['id'];vids=list(item['vertices'])
-        if progress is not None:progress(dict(active_edge=edge_id,completed=len(curves),timings=timings,edges=reports))
-        require(len(item['faces'])==2,'edge_neighbors_unresolved','Curve requires two confirmed neighboring faces',edge=edge_id,faces=item['faces'])
-        require(len(vids)<=2,'edge_vertices_unresolved','Edge touches more than two vertex candidates',edge=edge_id)
-        ids=np.asarray(item.get('support_nodes',item['nodes']),int)
-        ends=np.array([vertices[v].position for v in vids]).reshape(-1,3)
-        inferred=len(vids)==2 and (item.get('status')=='inferred_short' or len(ids)<3)
-        if inferred:
-            # A topology-supported short line can lack off-curve observations.
-            points=ends.copy();distances=np.zeros(2)
-        else:
-            require(len(ids)>=3,'edge_support_insufficient','Too few instance distance observations',edge=edge_id)
-            points=np.asarray(bands.points[ids],float)
-            distances=(np.asarray(bands.values[ids,1],float) if hasattr(bands,'values')
-                       else evaluate_batched(provider,points,cfg.query_batch_size)[:,1])
-        require(np.isfinite(points).all() and np.isfinite(distances).all() and (distances>=0).all(),
-                'invalid_field_query','Invalid cached curve observations')
-        timings['observations']+=time.monotonic()-started
-        radius=max(cfg.tau_edge*3,cfg.surface_tolerance*4)
-        report=dict(observations=len(points),initialization_points=0,
-                    projection=dict(iterations=0,gradient_rows=0),attempts=[])
-        record=None;validation=None
-        def accept(candidate):
-            nonlocal validation
-            tick=time.monotonic()
-            try:validation=validate_distance_curve(candidate,points,distances,ends,provider,cfg)
-            except ReconstructionError as exc:
-                if exc.code not in ('curve_distance_failed','curve_field_failed','curve_surface_failed','curve_support_unobserved','invalid_field_query'):
-                    raise
-                report['attempts'].append(dict(kind=candidate.kind,accepted=False,error=exc.code,details=exc.details))
-                return False
-            finally:timings['validation']+=time.monotonic()-tick
-            report['attempts'].append(dict(kind=candidate.kind,accepted=True))
-            return True
-        if len(ends)==2 and np.linalg.norm(ends[1]-ends[0])>cfg.localization_tolerance:
-            candidate=CurveRecord(edge_id,'line',dict(p0=ends[0],p1=ends[1]),0.)
-            if accept(candidate):record=candidate
+    require(len(points) >= 3, "edge_support_insufficient", "At least three observations are required", edge=edge_id)
+    timings = dict(initialization=0., optimization=0., validation=0.)
+    require(np.isfinite(points).all() and np.isfinite(distances).all() and (distances>=0).all(),
+            'invalid_field_query','Invalid cached curve observations')
+    radius=max(cfg.support_radius*3,cfg.surface_tolerance*4)
+    report=dict(observations=len(points),initialization_points=0,
+                projection=dict(iterations=0,gradient_rows=0),attempts=[])
+    record=None;validation=None
+    def accept(candidate):
+        nonlocal validation
+        tick=time.monotonic()
+        try:validation=validate_distance_curve(candidate,points,distances,ends,provider,cfg)
+        except ReconstructionError as exc:
+            if exc.code not in ('curve_distance_failed','curve_field_failed','curve_surface_failed','curve_support_unobserved','invalid_field_query'):
+                raise
+            report['attempts'].append(dict(kind=candidate.kind,accepted=False,error=exc.code,details=exc.details))
+            return False
+        finally:timings['validation']+=time.monotonic()-tick
+        report['attempts'].append(dict(kind=candidate.kind,accepted=True))
+        return True
+    if len(ends)==2 and np.linalg.norm(ends[1]-ends[0])>1e-10:
+        candidate=CurveRecord(edge_id,'line',dict(p0=ends[0],p1=ends[1]),0.)
+        if accept(candidate):record=candidate
+    if record is None:
+        tick=time.monotonic();init=representative_indices(points,cfg.curve_init_samples,cfg.seed+edge_id)
+        report['initialization_points']=len(init)
+        projected = (project_support(points[init], provider, radius, cfg, max_iterations=8,
+                                     stats=report['projection']) if path is None else path)
+        timings['initialization']+=time.monotonic()-tick
+        fit=representative_indices(points,cfg.curve_fit_samples,cfg.seed+edge_id)
+        tick=time.monotonic()
+        circle=_circle_candidate(projected,ends,edge_id)
+        if circle is not None:
+            try:
+                circle,stats=refine_circle_distance(circle,points[fit],distances[fit],ends,cfg)
+                report['circle_optimization']=stats
+            except (ValueError,np.linalg.LinAlgError) as exc:
+                circle=None
+                report['attempts'].append(dict(kind='circle',accepted=False,error='circle_optimization_failed',message=str(exc)))
+            timings['optimization']+=time.monotonic()-tick
+            if circle is not None and accept(circle):record=circle
+        else:timings['optimization']+=time.monotonic()-tick
         if record is None:
-            require(not inferred,'curve_field_failed','Endpoint-supported short line fails distance/field checks',edge=edge_id)
-            tick=time.monotonic();init=representative_indices(points,cfg.curve_init_samples,cfg.seed+edge_id)
-            report['initialization_points']=len(init)
-            projected=project_support(points[init],provider,radius,cfg,max_iterations=8,stats=report['projection'])
+            tick=time.monotonic();ordered=path
+            if ordered is None and len(projected)>=6:
+                data,error=fit_circle(projected)
+                if error<=cfg.curve_tolerance:ordered=circle_order(projected,data,ends,cfg)
+            if ordered is None:ordered=order_general(projected,ends,cfg)
+            candidate=_initial_bezier(ordered,ends,edge_id,closed)
+            require(len(candidate.data['controls'])<=cfg.max_segments,'curve_distance_fit_failed',
+                    'Periodic initialization exceeds curve segment budget',edge=edge_id)
             timings['initialization']+=time.monotonic()-tick
-            fit=representative_indices(points,cfg.curve_fit_samples,cfg.seed+edge_id)
-            tick=time.monotonic()
-            circle=_circle_candidate(projected,ends,edge_id)
-            if circle is not None:
-                try:
-                    circle,stats=refine_circle_distance(circle,points[fit],distances[fit],ends,cfg)
-                    report['circle_optimization']=stats
-                except (ValueError,np.linalg.LinAlgError) as exc:
-                    circle=None
-                    report['attempts'].append(dict(kind='circle',accepted=False,error='circle_optimization_failed',message=str(exc)))
+            rounds=[]
+            for _ in range(2*cfg.max_segments+8):
+                tick=time.monotonic()
+                candidate,stats=refine_bezier_distance(candidate,points[fit],distances[fit],cfg,periodic=closed)
                 timings['optimization']+=time.monotonic()-tick
-                if circle is not None and accept(circle):record=circle
-            else:timings['optimization']+=time.monotonic()-tick
-            if record is None:
-                tick=time.monotonic();ordered=None
-                if len(projected)>=6:
-                    data,error=fit_circle(projected)
-                    if error<=cfg.curve_tolerance:ordered=circle_order(projected,data,ends,cfg)
-                if ordered is None:ordered=order_general(projected,ends,cfg)
-                if len(ends)==1:ends=np.repeat(ends,2,axis=0)
-                candidate=_initial_bezier(ordered,ends,edge_id,not len(vids))
-                require(len(candidate.data['controls'])<=cfg.max_segments,'curve_distance_fit_failed',
-                        'Periodic initialization exceeds curve segment budget',edge=edge_id)
+                stats.update(segments=len(candidate.data['controls']),fit_samples=len(fit));rounds.append(stats)
+                if accept(candidate):record=candidate;break
+                parameters,residual=distance_residuals(candidate,points,distances,cfg.query_batch_size)
+                if len(fit)<min(len(points),cfg.curve_refine_samples):
+                    # Include difficult validation locations before adding freedom.
+                    worst=np.argsort(np.abs(residual))[-max(1,cfg.curve_fit_samples//2):]
+                    updated=np.unique(np.r_[fit,worst])
+                    if len(updated)>cfg.curve_refine_samples:updated=updated[-cfg.curve_refine_samples:]
+                    if len(updated)>len(fit):fit=updated;continue
+                if len(candidate.data['controls'])>=cfg.max_segments:break
+                span=np.clip(np.searchsorted(candidate.data['breaks'],parameters,side='right')-1,0,len(candidate.data['controls'])-1)
+                scores=np.array([np.max(np.abs(residual[span==j]),initial=0) for j in range(len(candidate.data['controls']))])
+                candidate=split_bezier(candidate,int(np.argmax(scores)))
+                # The unchanged de Casteljau curve and a robust fit to the
+                # ordered initializer are alternative starts. Select using
+                # ORIGINAL distances, not point-fit residuals, to escape a
+                # poor low-degree local minimum without trusting projections.
+                tick=time.monotonic()
+                seed=projected_seed(ordered,ends,candidate.data['breaks'],edge_id,closed)
+                _,old_res=distance_residuals(candidate,points[fit],distances[fit])
+                _,seed_res=distance_residuals(seed,points[fit],distances[fit])
+                if np.mean(abs(seed_res))<np.mean(abs(old_res)):candidate=seed
                 timings['initialization']+=time.monotonic()-tick
-                rounds=[]
-                for _ in range(2*cfg.max_segments+8):
-                    tick=time.monotonic()
-                    candidate,stats=refine_bezier_distance(candidate,points[fit],distances[fit],cfg,periodic=not len(vids))
-                    timings['optimization']+=time.monotonic()-tick
-                    stats.update(segments=len(candidate.data['controls']),fit_samples=len(fit));rounds.append(stats)
-                    if accept(candidate):record=candidate;break
-                    parameters,residual=distance_residuals(candidate,points,distances,cfg.query_batch_size)
-                    if len(fit)<min(len(points),cfg.curve_refine_samples):
-                        # Include difficult validation locations before adding freedom.
-                        worst=np.argsort(np.abs(residual))[-max(1,cfg.curve_fit_samples//2):]
-                        updated=np.unique(np.r_[fit,worst])
-                        if len(updated)>cfg.curve_refine_samples:updated=updated[-cfg.curve_refine_samples:]
-                        if len(updated)>len(fit):fit=updated;continue
-                    if len(candidate.data['controls'])>=cfg.max_segments:break
-                    span=np.clip(np.searchsorted(candidate.data['breaks'],parameters,side='right')-1,0,len(candidate.data['controls'])-1)
-                    scores=np.array([np.max(np.abs(residual[span==j]),initial=0) for j in range(len(candidate.data['controls']))])
-                    candidate=split_bezier(candidate,int(np.argmax(scores)))
-                    # The unchanged de Casteljau curve and a robust fit to the
-                    # ordered initializer are alternative starts. Select using
-                    # ORIGINAL distances, not point-fit residuals, to escape a
-                    # poor low-degree local minimum without trusting projections.
-                    tick=time.monotonic()
-                    seed=projected_seed(ordered,ends,candidate.data['breaks'],edge_id,not len(vids))
-                    _,old_res=distance_residuals(candidate,points[fit],distances[fit])
-                    _,seed_res=distance_residuals(seed,points[fit],distances[fit])
-                    if np.mean(abs(seed_res))<np.mean(abs(old_res)):candidate=seed
-                    timings['initialization']+=time.monotonic()-tick
-                report['spline_optimization']=rounds
-        require(record is not None,'curve_distance_fit_failed','Cannot satisfy original distance and field checks',edge=edge_id,
-                attempts=report['attempts'],optimization=report.get('spline_optimization'),timings=timings)
-        sample_count=max(64,8*len(record.data.get('controls',[]))+1)
-        samples=record.evaluate(np.linspace(0,1,sample_count))
-        endpoint_uses=vids if len(vids)!=1 else [vids[0],vids[0]]
-        edges.append(EdgeInstance(edge_id,tuple(item['faces']),samples,not len(vids),endpoint_uses,-1,radius))
-        curves[edge_id]=record;report.update(validation=validation,kind=record.kind)
-        reports[edge_id]=report
-        if progress is not None:progress(dict(active_edge=None,completed=len(curves),timings=timings,edges=reports))
-    report=dict(method='direct_distance',residual_kind='distance_observation',
-                instance_distance_assumption='narrow_instance_support',timings=timings,edges=reports)
-    return LogicalGraph(topology.face_count,vertices,edges,report={'distance_fitting':report}),curves,report
+            report['spline_optimization']=rounds
+    require(record is not None,'curve_distance_fit_failed','Cannot satisfy original distance and field checks',edge=edge_id,
+            attempts=report['attempts'],optimization=report.get('spline_optimization'),timings=timings)
+    report.update(validation=validation, kind=record.kind, timings=timings)
+    return record, report

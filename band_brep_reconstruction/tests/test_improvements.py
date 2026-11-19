@@ -3,7 +3,6 @@ import numpy as np
 from bandbrep.config import Config
 from bandbrep.curve_fitting import fit_fixed_arc, CurveRecord
 from helpers import AnalyticFields
-from bandbrep.vertex_domains import local_vertex_domains
 from bandbrep.surface_fitting import revolution_candidates, frame
 from bandbrep.occ_assembly import shift_periods
 
@@ -17,21 +16,6 @@ class ImprovementTests(unittest.TestCase):
         self.assertLess(err,1e-9)
         ends=CurveRecord(0,'circle',data,err).evaluate(np.array([0.,1.]))
         np.testing.assert_allclose(ends,pts[[0,-1]],atol=1e-12)
-
-    def test_close_vertices_keep_separate_domains(self):
-        v=np.array([[0.,0.,0.],[.02,0.,0.]])
-        fn=lambda p:np.column_stack((np.zeros(len(p)),np.abs(p[:,1])+np.abs(p[:,2]),
-                                     np.linalg.norm(p[:,None]-v[None],axis=2).min(axis=1)))
-        provider=AnalyticFields(fn,('present','present'))
-        x=np.linspace(-.03,.05,161);points=np.column_stack((x,np.zeros_like(x),np.zeros_like(x)))
-        values=fn(points);band=np.ones(len(points),bool)
-        labels,centers,report=local_vertex_domains(points,values,band,band,provider,Config(tau_vertex=.02))
-        self.assertEqual(report['domains'],2)
-        self.assertEqual(len(centers),2)
-        # Nodes midway between the two vertices belong to neither domain: an edge remains.
-        mid=np.abs(x-.01)<.0005
-        self.assertTrue(np.all(labels[mid]==-1))
-        self.assertEqual(len(set(labels[labels>=0].tolist())),2)
 
     def test_cone_is_recovered_from_points_and_normals(self):
         rng=np.random.default_rng(0);axis=np.array([.2,.1,1.]);axis/=np.linalg.norm(axis);x,y=frame(axis)

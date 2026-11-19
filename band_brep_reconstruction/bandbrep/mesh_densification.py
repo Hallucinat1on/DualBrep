@@ -1,10 +1,9 @@
-"""Conforming linear refinement of an existing surface; only scalar fields are queried."""
+"""Geometry-only refinement of a surface used to enumerate sparse scout blocks."""
 import time
 from .deadline import checkpoint
 import numpy as np
 from .schemas import SurfaceMesh, require
-from .surface_mesh import mesh_edges, face_adjacency, components, evaluate_batched
-from .field_provider import CenterFields
+from .surface_mesh import mesh_edges, face_adjacency, components
 
 
 def areas(mesh):
@@ -83,18 +82,6 @@ def split_edges(mesh, marked, edge_index):
         marked_edges=int(marked.sum()), face_split_histogram=np.bincount(counts, minlength=4).tolist())
 
 
-def local_selection(mesh, vertex_values, center_values, presence, cfg):
-    p = mesh.vertices[mesh.triangles]
-    length = np.linalg.norm(p-p[:, [1, 2, 0]], axis=2).max(axis=1)
-    near = np.zeros(len(length), bool)
-    # Necessary vertices lie on target edges; refine from E without relying on V.
-    if presence[0] == 'present':
-        minimum = vertex_values[mesh.triangles, 1].min(axis=1)
-        near = ((minimum-length <= cfg.refinement_rho_edge)
-                | (center_values[:, 1] <= cfg.refinement_rho_edge))
-    return near & (length > cfg.refinement_target_edge*(1+1e-10)), near, length
-
-
 def marked_long_edges(mesh, edge_index, selected, target):
     edges, inv, _ = edge_index
     marked = np.zeros(len(edges), bool)
@@ -145,41 +132,3 @@ def coarse_refine_surface(mesh, target_edge, progress=None):
     report = refinement_report(mesh, original, history, dict(target_edge=target_edge), started)
     report['target_reached'] = True
     return mesh, parent, report
-
-
-def fine_refine_surface(mesh, provider, cfg, progress=None):
-    """E-only near-field selection; split overlong edges, returning final queries."""
-    cfg.validate()
-    started = time.monotonic()
-    original = mesh_metrics(mesh)
-    parent = np.arange(len(mesh.triangles), dtype=np.int64)
-    history = []
-    vertex_values = None
-    while True:
-        emit_progress(progress, 'fine_refinement', 'select', mesh, history, started)
-        edge_index = mesh_edges(mesh.triangles)
-        if vertex_values is None:
-            vertex_values = evaluate_batched(provider, mesh.vertices, cfg.query_batch_size)
-        centers = mesh.vertices[mesh.triangles].mean(axis=1)
-        values = evaluate_batched(provider, centers, cfg.query_batch_size)
-        selected, near, length = local_selection(mesh, vertex_values, values, provider.presence(), cfg)
-        local_max = float(length[near].max()) if near.any() else 0.
-        emit_progress(progress, 'fine_refinement', 'selected', mesh, history, started,
-                      remaining=int(selected.sum()), local_max_edge=local_max)
-        if not selected.any():break
-        marked = marked_long_edges(mesh, edge_index, selected, cfg.refinement_target_edge)
-        old_vertices, before = len(mesh.vertices), len(mesh.triangles)
-        transition = int((marked[edge_index[1]].any(1) & ~selected).sum())
-        mesh, parent_local, info = split_edges(mesh, marked, edge_index)
-        parent = parent[parent_local]
-        history.append(dict(level=len(history), before=before, after=len(mesh.triangles),
-                            selected=int(selected.sum()), transition_faces=transition, **info))
-        emit_progress(progress, 'fine_refinement', 'split_finished', mesh, history, started)
-        vertex_values = np.vstack((vertex_values,
-            evaluate_batched(provider, mesh.vertices[old_vertices:], cfg.query_batch_size)))
-    settings = dict(target_edge=cfg.refinement_target_edge, rho_edge=cfg.refinement_rho_edge,
-                    selection='edge_udf_only', query_batch=cfg.query_batch_size,
-                    pruning='long_edges_only')
-    report = refinement_report(mesh, original, history, settings, started)
-    report.update(target_reached=True, local_max_edge=local_max)
-    return mesh, parent, report, CenterFields(centers, values, provider.fingerprint)

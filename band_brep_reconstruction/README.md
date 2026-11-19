@@ -1,40 +1,26 @@
-# Post1109 B-rep 重建模板
+# 从网格和 E/V-UDF 恢复边、面及 STEP
 
-从闭合三角网格及连续 E/V 距离场恢复 STEP。流程依据 [Post1109](../docs/Post1109.md)。所有阈值使用归一化坐标。
+当前分支实现 [边优先方案](../docs/ScanEdgeFirst.md)。首版输入为闭合、方向一致、已归一化的三角网格与可连续查询的 E/V。历史面优先流程见 [Post1109](../docs/Post1109.md)。
 
-| 阶段 | 默认设置 |
-|---|---|
-| 网格 | 几何粗加密目标 0.03，E 近区半径 0.02 与细目标 0.003 |
-| 面与拓扑 | 单阶段面阈值 0.003，非核心区域传播，共顶点邻接，局部顶点域和短边推断 |
-| 顶点 | V-UDF 中心差分投票与空间球壳距离中心拟合 |
-| 曲线 | 直接距离拟合依次尝试直线、圆或圆弧、分段三次 Bézier，随后独立检查 E 场覆盖 |
-| 曲面与 STEP | 筛选解析曲面，必要时拟合固定边界的 B 样条，再做周期规划、共享边装配和 STEP 读回 |
-
-在含 Python 3.10+、pythonocc-core 7.7、libigl 2.6.3 的环境中，从仓库根目录运行：
+在具备 Python 3.10+、OCC 7.7 和 libigl 2.6.3 的环境从仓库根目录安装：
 
 ```bash
 python -m pip install -e ./veudf -e './band_brep_reconstruction[test]'
-band-brep-reconstruct --step /path/to/source.step --output /path/to/new_run
+band-brep-reconstruct --step source.step --extraction trace --output trace_run
+band-brep-reconstruct --step source.step --extraction mc --output mc_run
+# 共用一份粗细查询，分别写出两路产物
+band-brep-reconstruct --step source.step --extraction both --output paired_run
 ```
 
-运行时要求从本仓库安装的 `veudf` 提供 `edge_vertex_neighborhood_pools_v3` schema。
+STEP 入口用同一次归一化得到输入网格和生产 v3 的精确 CAD E/V 查询。全直边模型用批量有限线段距离，其他曲线沿用生产参考 oracle。重建器只接收网格、标量场及其有效性与存在性。CAD 实例 ID 和关联保留在离线评分侧。
 
-命令行从源 STEP 生成归一化网格，调用生产 veudf 的 `ReferenceEdgeOracle` 和 `ReferenceVertexOracle` 查询完整 CAD E/V。v3 训练标签在 0.05 截断，几何 condition 沿用现行版本和数组契约。Python 接口接受已归一化的网格和连续距离回调，便于接入已解码的距离值：
+| 阶段 | 方法与产物 |
+|---|---|
+| `scout` | 近表面稀疏粗块 (H=0.012) 与候选细格 (h=0.003)，E/V 查询位置按整型格点去重。距输入网格 0.015 内优先，外层仍查询，中心无效时探查角点。有效带最多 0.02。输出 `scout.npz` |
+| `wireframe` | `trace` 投影带内低 E 样本，沿局部切向双向连接。 `mc` 提取有效单元中的 (E=0.005) 管壳，再将壳顶点向 E 低谷投影和去重，形成骨架支撑。两者通过 V 定位、验证短边候选及固定端点距离拟合得到 `wireframe.json`、`curves.json`。MC 另存 `edge_shell.npz` |
+| `split_mesh` | 将三维曲线嵌入网格副本，沿局部路径插入边界约束。由切口的有向两侧确定面标签、E–F 关系和有向环。输出 `split_mesh.npz` 和 `logical_graph.json` |
+| `solid` | 解析面或有约束的 B 样条、共享边装配及 STEP 读回。通过时输出 `reconstruction.step` |
 
-```python
-from bandbrep import CallableUDFProvider, Config
-from bandbrep.reconstruct import reconstruct
-from bandbrep.surface_mesh import load_mesh
+`--stop-after` 可指定上述阶段。数值配置见 [default.json](configs/default.json)，`--config` 可覆盖参数。`scout_point_budget` 限制粗块数量和细格去重前的角点分配量。每次使用空输出目录。 `run.json`、`quality.json` 记录输入身份、阶段用时及失败诊断，失败时保留上游已生成的几何。使用 `both` 时，父目录保留通用查询数据，`trace/` 和 `mc/` 分别记录重建结果及耗时。任一路失败时，配对命令返回失败。
 
-mesh = load_mesh("/data/new_mesh_pools_v3/assets/<id>/condition")
-udf = CallableUDFProvider(
-    evaluate_ev,  # [N, 3] -> metric [N, 2], columns dE and dV
-    fingerprint=field_identity,
-    presence=("present", "present"),
-)
-result = reconstruct(mesh, udf, Config(), output_dir)
-```
-
-E/V 是否存在由调用方显式给出。接入有截断的预测器时，通过 `FieldEvaluation` 传递 valid 和 saturated 掩码，必需通道的无效或饱和值会被拒绝。梯度统一通过空间采样中心差分计算，步长 1e-5。默认查询批大小 65536，每例预算 10800 秒。通过 [default.json](configs/default.json) 查看参数，使用 `--config` 覆盖数值或 `--stop-after` 查看中间阶段。使用 `--resume` 续跑时，输入、数值配置、代码及已登记产物必须匹配缓存身份。
-
-结果写入 `reconstruction.step`（验收后）、`run.json`、`quality.json` 和各阶段产物。新实验从源 STEP 或 v3 几何 condition 重新执行网格加密到 STEP 验收。评分函数见[独立评分](benchmarks/README.md)，旧批次成绩见[历史实验记录](../docs/Experiment.md)。
+Python 入口为 `bandbrep.edge_first.reconstruct(mesh, udf, Config(), output_dir)`。可通过 `CallableUDFProvider` 接入已归一化坐标中的连续 E/V，明确通道是否存在。首版针对同源 STEP 网格和精确场。开放点云、预测噪声与扫描纠偏需要另行验证。MC 的管壳投影是近似骨架方法，近邻分支合并、截断区和缺失支撑需查看诊断。离线评分见 [benchmarks/](benchmarks/README.md)。

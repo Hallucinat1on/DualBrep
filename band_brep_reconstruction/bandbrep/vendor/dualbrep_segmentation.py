@@ -10,7 +10,7 @@ from scipy.sparse.csgraph import connected_components
 
 def hierarchical_segmentation(mesh, face_udf, threshold1=0.003, threshold2=0.01,
                               filter_size=5, avg_udf_threshold=0.003, *, second_pass=True,
-                              inclusive=False):
+                              inclusive=False, mean_filter=True):
     """
     Two-pass hierarchical segmentation mirroring C++ segment_mode3.
 
@@ -41,13 +41,16 @@ def hierarchical_segmentation(mesh, face_udf, threshold1=0.003, threshold2=0.01,
         raise ValueError('second_pass must be a boolean')
     if type(inclusive) is not bool:
         raise ValueError('inclusive must be a boolean')
+    if type(mean_filter) is not bool:
+        raise ValueError('mean_filter must be a boolean')
     udf = np.abs(face_udf[:, 0]) if face_udf.ndim == 2 else np.abs(face_udf)
     n_faces = len(udf)
 
     reasons = np.ones(n_faces, dtype=np.int8)  # 0 core, 1 first threshold, 2 split threshold, 3 size, 4 mean, 5 sub-size
     split_parents = []
     report = dict(split_parents=split_parents, pass1_components=0, pass1_valid=0,
-                  second_pass_enabled=second_pass, threshold1_inclusive=inclusive)
+                  second_pass_enabled=second_pass, threshold1_inclusive=inclusive,
+                  mean_filter_enabled=mean_filter)
     # --- Pass 1: threshold masking + connected components ---
     active = udf > threshold1 if inclusive else udf >= threshold1
     labels = np.full(n_faces, -1, dtype=np.int32)
@@ -83,11 +86,11 @@ def hierarchical_segmentation(mesh, face_udf, threshold1=0.003, threshold2=0.01,
     cluster_avg_udf = np.where(cluster_sizes > 0, cluster_udf_sums / cluster_sizes, 0.0)
 
     valid_clusters = np.where(
-        (cluster_sizes >= filter_size) & (cluster_avg_udf > avg_udf_threshold)
+        (cluster_sizes >= filter_size) & ((cluster_avg_udf > avg_udf_threshold) | (not mean_filter))
     )[0]
     valid_mask = np.isin(labels, valid_clusters)
     reasons[active_indices[cluster_sizes[comp_labels] < filter_size]] = 3
-    mean_rejected = (cluster_sizes[comp_labels] >= filter_size) & (cluster_avg_udf[comp_labels] <= avg_udf_threshold)
+    mean_rejected = mean_filter & (cluster_sizes[comp_labels] >= filter_size) & (cluster_avg_udf[comp_labels] <= avg_udf_threshold)
     reasons[active_indices[mean_rejected]] = 4
     labels[~valid_mask] = -1
     report.update(pass1_components=int(len(cluster_sizes)), pass1_valid=int(len(valid_clusters)))

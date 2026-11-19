@@ -44,5 +44,10 @@
   "curve_refine_samples": 2048,
   "curve_distance_iterations": 15,
   "periodic_frame_planning": true,
-  "feature_sdf_tolerance": null
+  "feature_sdf_tolerance": null,
+  "face_mean_filter": true,
+  "region_repair": "off",
+  "region_repair_max_rounds": 3,
+  "region_repair_samples": 128,
+  "region_repair_max_branches": 3
 }

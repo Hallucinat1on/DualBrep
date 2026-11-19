@@ -22,6 +22,11 @@ class Config:
     band_threshold_inclusive: bool = False
     face_filter_size: int = 10
     face_avg_udf_threshold: float = .003
+    face_mean_filter: bool = True
+    region_repair: str = 'off'
+    region_repair_max_rounds: int = 3
+    region_repair_samples: int = 128
+    region_repair_max_branches: int = 3
     field_error: float = .0002
     surface_tolerance: float = .003
     localization_tolerance: float = .001
@@ -72,7 +77,11 @@ class Config:
             raise ValueError('invalid vertex_domains')
         if self.surface_candidates not in ('basic', 'revolution'):
             raise ValueError('invalid surface_candidates')
-        for key in ('infer_short_edges', 'periodic_frame_planning', 'face_second_pass', 'band_threshold_inclusive'):
+        if self.region_repair not in ('off','small','single_face','joint'):
+            raise ValueError('invalid region_repair')
+        if self.region_repair != 'off' and self.face_second_pass:
+            raise ValueError('region_repair currently requires first-pass-only segmentation')
+        for key in ('infer_short_edges', 'periodic_frame_planning', 'face_second_pass', 'band_threshold_inclusive', 'face_mean_filter'):
             if type(getattr(self, key)) is not bool:
                 raise ValueError(f'{key} must be a boolean')
         if type(self.vertex_min_votes) is not int or self.vertex_min_votes < 1:
@@ -85,7 +94,8 @@ class Config:
             raise ValueError('invalid band_propagation')
         for key in ('presence_samples','presence_min_points','query_batch_size','max_segments',
                     'face_samples','spline_controls','max_spline_controls','uv_iterations','face_filter_size',
-                    'curve_init_samples','curve_fit_samples','curve_refine_samples','curve_distance_iterations'):
+                    'curve_init_samples','curve_fit_samples','curve_refine_samples','curve_distance_iterations',
+                    'region_repair_max_rounds','region_repair_samples','region_repair_max_branches'):
             v = getattr(self,key)
             if type(v) is not int or v < 1: raise ValueError(f'{key} must be a positive integer')
         if self.spline_controls < 4 or self.max_spline_controls < self.spline_controls:

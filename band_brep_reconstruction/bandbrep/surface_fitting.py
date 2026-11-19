@@ -71,11 +71,15 @@ def tensor_basis(uv,knots,degree=3):
     b=BSpline(knots,np.eye(n),degree,extrapolate=True)
     a=b(uv[:,0]);c=b(uv[:,1]);return np.einsum('ni,nj->nij',a,c).reshape(len(uv),n*n)
 
-def sample_face_regions(mesh,labels,cfg):
+def sample_face_regions(mesh,labels,cfg,trusted=None):
     """DualBrep [F,N,6] / bbox contract, local NumPy sampling instead of Open3D."""
     rng=np.random.default_rng(cfg.seed);output={};nrm=normals(mesh)
     for face in sorted(np.unique(labels[labels>=0])):
-        ids=np.flatnonzero(labels==face);tri=mesh.vertices[mesh.triangles[ids]]
+        ids=np.flatnonzero(labels==face)
+        if trusted is not None:
+            safe=ids[np.asarray(trusted)[ids]]
+            if len(safe):ids=safe
+        tri=mesh.vertices[mesh.triangles[ids]]
         area=np.linalg.norm(np.cross(tri[:,1]-tri[:,0],tri[:,2]-tri[:,0]),axis=1)
         chosen=rng.choice(len(ids),cfg.face_samples,p=area/area.sum());root=np.sqrt(rng.random(cfg.face_samples));v=rng.random(cfg.face_samples)
         b=np.column_stack((1-root,root*(1-v),root*v));pts=np.einsum('ni,nij->nj',b,tri[chosen])
@@ -210,8 +214,8 @@ def fit_general_spline(face,points,boundaries,normal,cfg):
         except ReconstructionError as exc:last=exc
     raise ReconstructionError('surface_boundary_incompatible','Spline budget cannot satisfy fixed boundary',{'face':face,'cause':str(last)})
 
-def initialize_face_surfaces(mesh,face_labels,graph,curves,provider,cfg):
-    regions=sample_face_regions(mesh,face_labels,cfg);patches={}
+def initialize_face_surfaces(mesh,face_labels,graph,curves,provider,cfg,*,trusted=None):
+    regions=sample_face_regions(mesh,face_labels,cfg,trusted);patches={}
     for face in range(graph.face_count):
         require(face in regions,'missing_face_region','No sampled region for face',face=face)
         p,n=regions[face]

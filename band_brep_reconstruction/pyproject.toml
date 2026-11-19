@@ -13,6 +13,7 @@ dependencies = ["numpy>=1.24,<2", "scipy>=1.10", "veudf==2.0.0"]
 models = ["torch>=2.0"]
 test = ["pytest>=8"]
 benchmarks = ["psutil>=6"]
+visualization = ["plotly>=5.18,<7"]
 
 [project.scripts]
 band-brep-reconstruct = "bandbrep.cli:main"

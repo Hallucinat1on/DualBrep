@@ -33,7 +33,8 @@ def collect_labels(pairs, bands, face_labels):
     for target,source in _relations(el[src],vl[dst]):ve[target].add(int(source))
     for v,incident in enumerate(ve):
         for e in incident:vf[v].update(ef[e])
-    support=np.ones(len(face_labels),bool) if bands.exclusion_reasons is None else np.isin(bands.exclusion_reasons,[1,2])
+    support=(bands.edge_support_mask if bands.edge_support_mask is not None else
+             np.ones(len(face_labels),bool) if bands.exclusion_reasons is None else np.isin(bands.exclusion_reasons,[1,2]))
     em=_members(el,len(ef));vm=_members(vl,len(vf))
     edges=[dict(id=e,faces=sorted(faces),vertices=[],nodes=ids.tolist(),
         support_nodes=ids[support[ids]].tolist(),status='supported' if len(faces)==2 else 'unresolved')

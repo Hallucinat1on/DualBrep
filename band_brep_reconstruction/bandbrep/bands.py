@@ -18,7 +18,22 @@ def build_bands(mesh, provider, cfg, center_fields=None):
         SimpleNamespace(face_adjacency=face_adjacency(mesh.triangles)), udf,
         threshold1=cfg.face_threshold1, threshold2=cfg.face_threshold2,
         filter_size=cfg.face_filter_size, avg_udf_threshold=cfg.face_avg_udf_threshold,
-        second_pass=cfg.face_second_pass, inclusive=cfg.band_threshold_inclusive)
+        second_pass=cfg.face_second_pass, inclusive=cfg.band_threshold_inclusive, mean_filter=cfg.face_mean_filter)
+    repair=None
+    if cfg.region_repair!='off':
+        from .region_repair import repair_regions
+        repair=repair_regions(mesh,points,values,labels,reasons,provider,cfg)
+        labels=repair.labels
+        reasons=reasons.copy();reasons[labels>=0]=0
+        count=int(labels.max()+1)
+    segmentation.update(count=count)
+    return mesh,bands_from_labels(mesh,points,values,labels,reasons,provider,cfg,segmentation,repair,
+                                 center_fields_reused=center_fields is not None)
+
+
+def bands_from_labels(mesh,points,values,labels,reasons,provider,cfg,segmentation,repair=None,*,center_fields_reused=True):
+    """Rebuild all dependent domains from effective labels; retain raw evidence."""
+    presence=provider.presence();count=int(labels.max()+1)
     # A rejected high-distance component is not evidence of an edge.
     eb = np.isin(reasons, [1, 2]) if presence[0] == 'present' else np.zeros(len(points), bool)
     core = labels >= 0
@@ -48,6 +63,15 @@ def build_bands(mesh, provider, cfg, center_fields=None):
                   sampling='triangle_centers', vertex_domain='nested_in_edge_band',
                   vertex_domains=vertex_report,
                   segmentation=segmentation,
-                  field_query_points=len(points) if center_fields is None else 0,
-                  reused_center_queries=center_fields is not None, strict_topology_guarantee=False)
-    return mesh, BandState(points, values, eb, vb, eb & ~vb, core, report, labels, reasons, vertex_labels, vertex_centers)
+                  field_query_points=0 if center_fields_reused else len(points),
+                  reused_center_queries=center_fields_reused, strict_topology_guarantee=False)
+    state = BandState(points, values, eb, vb, eb & ~vb, core, report, labels, reasons, vertex_labels, vertex_centers)
+    if repair is not None:
+        state.raw_face_labels=repair.raw_labels
+        state.raw_exclusion_reasons=repair.raw_reasons
+        state.trusted_core_mask=repair.trusted
+        state.absorbed_mask=repair.absorbed
+        state.edge_support_mask=np.isin(repair.raw_reasons,[1,2]) & eb
+        state.repair_state=repair
+        report['region_repair']=repair.report
+    return state

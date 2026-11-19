@@ -140,7 +140,7 @@ class DensificationTests(unittest.TestCase):
         p=AnalyticFields(lambda x:np.column_stack((np.zeros(len(x)),np.ones(len(x)),np.ones(len(x)))),
                          presence=('absent','absent'))
         fields=CenterFields(points,p.evaluate(points).values,p.fingerprint)
-        cfg=Config(vertex_domains='threshold',face_filter_size=1)
+        cfg=Config(face_filter_size=1)
         _,direct=build_bands(mesh,p,cfg)
         p.evaluate=Mock(side_effect=AssertionError('requeried centers'))
         _,reused=build_bands(mesh,p,cfg,fields)

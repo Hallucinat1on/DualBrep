@@ -12,7 +12,7 @@ import subprocess
 import sys
 import time
 import psutil
-from run_mesh_input_experiment import read,save,digest
+from replay_inputs import read,save,digest
 from replay_curve_recovery import initialize as initialize_case
 
 
@@ -31,11 +31,8 @@ def initialize(group,out):
     snapshots=[]
     for row in rows:
         sid=row['id'];print('Freezing',sid,flush=True)
-        initialize_case(group,sid,out/'runs'/sid,'direct_distance','solid')
+        initialize_case(group,sid,out/'runs'/sid,'solid')
         identity=read(out/'runs'/sid/'identity.json');snapshots.append(identity['code'])
-        cfg=read(out/'runs'/sid/'policy.json')['config']
-        if (cfg['refinement_coarse_edge'],cfg['refinement_target_edge'],cfg['face_threshold1'],cfg['face_second_pass'])!=(.03,.003,.003,False):
-            raise RuntimeError('Input group differs from the requested coarse0.03/fine0.003/single-pass0.003 policy')
         immutable += [out/'runs'/sid/'identity.json',group/'records'/(sid+'.json')]
     if any(s!=snapshots[0] for s in snapshots):raise RuntimeError('Replay code changed while freezing cases')
     save(out/'identity.json',dict(files={str(p):digest(p) for p in immutable}))
@@ -57,7 +54,7 @@ def launch(out,row):
     env={**os.environ,**{k:'1' for k in ('OMP_NUM_THREADS','OPENBLAS_NUM_THREADS','MKL_NUM_THREADS','NUMEXPR_NUM_THREADS')}}
     env['PYTHONPATH']=str(snapshot/'veudf/src')+':'+str(snapshot/'band_brep_reconstruction')
     command=[sys.executable,str(script),'--worker','--input-group',read(out/'campaign.json')['input_group'],
-             '--id',sid,'--output',str(folder),'--method','direct_distance','--stop-after','solid']
+             '--id',sid,'--output',str(folder),'--stop-after','solid']
     started=time.monotonic();peak=0;timed_out=False
     with (folder/'worker.log').open('x') as log:
         process=subprocess.Popen(command,env=env,stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT,start_new_session=True)

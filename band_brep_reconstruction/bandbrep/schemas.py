@@ -47,11 +47,6 @@ class BandState:
     # Optional nearest-candidate vertex domains; None keeps connected-component domains.
     vertex_labels: np.ndarray = None
     vertex_centers: np.ndarray = None
-    raw_face_labels: np.ndarray = None
-    raw_exclusion_reasons: np.ndarray = None
-    trusted_core_mask: np.ndarray = None
-    edge_support_mask: np.ndarray = None
-    absorbed_mask: np.ndarray = None
 
 @dataclass
 class BandTopology:

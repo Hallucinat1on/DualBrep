@@ -4,7 +4,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'benchmarks'))
 from run_curve_replay_batch import update_report, verify
-from run_mesh_input_experiment import save, digest
+from replay_inputs import save, digest
 import pytest
 
 

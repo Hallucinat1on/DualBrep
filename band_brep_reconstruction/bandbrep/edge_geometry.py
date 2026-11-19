@@ -9,11 +9,10 @@ import numpy as np
 from scipy.spatial import cKDTree
 from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import minimum_spanning_tree, dijkstra, connected_components
-from .schemas import EdgeInstance, LogicalGraph, require
-from .curve_fitting import fit_circle
+from .schemas import require
 
 
-def project_support(points, provider, radius, cfg, *, max_iterations=32, stats=None):
+def project_support(points, provider, radius, cfg, *, max_iterations=8, stats=None):
     original=np.asarray(points,float);q=original.copy()
     values=evaluate_batched(provider,q);movable=np.ones(len(q),bool)
     if stats is not None:stats.update(iterations=0,gradient_rows=0)
@@ -115,40 +114,3 @@ def order_general(points, ends, cfg):
         worst=max(worst,float(dist.max()))
     require(worst<=cfg.curve_tolerance*3,'curve_support_branching','Ordered curve misses its support',error=worst)
     return q
-
-
-def build_edge_geometry(topology, bands, vertices, provider, cfg):
-    edges=[]
-    for item in topology.edges:
-        require(len(item['faces'])==2,'edge_neighbors_unresolved','Curve requires two confirmed neighboring faces',edge=item['id'],faces=item['faces'])
-        vids=list(item['vertices']);require(len(vids)<=2,'edge_vertices_unresolved','Edge touches more than two vertex candidates',edge=item['id'],vertices=vids)
-        radius=max(cfg.tau_edge*3,cfg.surface_tolerance*4)
-        ids=np.asarray(item.get('support_nodes',item['nodes']),int)
-        if cfg.infer_short_edges and len(vids)==2 and (item.get('status')=='inferred_short' or len(ids)<3):
-            # Endpoint-supported segment; fit_shared_curves still rejects it unless
-            # e-UDF and SDF vanish along the whole segment.
-            ends=np.array([vertices[v].position for v in vids])
-            require(np.linalg.norm(ends[1]-ends[0])>cfg.localization_tolerance,'coincident_vertex_candidates','Distinct vertex candidates have coincident geometry')
-            edges.append(EdgeInstance(item['id'],tuple(item['faces']),ends,False,vids,-1,radius))
-            continue
-        require(len(ids)>=3,'edge_support_insufficient','Too few distance-supported edge nodes',edge=item['id'],count=len(ids))
-        points=project_support(bands.points[ids],provider,radius,cfg)
-        ends=np.array([vertices[v].position for v in vids]).reshape(-1,3)
-        ordered=None
-        if len(ends)==2:
-            direction=ends[1]-ends[0];length=np.linalg.norm(direction)
-            require(length>cfg.localization_tolerance,'coincident_vertex_candidates','Distinct vertex candidates have coincident geometry')
-            t=(points-ends[0])@direction/(length*length)
-            residual=np.linalg.norm(points-(ends[0]+t[:,None]*direction),axis=1)
-            if residual.max()<=cfg.curve_tolerance:
-                ordered=np.vstack((ends[0],points[np.argsort(t)],ends[1]))
-        if ordered is None and len(points)>=6:
-            data,error=fit_circle(points)
-            if error<=cfg.curve_tolerance:ordered=circle_order(points,data,ends,cfg)
-        if ordered is None:ordered=order_general(points,ends,cfg)
-        keep=np.r_[True,np.linalg.norm(np.diff(ordered,axis=0),axis=1)>1e-9];ordered=ordered[keep]
-        # A single distinct incident vertex is represented twice only now.
-        endpoint_uses=vids if len(vids)!=1 else [vids[0],vids[0]]
-        edges.append(EdgeInstance(item['id'],tuple(item['faces']),ordered,len(vids)==0,
-                                  endpoint_uses,-1,radius))
-    return LogicalGraph(topology.face_count,vertices,edges,report={'incidence_source':'band_components'})

@@ -98,17 +98,16 @@ def sampled_udf_gradient(evaluate, xyz, channel, step=UDF_GRADIENT_STEP,
 class CallableUDFProvider:
     """Continuous metric [dE,dV]; gradients sample values at spatial offsets.
 
-    Gradient channels are 0=E, 1=V. Presence may be omitted and inferred on
-    deterministic mesh-surface samples. No derivative callback is accepted.
+    Gradient channels are 0=E, 1=V. Supply E/V presence explicitly.
     """
-    def __init__(self, fn, *, fingerprint, presence=None, band_width=.02):
+    def __init__(self, fn, *, fingerprint, presence, band_width=.02):
         require(isinstance(fingerprint, str) and bool(fingerprint), 'field_identity', 'Supply a field fingerprint')
         require(np.isfinite(band_width) and band_width > 0, 'field_domain', 'Invalid field band width')
-        require(presence is None or (len(presence) == 2 and all(v in ('present','absent','unknown') for v in presence)),
+        require(presence is not None and len(presence) == 2 and all(v in ('present','absent') for v in presence),
                 'invalid_presence', 'Expected E/V presence')
         self.fn = fn
         self.fingerprint, self.band_width = fingerprint, float(band_width)
-        self._presence = tuple(presence) if presence is not None else None
+        self._presence = tuple(presence)
 
     def presence(self):
         return self._presence
@@ -134,23 +133,6 @@ class CallableUDFProvider:
         return sampled_udf_gradient(self.evaluate, xyz, channel, step)
 
 
-class ProductionUDFProvider(CallableUDFProvider):
-    """Adapt the production FieldProviderAdapter without using its SDF output."""
-    def __init__(self, adapter):
-        self.adapter = adapter
-        require(adapter.sdf_source=="condition","condition_source","Use the input mesh condition for the production adapter")
-        self.mesh_fingerprint=adapter.condition.fingerprint
-        def evaluate(q):
-            r = adapter.evaluate(q)
-            return FieldEvaluation(r.values[:,1:],r.valid[:,1:],r.saturated[:,1:],r.error[:,1:])
-        policy = dict(band_width=adapter.band_width, presence=adapter.presence(),
-                      presence_support=np.asarray(getattr(adapter,'presence_support',[])).tolist())
-        digest = hashlib.sha256((adapter.fingerprint+json.dumps(policy,sort_keys=True)).encode()).hexdigest()
-        super().__init__(evaluate, fingerprint='production:'+digest, presence=adapter.presence(),
-                         band_width=adapter.band_width)
-        self.normalization = getattr(adapter,'normalization',None)
-
-
 class MeshFieldProvider:
     """Internal [mesh SDF,dE,dV], including query-domain and gradient validity."""
     channel_names = ('sdf','dE','dV')
@@ -159,7 +141,7 @@ class MeshFieldProvider:
 
     def __init__(self, mesh, udf, cfg):
         from veudf.geometry.mesh import MeshSDFOracle
-        from veudf.geometry.sampling import base_surface, mesh_hash
+        from veudf.geometry.sampling import mesh_hash
         identity=mesh_hash(mesh.vertices,mesh.triangles)
         require(getattr(udf,"mesh_fingerprint",identity)==identity,"condition_mismatch","Decoder condition differs from the input mesh")
         self.oracle = MeshSDFOracle(mesh.vertices,mesh.triangles)
@@ -168,26 +150,13 @@ class MeshFieldProvider:
         self.batch_size = cfg.query_batch_size
         self.query_report = dict(outside_band=0, backtracked_steps=0)
         self._presence = udf.presence()
-        self.presence_support = None
-        if self._presence is None:
-            points,_ = base_surface((mesh.vertices,mesh.triangles),cfg.presence_samples,cfg.seed)
-            support = np.zeros(2,int);usable=np.zeros(2,int)
-            for start in range(0,len(points),cfg.query_batch_size):
-                checkpoint("presence")
-                r = udf.evaluate(points[start:start+cfg.query_batch_size])
-                good=r.valid&~r.saturated&np.isfinite(r.values)
-                usable+=good.sum(0)
-                support += ((r.values < cfg.presence_tau)&good).sum(0)
-            require((usable>=cfg.presence_min_points).all(),"presence_unknown","Insufficient valid surface queries to infer presence")
-            self.presence_support = support.tolist()
-            self._presence = tuple('present' if n >= cfg.presence_min_points else 'absent' for n in support)
-        require(len(self._presence)==2 and all(p in ('present','absent') for p in self._presence),
+        require(self._presence is not None and len(self._presence)==2 and all(p in ('present','absent') for p in self._presence),
                 'presence_unknown','Resolve E/V presence before reconstruction')
         require(self._presence != ('absent','present'),'invalid_presence','Vertices require edges')
         policy = dict(mesh=mesh_hash(mesh.vertices,mesh.triangles), udf=udf.fingerprint,
                       band_width=self.band_width, presence=self._presence,
                       udf_gradient=dict(method='central_difference',step=UDF_GRADIENT_STEP),
-                      normalization=self.normalization, presence_support=self.presence_support)
+                      normalization=self.normalization, presence_support=None)
         self.fingerprint = 'mesh-udf:'+hashlib.sha256(json.dumps(policy,sort_keys=True).encode()).hexdigest()
 
     def presence(self):

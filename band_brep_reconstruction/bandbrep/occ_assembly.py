@@ -300,7 +300,7 @@ def assemble_brep(graph,curves,patches,cfg,out):
     # Plan one common meridian across periodic faces sharing coaxial rings.
     # This changes parameter frames / loop origins, not support or curve geometry.
     curves=copy.deepcopy(curves);patches=copy.deepcopy(patches);planned=set()
-    ring_kinds=PERIODIC_KINDS if cfg.periodic_frame_planning else ('cylinder','sphere')
+    ring_kinds=PERIODIC_KINDS
     def ring_face(fid,patch):
         incident=[e for e in graph.edges if fid in e.faces]
         ok=patch.kind in ring_kinds and (len(incident)==2 or (patch.kind=='sphere' and len(incident)==1))
@@ -313,114 +313,99 @@ def assemble_brep(graph,curves,patches,cfg,out):
                 if not e.closed:return np.asarray(graph.vertices[e.vertices[0 if use.forward else 1]].position,float)
         return None
     ring_anchor={}
-    if cfg.periodic_frame_planning:
-        for fid,patch in patches.items():
-            if patch.kind not in PERIODIC_KINDS or ring_face(fid,patch):continue
-            incident=[e for e in graph.edges if fid in e.faces]
-            rings=[e for e in incident if e.closed and curves[e.id].kind=='circle']
-            if not rings or len(rings)==len(incident):continue
-            anchor=wrap_anchor(fid)
-            if anchor is None:continue
-            for e in rings:ring_anchor.setdefault(e.id,anchor)
-    if cfg.periodic_frame_planning:
-        # One reference direction per family of coaxial ring faces, so every ring
-        # start (and every seam) lies on one common meridian half-plane.  A family
-        # touching a wrapping face adopts that face's loop vertex as its meridian.
-        members=[f for f,p in patches.items() if ring_face(f,p)];family={f:f for f in members}
-        def root(f):
-            while family[f]!=f:family[f]=family[family[f]];f=family[f]
-            return f
-        for e in graph.edges:
-            a,b=e.faces
-            if a in family and b in family:family[root(a)]=root(b)
-        reference={}
-        for f in members:
-            for e in graph.edges:
-                if f in e.faces and e.id in ring_anchor and root(f) not in reference:
-                    reference[root(f)]=ring_anchor[e.id]-np.asarray(curves[e.id].data['center'],float)
-        for f in members:reference.setdefault(root(f),np.asarray(patches[f].data['x'],float))
-        for f in members:
-            patch=patches[f];axis=np.asarray(patch.data['axis'],float);ref=reference[root(f)]
-            x=ref-(ref@axis)*axis
-            if np.linalg.norm(x)<1e-6:continue
-            x/=np.linalg.norm(x);patch.data['x']=x;patch.data['y']=np.cross(axis,x)
-            for e in graph.edges:
-                if f not in e.faces or e.id in planned:continue
-                d=curves[e.id].data;xr=ref-(ref@d['normal'])*d['normal'];xr/=np.linalg.norm(xr)
-                d['start']=float(np.arctan2(xr@d['y'],xr@d['x']));planned.add(e.id)
-    for fid,patch in sorted(patches.items(),key=lambda item:0 if item[1].kind=='sphere' else 1):
-        if cfg.periodic_frame_planning or not ring_face(fid,patch):continue
+    for fid,patch in patches.items():
+        if patch.kind not in PERIODIC_KINDS or ring_face(fid,patch):continue
         incident=[e for e in graph.edges if fid in e.faces]
-        first=next((e for e in incident if e.id in planned),None)
-        if first is not None:
-            d=curves[first.id].data;anchor=np.cos(d['start'])*d['x']+np.sin(d['start'])*d['y']
-            axis=patch.data['axis'];x=anchor-(anchor@axis)*axis;x/=np.linalg.norm(x)
-            patch.data['x']=x;patch.data['y']=np.cross(axis,x)
-        for e in incident:
-            if e.id in planned:continue
-            d=curves[e.id].data;x=patch.data['x'];x=x-(x@d['normal'])*d['normal'];x/=np.linalg.norm(x)
-            d['start']=float(np.arctan2(x@d['y'],x@d['x']));planned.add(e.id)
+        rings=[e for e in incident if e.closed and curves[e.id].kind=='circle']
+        if not rings or len(rings)==len(incident):continue
+        anchor=wrap_anchor(fid)
+        if anchor is None:continue
+        for e in rings:ring_anchor.setdefault(e.id,anchor)
+    # One reference direction per family of coaxial ring faces, so every ring
+    # start (and every seam) lies on one common meridian half-plane.  A family
+    # touching a wrapping face adopts that face's loop vertex as its meridian.
+    members=[f for f,p in patches.items() if ring_face(f,p)];family={f:f for f in members}
+    def root(f):
+        while family[f]!=f:family[f]=family[family[f]];f=family[f]
+        return f
+    for e in graph.edges:
+        a,b=e.faces
+        if a in family and b in family:family[root(a)]=root(b)
+    reference={}
+    for f in members:
+        for e in graph.edges:
+            if f in e.faces and e.id in ring_anchor and root(f) not in reference:
+                reference[root(f)]=ring_anchor[e.id]-np.asarray(curves[e.id].data['center'],float)
+    for f in members:reference.setdefault(root(f),np.asarray(patches[f].data['x'],float))
+    for f in members:
+        patch=patches[f];axis=np.asarray(patch.data['axis'],float);ref=reference[root(f)]
+        x=ref-(ref@axis)*axis
+        if np.linalg.norm(x)<1e-6:continue
+        x/=np.linalg.norm(x);patch.data['x']=x;patch.data['y']=np.cross(axis,x)
+        for e in graph.edges:
+            if f not in e.faces or e.id in planned:continue
+            d=curves[e.id].data;xr=ref-(ref@d['normal'])*d['normal'];xr/=np.linalg.norm(xr)
+            d['start']=float(np.arctan2(xr@d['y'],xr@d['x']));planned.add(e.id)
     # A periodic face whose boundary leaves an angular gap needs no seam at all:
     # rotate its parameter frame so the u-cut falls in that gap.  Shared 3D curves
     # and the support surface are unchanged; only the parameter origin moves.
     seamless={};chained={};band={}
-    if cfg.periodic_frame_planning:
-        for fid,patch in patches.items():
-            if patch.kind not in PERIODIC_KINDS:continue
-            incident=[e for e in graph.edges if fid in e.faces]
-            if not incident or any(e.closed for e in incident):continue
-            pts=np.vstack([curves[e.id].evaluate(np.linspace(0,1,257)) for e in incident])
-            gaps=[]
-            for dim in periodic_dims(patch.kind):
-                angle=np.sort(np.mod(patch.uv(pts)[:,dim],2*np.pi))
-                gap=np.diff(np.r_[angle,angle[0]+2*np.pi]);i=int(gap.argmax());gaps.append((float(gap[i]),float(angle[i]+gap[i]/2)))
-            if min(g for g,_ in gaps)<.05:continue
-            rotation=gaps[0][1]-np.pi
-            x=patch.data['x'].copy();y=patch.data['y'].copy()
-            patch.data['x']=np.cos(rotation)*x+np.sin(rotation)*y
-            patch.data['y']=-np.sin(rotation)*x+np.cos(rotation)*y
-            # After rotation the u-cut sits at +-pi; a torus v-cut sits mid-gap.
-            seamless[fid]=np.array([-np.pi]+([gaps[1][1]] if len(gaps)>1 else []))
-            mapping.setdefault('frame_planning',[]).append({'face':fid,'kind':patch.kind,'rotation':float(rotation),'gaps':[g for g,_ in gaps]})
-        # Fully wrapping faces still need a seam.  Chain each loop's pcurves by
-        # whole periods so a loop is open in UV only at its first vertex, and start
-        # unplanned closed rings on that vertex's meridian; FixMissingSeam can then
-        # join vertices instead of splitting a shared edge.
-        for fid,patch in patches.items():
-            if patch.kind not in PERIODIC_KINDS or fid in seamless or ring_face(fid,patch):continue
-            incident=[e for e in graph.edges if fid in e.faces]
-            if not incident or all(e.closed for e in incident):continue
-            offsets={};anchor=wrap_anchor(fid)
+    for fid,patch in patches.items():
+        if patch.kind not in PERIODIC_KINDS:continue
+        incident=[e for e in graph.edges if fid in e.faces]
+        if not incident or any(e.closed for e in incident):continue
+        pts=np.vstack([curves[e.id].evaluate(np.linspace(0,1,257)) for e in incident])
+        gaps=[]
+        for dim in periodic_dims(patch.kind):
+            angle=np.sort(np.mod(patch.uv(pts)[:,dim],2*np.pi))
+            gap=np.diff(np.r_[angle,angle[0]+2*np.pi]);i=int(gap.argmax());gaps.append((float(gap[i]),float(angle[i]+gap[i]/2)))
+        if min(g for g,_ in gaps)<.05:continue
+        rotation=gaps[0][1]-np.pi
+        x=patch.data['x'].copy();y=patch.data['y'].copy()
+        patch.data['x']=np.cos(rotation)*x+np.sin(rotation)*y
+        patch.data['y']=-np.sin(rotation)*x+np.cos(rotation)*y
+        # After rotation the u-cut sits at +-pi; a torus v-cut sits mid-gap.
+        seamless[fid]=np.array([-np.pi]+([gaps[1][1]] if len(gaps)>1 else []))
+        mapping.setdefault('frame_planning',[]).append({'face':fid,'kind':patch.kind,'rotation':float(rotation),'gaps':[g for g,_ in gaps]})
+    # Fully wrapping faces still need a seam.  Chain each loop's pcurves by
+    # whole periods so a loop is open in UV only at its first vertex, and start
+    # unplanned closed rings on that vertex's meridian; FixMissingSeam can then
+    # join vertices instead of splitting a shared edge.
+    for fid,patch in patches.items():
+        if patch.kind not in PERIODIC_KINDS or fid in seamless or ring_face(fid,patch):continue
+        incident=[e for e in graph.edges if fid in e.faces]
+        if not incident or all(e.closed for e in incident):continue
+        offsets={};anchor=wrap_anchor(fid)
+        for cycle in graph.cycles.get(fid,[]):
+            previous=None
+            for use in cycle:
+                uv=patch.uv(curves[use.edge].evaluate(np.linspace(0,1,65)),ordered=True)
+                start,end=(uv[0],uv[-1]) if use.forward else (uv[-1],uv[0])
+                offset=np.zeros(2)
+                if previous is not None:
+                    for d in periodic_dims(patch.kind):offset[d]=2*np.pi*np.round((previous[d]-start[d])/(2*np.pi))
+                offsets[use.edge]=offset;previous=end+offset
+        aligned=[]
+        if anchor is not None:
+            for e in incident:
+                if not e.closed or e.id in planned or curves[e.id].kind!='circle':continue
+                d=curves[e.id].data;r=anchor-d['center'];r=r-(r@d['normal'])*d['normal']
+                if np.linalg.norm(r)<1e-9:continue
+                d['start']=float(np.arctan2(r@d['y'],r@d['x']));planned.add(e.id);aligned.append(e.id)
+        # FixMissingSeam joins wires into one rectangle only if every wire sits in
+        # the same period; move each open-edge loop onto the closed rings' period.
+        rings=[e for e in incident if e.closed]
+        if rings:
+            target=np.mean([patch.uv(curves[e.id].evaluate(np.linspace(0,1,65)),ordered=True)[:,0].mean() for e in rings])
             for cycle in graph.cycles.get(fid,[]):
-                previous=None
-                for use in cycle:
-                    uv=patch.uv(curves[use.edge].evaluate(np.linspace(0,1,65)),ordered=True)
-                    start,end=(uv[0],uv[-1]) if use.forward else (uv[-1],uv[0])
-                    offset=np.zeros(2)
-                    if previous is not None:
-                        for d in periodic_dims(patch.kind):offset[d]=2*np.pi*np.round((previous[d]-start[d])/(2*np.pi))
-                    offsets[use.edge]=offset;previous=end+offset
-            aligned=[]
-            if anchor is not None:
-                for e in incident:
-                    if not e.closed or e.id in planned or curves[e.id].kind!='circle':continue
-                    d=curves[e.id].data;r=anchor-d['center'];r=r-(r@d['normal'])*d['normal']
-                    if np.linalg.norm(r)<1e-9:continue
-                    d['start']=float(np.arctan2(r@d['y'],r@d['x']));planned.add(e.id);aligned.append(e.id)
-            # FixMissingSeam joins wires into one rectangle only if every wire sits in
-            # the same period; move each open-edge loop onto the closed rings' period.
-            rings=[e for e in incident if e.closed]
-            if rings:
-                target=np.mean([patch.uv(curves[e.id].evaluate(np.linspace(0,1,65)),ordered=True)[:,0].mean() for e in rings])
-                for cycle in graph.cycles.get(fid,[]):
-                    if len(cycle)==1 and graph.edges[cycle[0].edge].closed:continue
-                    mid=np.mean([(patch.uv(curves[u.edge].evaluate(np.linspace(0,1,65)),ordered=True)[:,0]+offsets[u.edge][0]).mean() for u in cycle])
-                    shift=2*np.pi*np.round((target-mid)/(2*np.pi))
-                    for u in cycle:offsets[u.edge]=offsets[u.edge]+np.array([shift,0.])
-            plan=plan_periodic_band(patch,graph.cycles.get(fid,[]),curves,graph,offsets,anchor) if patch.kind in ('cylinder','cone') and anchor is not None else None
-            if plan is not None:band[fid]=plan;offsets=plan['offsets']
-            chained[fid]=offsets
-            mapping.setdefault('seam_vertex_planning',[]).append({'face':fid,'kind':patch.kind,'aligned_rings':aligned,'chained_edges':len(offsets)})
+                if len(cycle)==1 and graph.edges[cycle[0].edge].closed:continue
+                mid=np.mean([(patch.uv(curves[u.edge].evaluate(np.linspace(0,1,65)),ordered=True)[:,0]+offsets[u.edge][0]).mean() for u in cycle])
+                shift=2*np.pi*np.round((target-mid)/(2*np.pi))
+                for u in cycle:offsets[u.edge]=offsets[u.edge]+np.array([shift,0.])
+        plan=plan_periodic_band(patch,graph.cycles.get(fid,[]),curves,graph,offsets,anchor) if patch.kind in ('cylinder','cone') and anchor is not None else None
+        if plan is not None:band[fid]=plan;offsets=plan['offsets']
+        chained[fid]=offsets
+        mapping.setdefault('seam_vertex_planning',[]).append({'face':fid,'kind':patch.kind,'aligned_rings':aligned,'chained_edges':len(offsets)})
     for eid,record in curves.items():
         curve,first,last=occ_curve(record);instance=graph.edges[eid]
         if instance.vertices:

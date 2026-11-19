@@ -319,7 +319,7 @@ def recover_distance_curves(topology,bands,vertices,provider,cfg,progress=None):
         require(len(vids)<=2,'edge_vertices_unresolved','Edge touches more than two vertex candidates',edge=edge_id)
         ids=np.asarray(item.get('support_nodes',item['nodes']),int)
         ends=np.array([vertices[v].position for v in vids]).reshape(-1,3)
-        inferred=cfg.infer_short_edges and len(vids)==2 and (item.get('status')=='inferred_short' or len(ids)<3)
+        inferred=len(vids)==2 and (item.get('status')=='inferred_short' or len(ids)<3)
         if inferred:
             # A topology-supported short line can lack off-curve observations.
             points=ends.copy();distances=np.zeros(2)
@@ -358,7 +358,7 @@ def recover_distance_curves(topology,bands,vertices,provider,cfg,progress=None):
             timings['initialization']+=time.monotonic()-tick
             fit=representative_indices(points,cfg.curve_fit_samples,cfg.seed+edge_id)
             tick=time.monotonic()
-            circle=_circle_candidate(projected,ends,edge_id) if cfg.curve_candidates=='arcs' else None
+            circle=_circle_candidate(projected,ends,edge_id)
             if circle is not None:
                 try:
                     circle,stats=refine_circle_distance(circle,points[fit],distances[fit],ends,cfg)

@@ -16,7 +16,7 @@ python -m pip install -e './veudf[jobs,postprocess,test]'
 python -m veudf.cli.build_dataset --help
 ```
 
-新 E/V 后处理入口见 [band_brep_reconstruction](band_brep_reconstruction/README.md)：直接读取预处理网格与连续两个 UDF，默认 L5 加密，模型无需输出 SDF。
+后处理入口见 [band_brep_reconstruction](band_brep_reconstruction/README.md)。本分支采用 Post1109 模板，支持从源 STEP 全量重建，或从已归一化网格和连续 E/V 回调恢复 B-rep。
 
 下文原 DualBrep 的安装、模型、`prepare_implicit.py` 和 Voronoi 数据命令保留论文复现用途，不能生成当前生产 E/V 点池。新数据规范、筛选和迁移边界见[生产数据处理](docs/ABCEdgeVertexUDFPreprocessing.md)。
 

@@ -5,34 +5,23 @@ from pathlib import Path
 
 @dataclass
 class Config:
-    query_batch_size: int = 8192
-    refinement_coarse_edge: float = .02
-    refinement_target_edge: float = .005
-    refinement_rho_edge: float = .02
-    refinement_rho_vertex: float = .03  # Legacy configuration compatibility; selection uses E only.
-    sample_timeout_seconds: float = 10800.
-    presence_samples: int = 393216
-    presence_tau: float = .005
-    presence_min_points: int = 16
-    tau_edge: float = .025
-    tau_vertex: float = .02
-    face_threshold1: float = .005
-    face_threshold2: float = .01
-    face_second_pass: bool = True
-    band_threshold_inclusive: bool = False
+    query_batch_size: int = 65536
+    refinement_coarse_edge: float = 0.03
+    refinement_target_edge: float = 0.003
+    refinement_rho_edge: float = 0.02
+    sample_timeout_seconds: float = 10800.0
+    tau_edge: float = 0.025
+    tau_vertex: float = 0.02
+    face_threshold1: float = 0.003
+    vertex_width_fallback: float = 0.01
     face_filter_size: int = 10
-    face_avg_udf_threshold: float = .003
-    face_mean_filter: bool = True
-    region_repair: str = 'off'
-    region_repair_max_rounds: int = 3
-    region_repair_samples: int = 128
-    region_repair_max_branches: int = 3
-    field_error: float = .0002
-    surface_tolerance: float = .003
-    localization_tolerance: float = .001
-    curve_tolerance: float = .001
-    boundary_tolerance: float = .001
-    cad_tolerance: float = .002
+    face_avg_udf_threshold: float = 0.003
+    field_error: float = 0.0002
+    surface_tolerance: float = 0.003
+    localization_tolerance: float = 0.001
+    curve_tolerance: float = 0.001
+    boundary_tolerance: float = 0.001
+    cad_tolerance: float = 0.002
     max_segments: int = 64
     face_samples: int = 1200
     spline_controls: int = 8
@@ -40,72 +29,37 @@ class Config:
     uv_iterations: int = 4
     seed: int = 0
     stop_after: str = 'solid'
-    save_queries: bool = True
-    band_connectivity: str = 'vertex'
-    band_propagation: str = 'noncore'
-    vertex_domains: str = 'local'
-    vertex_radius_fraction: float = .45
+    vertex_radius_fraction: float = 0.45
     vertex_cut_factor: float = 1.5
     vertex_min_votes: int = 3
-    infer_short_edges: bool = True
-    surface_candidates: str = 'revolution'
-    curve_candidates: str = 'arcs'
-    curve_recovery: str = 'projected'
     curve_init_samples: int = 256
     curve_fit_samples: int = 512
     curve_refine_samples: int = 2048
     curve_distance_iterations: int = 15
-    periodic_frame_planning: bool = True
-    feature_sdf_tolerance: float = None
+    feature_sdf_tolerance: float = 0.004
 
     @property
     def feature_sdf_limit(self):
-        return self.surface_tolerance if self.feature_sdf_tolerance is None else self.feature_sdf_tolerance
+        return self.feature_sdf_tolerance
 
     def validate(self):
-        if isinstance(self.sample_timeout_seconds,bool):raise ValueError("invalid sample_timeout_seconds")
-        if self.feature_sdf_tolerance is not None:
-            if isinstance(self.feature_sdf_tolerance, bool) or not math.isfinite(self.feature_sdf_tolerance) or self.feature_sdf_tolerance <= 0:
-                raise ValueError('invalid feature_sdf_tolerance')
-        if self.band_connectivity not in ('edge', 'vertex'):
-            raise ValueError('invalid band_connectivity')
-        if self.curve_candidates not in ('basic', 'arcs'):
-            raise ValueError('invalid curve_candidates')
-        if self.curve_recovery not in ('projected','direct_distance'):
-            raise ValueError('invalid curve_recovery')
-        if self.vertex_domains not in ('threshold', 'local'):
-            raise ValueError('invalid vertex_domains')
-        if self.surface_candidates not in ('basic', 'revolution'):
-            raise ValueError('invalid surface_candidates')
-        if self.region_repair not in ('off','small','single_face','joint'):
-            raise ValueError('invalid region_repair')
-        if self.region_repair != 'off' and self.face_second_pass:
-            raise ValueError('region_repair currently requires first-pass-only segmentation')
-        for key in ('infer_short_edges', 'periodic_frame_planning', 'face_second_pass', 'band_threshold_inclusive', 'face_mean_filter'):
-            if type(getattr(self, key)) is not bool:
-                raise ValueError(f'{key} must be a boolean')
         if type(self.vertex_min_votes) is not int or self.vertex_min_votes < 1:
             raise ValueError('vertex_min_votes must be a positive integer')
         if not (0 < self.vertex_radius_fraction < .5):
             raise ValueError('vertex_radius_fraction must lie in (0, 0.5)')
         if not (math.isfinite(self.vertex_cut_factor) and self.vertex_cut_factor > 0):
             raise ValueError('invalid vertex_cut_factor')
-        if self.band_propagation not in ('distance_only', 'noncore'):
-            raise ValueError('invalid band_propagation')
-        for key in ('presence_samples','presence_min_points','query_batch_size','max_segments',
+        for key in ('query_batch_size','max_segments',
                     'face_samples','spline_controls','max_spline_controls','uv_iterations','face_filter_size',
-                    'curve_init_samples','curve_fit_samples','curve_refine_samples','curve_distance_iterations',
-                    'region_repair_max_rounds','region_repair_samples','region_repair_max_branches'):
+                    'curve_init_samples','curve_fit_samples','curve_refine_samples','curve_distance_iterations'):
             v = getattr(self,key)
             if type(v) is not int or v < 1: raise ValueError(f'{key} must be a positive integer')
         if self.spline_controls < 4 or self.max_spline_controls < self.spline_controls:
             raise ValueError('invalid spline controls')
         if not (8 <= self.curve_init_samples <= self.curve_fit_samples <= self.curve_refine_samples):
             raise ValueError('Require 8 <= curve_init_samples <= curve_fit_samples <= curve_refine_samples')
-        if self.face_threshold2 < self.face_threshold1:
-            raise ValueError('face_threshold2 must be >= face_threshold1')
-        for key in ('sample_timeout_seconds','refinement_coarse_edge','refinement_target_edge','refinement_rho_edge','refinement_rho_vertex','presence_tau','tau_edge','tau_vertex','face_threshold1','face_threshold2','face_avg_udf_threshold','field_error','surface_tolerance',
-                    'localization_tolerance','curve_tolerance','boundary_tolerance','cad_tolerance'):
+        for key in ('sample_timeout_seconds','refinement_coarse_edge','refinement_target_edge','refinement_rho_edge','tau_edge','tau_vertex','face_threshold1','vertex_width_fallback','face_avg_udf_threshold','field_error','surface_tolerance',
+                    'localization_tolerance','curve_tolerance','feature_sdf_tolerance','boundary_tolerance','cad_tolerance'):
             v = getattr(self,key)
             if isinstance(v,bool) or not math.isfinite(v) or v <= 0: raise ValueError(f'invalid {key}')
         if self.refinement_target_edge > self.refinement_coarse_edge:
@@ -116,7 +70,7 @@ class Config:
     def to_dict(self): return asdict(self)
 
 def load_config(path=None, overrides=None):
-    """Production mesh/L5 defaults < JSON < explicit overrides."""
+    """Post1109 defaults < JSON < explicit overrides."""
     d = {}
     d.update(json.loads(Path(path).read_text()) if path else {})
     d.update({k:v for k,v in (overrides or {}).items() if v is not None})

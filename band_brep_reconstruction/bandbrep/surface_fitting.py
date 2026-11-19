@@ -71,15 +71,11 @@ def tensor_basis(uv,knots,degree=3):
     b=BSpline(knots,np.eye(n),degree,extrapolate=True)
     a=b(uv[:,0]);c=b(uv[:,1]);return np.einsum('ni,nj->nij',a,c).reshape(len(uv),n*n)
 
-def sample_face_regions(mesh,labels,cfg,trusted=None):
+def sample_face_regions(mesh,labels,cfg):
     """DualBrep [F,N,6] / bbox contract, local NumPy sampling instead of Open3D."""
     rng=np.random.default_rng(cfg.seed);output={};nrm=normals(mesh)
     for face in sorted(np.unique(labels[labels>=0])):
-        ids=np.flatnonzero(labels==face)
-        if trusted is not None:
-            safe=ids[np.asarray(trusted)[ids]]
-            if len(safe):ids=safe
-        tri=mesh.vertices[mesh.triangles[ids]]
+        ids=np.flatnonzero(labels==face);tri=mesh.vertices[mesh.triangles[ids]]
         area=np.linalg.norm(np.cross(tri[:,1]-tri[:,0],tri[:,2]-tri[:,0]),axis=1)
         chosen=rng.choice(len(ids),cfg.face_samples,p=area/area.sum());root=np.sqrt(rng.random(cfg.face_samples));v=rng.random(cfg.face_samples)
         b=np.column_stack((1-root,root*(1-v),root*v));pts=np.einsum('ni,nij->nj',b,tri[chosen])
@@ -214,8 +210,8 @@ def fit_general_spline(face,points,boundaries,normal,cfg):
         except ReconstructionError as exc:last=exc
     raise ReconstructionError('surface_boundary_incompatible','Spline budget cannot satisfy fixed boundary',{'face':face,'cause':str(last)})
 
-def initialize_face_surfaces(mesh,face_labels,graph,curves,provider,cfg,*,trusted=None):
-    regions=sample_face_regions(mesh,face_labels,cfg,trusted);patches={}
+def initialize_face_surfaces(mesh,face_labels,graph,curves,provider,cfg):
+    regions=sample_face_regions(mesh,face_labels,cfg);patches={}
     for face in range(graph.face_count):
         require(face in regions,'missing_face_region','No sampled region for face',face=face)
         p,n=regions[face]
@@ -242,11 +238,10 @@ def initialize_face_surfaces(mesh,face_labels,graph,curves,provider,cfg,*,truste
                 if err.max()<=cfg.surface_tolerance*2 and be.max()<=cfg.boundary_tolerance:
                     accepted.append((float(err.mean()+be.max()),patch,float(be.max())))
         screen(candidates)
-        if cfg.surface_candidates=='revolution':
-            # A plane wins only if the frozen boundary really lies in it; otherwise a
-            # shallow cylinder (small sagitta) would be flattened onto a plane.
-            accepted=[a for a in accepted if a[1].kind!='plane' or a[2]<=cfg.boundary_tolerance*.25] or accepted
-        if not accepted and cfg.surface_candidates=='revolution':
+        # A plane wins only if the frozen boundary really lies in it; otherwise a
+        # shallow cylinder (small sagitta) would be flattened onto a plane.
+        accepted=[a for a in accepted if a[1].kind!='plane' or a[2]<=cfg.boundary_tolerance*.25] or accepted
+        if not accepted:
             screen(revolution_candidates(p,n,related,boundary))
             # Simplest accepted primitive first; a torus can mimic a cone within tolerance.
             rank={'cylinder':0,'cone':1,'torus':2}
@@ -276,19 +271,3 @@ def initialize_face_surfaces(mesh,face_labels,graph,curves,provider,cfg,*,truste
             'boundary_check_samples_per_edge':513,'periodic_u':patch.kind in ('cylinder','sphere','cone','torus')}
         patches[face]=patch
     return patches
-
-# Exact compatible four-sided tensor Bezier boundary locking, exposed for model adapters.
-def fit_four_sided_bezier(uv,points,bottom,right,top,left):
-    from scipy.special import comb
-    bottom,right,top,left=map(lambda x:np.asarray(x,float),(bottom,right,top,left))
-    nu,nv=len(bottom),len(left)
-    require(len(top)==nu and len(right)==nv,'boundary_basis_incompatible','Opposite side degrees must agree')
-    net=np.zeros((nu,nv,3));net[:,0]=bottom;net[:,-1]=top;net[0]=left;net[-1]=right
-    require(np.allclose(bottom[0],left[0]) and np.allclose(bottom[-1],right[0]) and np.allclose(top[0],left[-1]) and np.allclose(top[-1],right[-1]),
-            'boundary_corner_conflict','Boundary corners disagree')
-    def basis(t,n):return np.column_stack([comb(n-1,i)*t**i*(1-t)**(n-1-i) for i in range(n)])
-    A=np.einsum('ni,nj->nij',basis(uv[:,0],nu),basis(uv[:,1],nv)).reshape(len(uv),nu*nv)
-    fixed=np.zeros((nu,nv),bool);fixed[[0,-1],:]=True;fixed[:,[0,-1]]=True
-    rhs=points-A[:,fixed.ravel()]@net[fixed]
-    net[~fixed]=np.linalg.lstsq(A[:,~fixed.ravel()],rhs,rcond=None)[0]
-    return net

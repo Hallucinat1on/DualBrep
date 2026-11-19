@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import numpy as np
 from bandbrep.config import Config,load_config
 from bandbrep.schemas import ReconstructionError,SurfaceMesh
-from bandbrep.field_provider import (CallableUDFProvider,MeshFieldProvider,ProductionUDFProvider,
+from bandbrep.field_provider import (CallableUDFProvider,MeshFieldProvider,
                                     FieldEvaluation,checked_values,bounded_update)
 from bandbrep.surface_mesh import load_mesh,validate_mesh
 from bandbrep.reconstruct import reconstruct
@@ -15,11 +15,11 @@ from helpers import box,hollow_sphere
 
 
 class ContractTests(unittest.TestCase):
-    def test_l5_defaults_and_removed_config(self):
+    def test_post1109_defaults_and_removed_config(self):
         cfg=Config().validate()
-        self.assertEqual((cfg.refinement_coarse_edge,cfg.refinement_target_edge,cfg.refinement_rho_edge,cfg.refinement_rho_vertex,cfg.sample_timeout_seconds),(.02,.005,.02,.03,10800.))
-        self.assertEqual((cfg.vertex_domains,cfg.band_connectivity),('local','vertex'))
-        for obsolete in ('resolution','refinement_max_rounds','max_triangles'):
+        self.assertEqual((cfg.refinement_coarse_edge,cfg.refinement_target_edge,cfg.refinement_rho_edge,cfg.sample_timeout_seconds),(.03,.003,.02,10800.))
+        self.assertEqual(cfg.to_dict(), load_config(Path(__file__).resolve().parents[1] / 'configs/default.json').to_dict())
+        for obsolete in ('resolution','refinement_max_rounds','max_triangles','face_second_pass','curve_recovery','region_repair','save_queries'):
             with self.assertRaises(ValueError):load_config(overrides={obsolete:257})
         for coarse in (True, 0., -.01, float('nan'), .001):
             with self.assertRaises(ValueError):Config(refinement_coarse_edge=coarse).validate()
@@ -63,7 +63,7 @@ class ContractTests(unittest.TestCase):
         def values(q):
             calls.append(q.copy())
             return np.column_stack((2+q@[1.,2.,3.],3+q@[4.,5.,6.]))
-        udf=CallableUDFProvider(values,fingerprint='sampled')
+        udf=CallableUDFProvider(values,fingerprint='sampled',presence=('present','present'))
         q=np.array([[.1,.2,.3]])
         g,valid=udf.gradient(q,1)
         np.testing.assert_allclose(g,[[4,5,6]],atol=1e-9)
@@ -124,33 +124,11 @@ class ContractTests(unittest.TestCase):
                     if failure=='zero_center':v[:,1]=np.linalg.norm(points-q,axis=1)
                     if failure=='flat':v[:,1]=1.
                     return FieldEvaluation(v,valid,saturated,0)
-                udf=CallableUDFProvider(values,fingerprint=failure)
+                udf=CallableUDFProvider(values,fingerprint=failure,presence=('present','present'))
                 g,valid=udf.gradient(q,1)
                 self.assertFalse(valid[0]);np.testing.assert_array_equal(g,[[0,0,0]])
                 # A bad V value must not invalidate the independent E derivative.
                 self.assertTrue(udf.gradient(q,0)[1][0])
-
-    def test_production_values_only_adapter_and_condition_identity(self):
-        mesh,_=box()
-        from veudf.geometry.sampling import mesh_hash
-        def gradient(q,channel):
-            raise AssertionError('production gradient must not be used')
-        adapter=SimpleNamespace(evaluate=lambda q:FieldEvaluation(np.column_stack((q[:,0],2+q[:,0],2+2*q[:,1])),np.ones((len(q),3),bool),np.zeros((len(q),3),bool),np.zeros((len(q),3))),
-            gradient=gradient,band_width=.02,presence=lambda:('present','present'),fingerprint='fake',
-            condition=SimpleNamespace(fingerprint=mesh_hash(mesh.vertices,mesh.triangles)),sdf_source='condition')
-        udf=ProductionUDFProvider(adapter);p=MeshFieldProvider(mesh,udf,Config())
-        g,valid=p.gradient(mesh.vertices[:1],2)
-        self.assertTrue(valid[0]);np.testing.assert_allclose(g,[[0,2,0]],atol=1e-9)
-        adapter.condition.fingerprint='wrong'
-        with self.assertRaises(ReconstructionError):MeshFieldProvider(mesh,ProductionUDFProvider(adapter),Config())
-
-    def test_presence_inference_uses_surface_without_labels(self):
-        mesh,source=box()
-        udf=CallableUDFProvider(source.fn,fingerprint='unknown',band_width=.02)
-        p=MeshFieldProvider(mesh,udf,Config())
-        self.assertEqual(p.presence(),('present','present'));self.assertGreater(p.presence_support[1],0)
-        invalid=CallableUDFProvider(lambda q:np.full((len(q),2),np.nan),fingerprint='invalid')
-        with self.assertRaises(ReconstructionError):MeshFieldProvider(mesh,invalid,Config(presence_samples=50))
 
     def test_condition_load_and_tamper_detection(self):
         from veudf.io.condition import write_condition
@@ -172,8 +150,8 @@ class ContractTests(unittest.TestCase):
         mesh,udf=box();cfg=Config()
         key,_=cache_key(mesh,udf,cfg)
         self.assertEqual(key,cache_key(mesh,udf,replace(cfg,stop_after='seeds'))[0])
-        self.assertNotEqual(key,cache_key(mesh,udf,replace(cfg,face_second_pass=False))[0])
-        self.assertNotEqual(key,cache_key(mesh,udf,replace(cfg,curve_recovery='direct_distance'))[0])
+        self.assertNotEqual(key,cache_key(mesh,udf,replace(cfg,face_threshold1=.004))[0])
+        self.assertNotEqual(key,cache_key(mesh,udf,replace(cfg,curve_fit_samples=800))[0])
         udf.band_width=.03;self.assertNotEqual(key,cache_key(mesh,udf,cfg)[0]);udf.band_width=.02
         mesh.vertices[0,0]+=.001;self.assertNotEqual(key,cache_key(mesh,udf,cfg)[0]);mesh.vertices[0,0]-=.001
         with tempfile.TemporaryDirectory() as tmp:
@@ -181,13 +159,3 @@ class ContractTests(unittest.TestCase):
             (out/'run.json').write_text(json.dumps({'cache_key':cache_key(mesh,udf,cfg)[0],'status':'failed','artifacts':{'x.json':'wrong'}}))
             with self.assertRaises(ReconstructionError) as error:reconstruct(mesh,udf,cfg,tmp,resume=True)
             self.assertEqual(error.exception.code,'cache_corrupt')
-
-    def test_recording_preserves_metric_and_masks(self):
-        from bandbrep.query_recording import RecordingProvider
-        mesh,udf=box()
-        with tempfile.TemporaryDirectory() as tmp:
-            p=RecordingProvider(MeshFieldProvider(mesh,udf,Config()),tmp)
-            p.evaluate(mesh.vertices[:1]);p.sdf([[0,0,0]]);p.flush()
-            data=np.load(Path(tmp)/'000000.npz')
-            self.assertEqual(data['query_fields'].shape,(2,3));self.assertTrue(np.isnan(data['query_fields'][1,1]))
-            self.assertEqual(data['valid'][1].tolist(),[True,False,False])

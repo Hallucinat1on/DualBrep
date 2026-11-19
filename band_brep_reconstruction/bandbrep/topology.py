@@ -3,7 +3,7 @@ from .surface_mesh import evaluate_batched
 import numpy as np
 from scipy.spatial import cKDTree
 from .face_seeds import core_components
-from .surface_mesh import face_adjacency, vertex_adjacency
+from .surface_mesh import vertex_adjacency
 from .schemas import BandTopology
 
 
@@ -33,8 +33,7 @@ def collect_labels(pairs, bands, face_labels):
     for target,source in _relations(el[src],vl[dst]):ve[target].add(int(source))
     for v,incident in enumerate(ve):
         for e in incident:vf[v].update(ef[e])
-    support=(bands.edge_support_mask if bands.edge_support_mask is not None else
-             np.ones(len(face_labels),bool) if bands.exclusion_reasons is None else np.isin(bands.exclusion_reasons,[1,2]))
+    support=np.ones(len(face_labels),bool) if bands.exclusion_reasons is None else (bands.exclusion_reasons == 1)
     em=_members(el,len(ef));vm=_members(vl,len(vf))
     edges=[dict(id=e,faces=sorted(faces),vertices=[],nodes=ids.tolist(),
         support_nodes=ids[support[ids]].tolist(),status='supported' if len(faces)==2 else 'unresolved')
@@ -101,10 +100,8 @@ def infer_short_edges(topology, bands, provider, cfg):
     return topology,report
 
 
-def recover_topology(mesh,bands,face_labels,cfg=None,provider=None):
-    adjacency=vertex_adjacency if cfg is not None and cfg.band_connectivity=='vertex' else face_adjacency
-    topology=collect_labels(adjacency(mesh.triangles),bands,face_labels)
-    topology.report['connectivity']='vertex' if adjacency is vertex_adjacency else 'edge'
-    if cfg is not None and cfg.infer_short_edges:
-        topology,topology.report['short_edges']=infer_short_edges(topology,bands,provider,cfg)
+def recover_topology(mesh, bands, face_labels, cfg, provider):
+    topology = collect_labels(vertex_adjacency(mesh.triangles), bands, face_labels)
+    topology.report['connectivity'] = 'vertex'
+    topology, topology.report['short_edges'] = infer_short_edges(topology, bands, provider, cfg)
     return topology

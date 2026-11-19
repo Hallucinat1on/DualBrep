@@ -11,10 +11,44 @@ import shutil
 import subprocess
 import sys
 import time
-from run_mesh_input_experiment import REPO, MODULE, read, save, digest
+from replay_inputs import REPO, MODULE, read, save, digest
 
 
-def initialize(group,model_id,out,method,stop_after):
+
+def historical_config(config, stop_after):
+    """Translate the original 11-06 coarse_003 cache policy at the replay boundary."""
+    from bandbrep.config import load_config
+
+    cfg = dict(config)
+    fixed = {
+        'refinement_coarse_edge': 0.03,
+        'refinement_target_edge': 0.003,
+        'refinement_rho_edge': 0.02,
+        'face_threshold1': 0.003,
+        'face_second_pass': False,
+        'band_connectivity': 'vertex',
+        'band_propagation': 'noncore',
+        'vertex_domains': 'local',
+        'infer_short_edges': True,
+        'surface_candidates': 'revolution',
+        'curve_candidates': 'arcs',
+        'periodic_frame_planning': True,
+    }
+    if any(cfg.get(key) != expected for key, expected in fixed.items()):
+        raise ValueError('Expected the frozen coarse_003 single-pass cache policy')
+    obsolete = (
+        'refinement_rho_vertex', 'presence_samples', 'presence_tau', 'presence_min_points',
+        'face_second_pass', 'band_connectivity', 'band_propagation', 'vertex_domains',
+        'infer_short_edges', 'surface_candidates', 'curve_candidates', 'periodic_frame_planning',
+        'curve_recovery', 'save_queries',
+    )
+    for key in obsolete:
+        cfg.pop(key, None)
+    cfg['vertex_width_fallback'] = cfg.pop('face_threshold2')
+    cfg['stop_after'] = stop_after
+    return load_config(overrides=cfg)
+
+def initialize(group,model_id,out,stop_after):
     if out.exists():raise RuntimeError('Use a new replay output directory')
     original=group/'runs'/model_id/'reconstruction'
     run=read(original/'run.json')
@@ -26,13 +60,11 @@ def initialize(group,model_id,out,method,stop_after):
     for name,expected in read(group/'identity.json')['code'].items():
         if name.startswith('veudf/src/') and digest(REPO/name)!=expected:
             raise RuntimeError('Distance dependency differs from cached observations: '+name)
-    from bandbrep.config import load_config
-    cfg=load_config(overrides={**run['config'],'curve_recovery':method,'save_queries':False,
-                               'stop_after':'solid' if stop_after=='solid' else 'curves'})
+    cfg = historical_config(run['config'], stop_after)
     row=next(r for r in read(group/'manifest.json') if r['id']==model_id and r['cohort']=='dev')
     if digest(row['step'])!=row['source_sha256']:raise RuntimeError('Historical STEP changed')
     out.mkdir(parents=True)
-    save(out/'policy.json',dict(input_group=str(group),id=model_id,method=method,stop_after=stop_after,
+    save(out/'policy.json',dict(input_group=str(group),id=model_id,method="direct_distance",stop_after=stop_after,
         config=cfg.to_dict(),row=row,scope='Fixed working mesh, topology and vertices; fresh curve and downstream stages'))
     files=[original/n for n in ('run.json','input_mesh.npz','working_mesh.npz','bands.npz','topology_labels.npz','incidence.json','vertices.json')]
     files += [group/'manifest.json',group/'identity.json',Path(row['step']),group/'runs'/model_id/'source_audit.json',out/'policy.json']
@@ -49,12 +81,11 @@ def worker(out):
     import numpy as np
     from bandbrep.config import Config
     from bandbrep.deadline import sample_budget
-    from bandbrep.field_provider import CallableUDFProvider,MeshFieldProvider
+    from bandbrep.cad_source import cad_udf
+    from bandbrep.field_provider import MeshFieldProvider
     from bandbrep.schemas import SurfaceMesh,BandState,VertexNode,write_json
     from bandbrep.cache import load_topology
     from bandbrep.curve_distance_fitting import recover_distance_curves
-    from bandbrep.edge_geometry import build_edge_geometry
-    from bandbrep.curve_fitting import fit_shared_curves
     from bandbrep.geometry_refinement import validate_structure_coverage
     from bandbrep.postprocess import orient_boundaries
     from bandbrep.surface_fitting import initialize_face_surfaces
@@ -62,7 +93,7 @@ def worker(out):
     from veudf.preprocess.config import Config as DistanceConfig
     from veudf.preprocess.cad import read_normalized,collect_targets,triangulate
     from veudf.preprocess.condition import weld
-    from run_mesh_input_experiment import ExactUDF,offline_source
+    from replay_inputs import offline_source
     from experiment_scoring import geometry_score,fidelity_score
     identity=read(out/'identity.json')
     for name,h in identity['inputs'].items():
@@ -88,17 +119,11 @@ def worker(out):
             shape,norm=read_normalized(policy['row']['step'],distance_cfg);targets=collect_targets(shape,distance_cfg)
             assert dict(faces=len(targets.faces),edges=len(targets.edges),vertices=len(targets.vertices))==old_audit['target_counts']
             np.testing.assert_allclose(norm['world_to_normalized'],old_audit['normalization']['world_to_normalized'],atol=1e-10,rtol=0)
-            oracle=ExactUDF(targets,distance_cfg)
-            udf=CallableUDFProvider(oracle.values,fingerprint='production-cad:'+policy['row']['source_sha256'],
-                presence=('present' if targets.edges else 'absent','present' if len(targets.vertices) else 'absent'))
+            udf, oracle = cad_udf(targets, distance_cfg, policy['row']['source_sha256'])
             provider=MeshFieldProvider(input_mesh,udf,cfg)
             stage='curves';tick=time.monotonic()
-            if cfg.curve_recovery=='direct_distance':
-                graph,curves,report=recover_distance_curves(topology,bands,vertices,provider,cfg,
-                    progress=lambda data:save(out/'curve_recovery_progress.json',data))
-            else:
-                graph=build_edge_geometry(topology,bands,vertices,provider,cfg)
-                curves=fit_shared_curves(graph,provider,cfg);report={}
+            graph,curves,report=recover_distance_curves(topology,bands,vertices,provider,cfg,
+                progress=lambda data:save(out/'curve_recovery_progress.json',data))
             result['timings']['curve_recovery']=time.monotonic()-tick
             result['distance_fitting']=report
             write_json(out/'logical_graph.json',graph);write_json(out/'curves.json',curves)
@@ -133,12 +158,11 @@ def main():
     parser.add_argument('--input-group',type=Path,required=True)
     parser.add_argument('--id',required=True)
     parser.add_argument('--output',type=Path,required=True)
-    parser.add_argument('--method',choices=('projected','direct_distance'),default='direct_distance')
     parser.add_argument('--stop-after',choices=('curves','solid'),default='curves')
     parser.add_argument('--worker',action='store_true',help=argparse.SUPPRESS)
     args=parser.parse_args();out=args.output.resolve()
     if args.worker:worker(out);return
-    initialize(args.input_group.resolve(),args.id,out,args.method,args.stop_after)
+    initialize(args.input_group.resolve(),args.id,out,args.stop_after)
     snapshot=out/'source_snapshot';env={**os.environ,**{k:'1' for k in ('OMP_NUM_THREADS','OPENBLAS_NUM_THREADS','MKL_NUM_THREADS','NUMEXPR_NUM_THREADS')}}
     env['PYTHONPATH']=str(snapshot/'veudf/src')+':'+str(snapshot/'band_brep_reconstruction')
     script=snapshot/'band_brep_reconstruction/benchmarks/replay_curve_recovery.py'

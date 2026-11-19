@@ -15,8 +15,7 @@ class PipelineTests(unittest.TestCase):
         for factory,expected in ((box,(6,12,8)),(cylinder,(3,2,0))):
             with self.subTest(shape=factory.__name__),tempfile.TemporaryDirectory() as tmp:
                 mesh,udf=factory()
-                result=reconstruct(mesh,udf,Config(face_samples=400,save_queries=False,
-                    curve_recovery='direct_distance'),tmp)
+                result=reconstruct(mesh,udf,Config(face_samples=400),tmp)
                 graph=result['graph']
                 self.assertEqual((graph.face_count,len(graph.edges),len(graph.vertices)),expected)
                 self.assertEqual(result['report']['status'],'solid_validated')
@@ -27,7 +26,7 @@ class PipelineTests(unittest.TestCase):
         mesh,udf=box()
         from veudf.geometry.sampling import mesh_hash
         udf.mesh_fingerprint=mesh_hash(mesh.vertices,mesh.triangles)
-        cfg=Config(face_samples=400,save_queries=False,stop_after='vertices')
+        cfg=Config(face_samples=400,stop_after='vertices')
         with tempfile.TemporaryDirectory() as tmp:
             result=reconstruct(mesh,udf,cfg,tmp)
             self.assertEqual(result['status'],'vertices_ready')
@@ -53,12 +52,12 @@ class PipelineTests(unittest.TestCase):
     def test_cylinder_full_step(self):
         mesh,udf=cylinder()
         with tempfile.TemporaryDirectory() as tmp:
-            result=reconstruct(mesh,udf,Config(face_samples=400,save_queries=False),tmp)
+            result=reconstruct(mesh,udf,Config(face_samples=400),tmp)
             g=result['graph'];self.assertEqual((g.face_count,len(g.edges),len(g.vertices)),(3,2,0))
             self.assertEqual(result['report']['status'],'solid_validated')
 
     def test_cavity_absent_fields_and_resume(self):
-        mesh,udf=hollow_sphere();cfg=Config(stop_after='seeds',save_queries=False)
+        mesh,udf=hollow_sphere();cfg=Config(stop_after='seeds')
         with tempfile.TemporaryDirectory() as tmp:
             reconstruct(mesh,udf,cfg,tmp)
             result=reconstruct(mesh,udf,replace(cfg,stop_after='solid'),tmp,resume=True)
@@ -68,7 +67,7 @@ class PipelineTests(unittest.TestCase):
     def test_sample_timeout_writes_failure(self):
         mesh,udf=box()
         with tempfile.TemporaryDirectory() as tmp:
-            with self.assertRaises(ReconstructionError) as ctx:reconstruct(mesh,udf,Config(save_queries=False,sample_timeout_seconds=.001),tmp)
+            with self.assertRaises(ReconstructionError) as ctx:reconstruct(mesh,udf,Config(sample_timeout_seconds=.001),tmp)
             self.assertEqual(ctx.exception.code,'sample_timeout')
             report=json.loads((Path(tmp)/'quality.json').read_text())
             self.assertIn(report['failed_stage'],('mesh','coarse_refinement'));self.assertEqual(report['status'],'failed')
@@ -77,7 +76,7 @@ class PipelineTests(unittest.TestCase):
     def test_same_face_pair_two_loops_step(self):
         mesh,udf=sphere_with_bore()
         with tempfile.TemporaryDirectory() as tmp:
-            result=reconstruct(mesh,udf,Config(face_samples=400,save_queries=False),tmp)
+            result=reconstruct(mesh,udf,Config(face_samples=400),tmp)
             g=result['graph'];self.assertEqual((g.face_count,len(g.edges),len(g.vertices)),(2,2,0))
             self.assertEqual(g.edges[0].faces,g.edges[1].faces)
             self.assertEqual(result['report']['status'],'solid_validated')
@@ -85,7 +84,7 @@ class PipelineTests(unittest.TestCase):
     def test_resume_after_fine_failure_reuses_completed_coarse_stage(self):
         from unittest.mock import patch
         mesh,udf=hollow_sphere()
-        cfg=Config(stop_after='seeds',save_queries=False,refinement_coarse_edge=.1,refinement_target_edge=.05)
+        cfg=Config(stop_after='seeds',refinement_coarse_edge=.1,refinement_target_edge=.05)
         with tempfile.TemporaryDirectory() as tmp:
             with patch('bandbrep.reconstruct.fine_refine_surface',side_effect=ReconstructionError('probe_failure','test failure')):
                 with self.assertRaises(ReconstructionError):reconstruct(mesh,udf,cfg,tmp)

@@ -52,12 +52,4 @@ class ImprovementTests(unittest.TestCase):
         self.assertTrue(np.all((shifted[:,0]>=-np.pi)&(shifted[:,0]<np.pi)))
         np.testing.assert_allclose(shifted[:,0],uv[:,0]-2*np.pi)
 
-    def test_new_options_validate(self):
-        for values in ({'vertex_domains':'ball'},{'surface_candidates':'all'},{'curve_candidates':'nurbs'},
-                       {'infer_short_edges':1},{'periodic_frame_planning':'yes'},{'vertex_radius_fraction':.6}):
-            with self.assertRaises(ValueError):Config(**values).validate()
-        Config(vertex_domains='local',infer_short_edges=True,surface_candidates='revolution',
-               curve_candidates='arcs',periodic_frame_planning=True).validate()
-
-
 if __name__=='__main__':unittest.main()

@@ -7,14 +7,13 @@ from bandbrep.topology import collect_labels, recover_topology
 
 
 class ExperimentOptionsTests(unittest.TestCase):
-    def test_corner_connectivity_is_opt_in(self):
+    def test_corner_connectivity_for_edge_bands(self):
         tri=np.array([[0,1,2],[2,3,4]])
         self.assertEqual(len(face_adjacency(tri)),0)
         self.assertEqual(vertex_adjacency(tri).tolist(),[[0,1]])
         b=BandState(np.zeros((2,3)),np.zeros((2,3)),np.ones(2,bool),np.zeros(2,bool),np.ones(2,bool),np.zeros(2,bool))
         m=SurfaceMesh(np.zeros((5,3)),tri)
-        self.assertEqual(len(recover_topology(m,b,np.full(2,-1)).edges),2)
-        self.assertEqual(len(recover_topology(m,b,np.full(2,-1),Config(band_connectivity='vertex')).edges),1)
+        self.assertEqual(len(recover_topology(m,b,np.full(2,-1),Config(),None).edges),1)
 
     def test_exclusion_transfers_labels_but_not_geometry_support(self):
         labels=np.array([0,-1,-1,-1,1])
@@ -53,10 +52,5 @@ class ExperimentOptionsTests(unittest.TestCase):
         result=score(topo,bands,source)
         self.assertFalse(result['face_good'])
         self.assertEqual(result['missing_faces'],1)
-
-    def test_invalid_options(self):
-        for values in ({'band_connectivity':'knn'},{'band_propagation':'winner'}):
-            with self.assertRaises(ValueError):Config(**values).validate()
-
 
 if __name__=='__main__':unittest.main()

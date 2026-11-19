@@ -1,9 +1,6 @@
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
-import json
-from pathlib import Path
-import tempfile
 import numpy as np
 from scipy.spatial import cKDTree
 from bandbrep.config import Config
@@ -35,7 +32,7 @@ class DistanceCurveTests(unittest.TestCase):
         bands=SimpleNamespace(points=points,values=provider.evaluate(points).values)
         vertices=[VertexNode(i,p,0.,.01) for i,p in enumerate([[-.4,0,0],[.4,0,0]])]
         topo=SimpleNamespace(face_count=2,edges=[dict(id=0,faces=[0,1],vertices=[0,1],nodes=list(range(len(x))))])
-        graph,curves,report=recover_distance_curves(topo,bands,vertices,provider,Config(curve_recovery='direct_distance'))
+        graph,curves,report=recover_distance_curves(topo,bands,vertices,provider,Config())
         self.assertEqual(curves[0].kind,'line')
         self.assertLess(curves[0].residual,1e-12)
         self.assertEqual(report['edges'][0]['initialization_points'],0)
@@ -51,7 +48,7 @@ class DistanceCurveTests(unittest.TestCase):
             topo=SimpleNamespace(face_count=2,edges=[dict(id=0,faces=[0,1],vertices=[0] if anchored else [],nodes=list(range(len(points))))])
             vertices=[VertexNode(0,np.array([.4,0,0]),0.,.01)] if anchored else []
             graph,curves,report=recover_distance_curves(topo,bands,vertices,provider,
-                Config(curve_recovery='direct_distance',curve_init_samples=64,curve_fit_samples=128))
+                Config(curve_init_samples=64,curve_fit_samples=128))
             self.assertEqual(curves[0].kind,'circle')
             self.assertLess(curves[0].residual,1e-5)
             self.assertEqual(len(graph.edges),1)
@@ -87,7 +84,7 @@ class DistanceCurveTests(unittest.TestCase):
         ends=true.evaluate(np.array([0.,1.]));vertices=[VertexNode(i,p,0.,.01) for i,p in enumerate(ends)]
         topo=SimpleNamespace(face_count=2,edges=[dict(id=0,faces=[0,1],vertices=[0,1],nodes=list(range(len(points))))])
         graph,curves,report=recover_distance_curves(topo,bands,vertices,provider,
-            Config(curve_recovery='direct_distance',curve_init_samples=128,curve_distance_iterations=30))
+            Config(curve_init_samples=128,curve_distance_iterations=30))
         self.assertEqual(curves[0].kind,'bezier_spline')
         self.assertEqual(len(curves[0].data['controls']),1)
         self.assertEqual(len(graph.edges),1)
@@ -101,7 +98,7 @@ class DistanceCurveTests(unittest.TestCase):
         bands=SimpleNamespace(points=points,values=provider.evaluate(points).values)
         vertices=[VertexNode(i,np.array(p),0.,.01) for i,p in enumerate([[.4,0,0],[0,.4,0]])]
         topo=SimpleNamespace(face_count=2,edges=[dict(id=0,faces=[0,1],vertices=[0,1],nodes=list(range(len(t))))])
-        _,curves,_=recover_distance_curves(topo,bands,vertices,provider,Config(curve_recovery='direct_distance'))
+        _,curves,_=recover_distance_curves(topo,bands,vertices,provider,Config())
         self.assertEqual(curves[0].kind,'circle')
         self.assertAlmostEqual(abs(curves[0].data['sweep']),np.pi/2,places=3)
         np.testing.assert_allclose(curves[0].evaluate(np.array([0.,1.])),[v.position for v in vertices],atol=1e-10)
@@ -119,7 +116,7 @@ class DistanceCurveTests(unittest.TestCase):
         vertices=[VertexNode(i,p,0.,.01) for i,p in enumerate(dense[[0,-1]])]
         topo=SimpleNamespace(face_count=2,edges=[dict(id=0,faces=[0,1],vertices=[0,1],nodes=list(range(len(t))))])
         graph,curves,report=recover_distance_curves(topo,bands,vertices,provider,
-            Config(curve_recovery='direct_distance',max_segments=12,curve_distance_iterations=30))
+            Config(max_segments=12,curve_distance_iterations=30))
         self.assertEqual(len(graph.edges),1)
         self.assertGreater(len(curves[0].data['controls']),1)
         self.assertLessEqual(len(curves[0].data['controls']),12)
@@ -150,32 +147,19 @@ class DistanceCurveTests(unittest.TestCase):
         provider=AnalyticFields(lambda q:np.column_stack((q[:,2],np.hypot(np.linalg.norm(q[:,:2],axis=1)-.4,q[:,2]),np.ones(len(q)))))
         bands=SimpleNamespace(points=points,values=provider.evaluate(points).values)
         topology=SimpleNamespace(face_count=2,edges=[dict(id=0,faces=[0,1],vertices=[],nodes=list(range(len(points))))])
-        graph,curves,_=recover_distance_curves(topology,bands,[],provider,
-            Config(curve_recovery='direct_distance',curve_candidates='basic',max_segments=8,
-                   curve_init_samples=128,curve_fit_samples=256,curve_refine_samples=512,curve_distance_iterations=30))
+        with patch('bandbrep.curve_distance_fitting._circle_candidate', return_value=None):
+            graph,curves,_=recover_distance_curves(topology,bands,[],provider,
+                Config(max_segments=8, curve_init_samples=128,curve_fit_samples=256,
+                       curve_refine_samples=512,curve_distance_iterations=30))
         curve=curves[0];self.assertTrue(graph.edges[0].closed)
         self.assertEqual(curve.kind,'bezier_spline')
         np.testing.assert_allclose(curve.evaluate(np.array([0.])),curve.evaluate(np.array([1.])),atol=1e-10)
         first=curve_derivatives(curve,np.array([0.,1.]))[0]
         np.testing.assert_allclose(first[0],first[1],atol=1e-9)
 
-    def test_config_rejects_invalid_modes_and_sample_budgets(self):
-        for kwargs in [dict(curve_recovery='other'),dict(curve_init_samples=0),
+    def test_config_rejects_invalid_sample_budgets(self):
+        for kwargs in [dict(curve_init_samples=0),
                        dict(curve_fit_samples=128),dict(curve_distance_iterations=True)]:
             with self.assertRaises(ValueError):Config(**kwargs).validate()
-
-    def test_cli_curve_mode_overrides_json(self):
-        from bandbrep.cli import main
-        with tempfile.TemporaryDirectory() as tmp:
-            path=Path(tmp)/'config.json'
-            for stored,flags,expected in [('direct_distance',[],'direct_distance'),
-                    ('projected',['--curve-recovery','direct_distance'],'direct_distance')]:
-                path.write_text(json.dumps(dict(curve_recovery=stored)))
-                args=['reconstruct','--mesh','mesh','--udf-model','model.pt','--output',tmp,'--config',str(path),*flags]
-                with patch('sys.argv',args),patch('bandbrep.cli.load_mesh'), \
-                        patch('bandbrep.udf_model.TorchScriptUDFProvider'),patch('bandbrep.cli.reconstruct') as run:
-                    main()
-                self.assertEqual(run.call_args.args[2].curve_recovery,expected)
-
 
 if __name__=='__main__':unittest.main()

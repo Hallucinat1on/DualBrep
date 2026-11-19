@@ -34,9 +34,7 @@ def vertex_candidates(points, distances, provider, cfg):
 def local_vertex_domains(points, values, edge_band, support, provider, cfg):
     """Return (vertex_labels, centers, report); labels are -1 outside vertex domains."""
     labels = np.full(len(points), -1, np.int64)
-    vertex_near = (values[:, 2] <= cfg.tau_vertex if cfg.band_threshold_inclusive
-                   else values[:, 2] < cfg.tau_vertex)
-    seeds = np.flatnonzero(edge_band & support & vertex_near)
+    seeds = np.flatnonzero(edge_band & support & (values[:, 2] < cfg.tau_vertex))
     centers, votes, merge = vertex_candidates(points[seeds], values[seeds, 2], provider, cfg)
     report = dict(method='nearest_candidate_local_radius', seed_nodes=len(seeds), candidates=len(centers),
                   merge_radius=merge, radius_fraction=cfg.vertex_radius_fraction, cut_factor=cfg.vertex_cut_factor)
@@ -52,7 +50,7 @@ def local_vertex_domains(points, values, edge_band, support, provider, cfg):
     for i, c in enumerate(centers):
         near = band_tree.query_ball_point(c, cfg.tau_vertex) if band_tree is not None else []
         # Band half-width near this vertex: how far band nodes reach from the edge.
-        w = float(np.quantile(values[support_ids[near], 1], .95)) if len(near) else cfg.face_threshold2
+        w = float(np.quantile(values[support_ids[near], 1], .95)) if len(near) else cfg.vertex_width_fallback
         half_width[i] = w
         # Upper bound keeps short edges / neighbours apart; lower bound must cut the band.
         radius[i] = min(cfg.tau_vertex, max(cfg.vertex_radius_fraction * gap[i], cfg.vertex_cut_factor * w))

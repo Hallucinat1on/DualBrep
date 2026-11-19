@@ -1,14 +1,14 @@
 # ABC 三场数据处理：生产规范与本仓库同步
 
-更新：2026-11-02。后续数据处理以 `/opt/data/private/yihengxu/Hunyuan3D/veudf` 为唯一生产来源，本仓库使用同步的 [veudf/](../veudf/README.md)。旧 `edge_vertex_preprocessing/evudf` 代码、配置和 CLI 已移除，目录只保留迁移说明及既有实验产物。
+更新：2026-11-19。后续数据处理以 `/opt/data/private/yihengxu/Hunyuan3D/veudf` 为唯一生产来源，本仓库使用同步的 [veudf/](../veudf/README.md)。
 
-源码、测试、配置和打包文件按 [SOURCE.json](../veudf/SOURCE.json) 记录 SHA-256。同步命令为 `python scripts/sync_veudf.py --apply`，只读检查为 `--check`；新功能在生产目录开发后再同步。安装与命令行示例维护在[模块 README](../veudf/README.md)。
+源码、测试、配置、打包文件和生产工具按 [SOURCE.json](../veudf/SOURCE.json) 记录 SHA-256。同步命令为 `python scripts/sync_veudf.py --apply`，只读检查为 `--check`；新功能在生产目录开发后再同步。安装与命令行示例维护在[模块 README](../veudf/README.md)。
 
-本文描述当前 `edge_vertex_mesh_pools_v1`，不将历史 `edge_vertex_udf_v1` 或 F30 的体素／MC 条件输入当作当前生产格式。历史实验保留当时版本和分母，见[实验主文档](ThreeFieldReconstructionExperiments.md)。
+当前 schema 为 `edge_vertex_neighborhood_pools_v3`。历史 v1 和 F30 数据保留在原批次，见[实验记录](Experiment.md)。
 
 ## 1. 三场定义与几何来源
 
-每个查询位置保存 `[s_mesh,dE,dV]`：
+原始三场定义为 `[s_mesh,dE,dV]`。训练落盘时截断 E/V，独立评估保存原始距离。
 
 - `s_mesh`：到最终闭合有向 CAD 三角网格的最近距离，绕数判断内外，内负外正。
 - `dE`：到所有保留的有限 CAD 边的欧氏距离，包含端点。
@@ -41,38 +41,30 @@ E/V 仍对应 CAD，网格表面不一定精确经过 CAD 边，因此不能无�
 
 ## 3. 查询与梯度
 
-E-UDF 用 `cad_bvh` 对保守几何包围盒剪枝，候选再由 OCC 求有限 CAD 曲线距离；`cad_reference` 用全部保留边作抽查。V-UDF 使用精确 KD-tree。最近位置由 CAD 求解得到，不能用特征采样候选的近似距离替换标签。
+训练由 `FeatureUDFOracle` 统一查询 E/V。每批查询点共用 KD-tree，边的采样覆盖球和 CAD 包围盒负责筛选候选，有限边距离仍由 OCC 求解。顶点候选使用精确欧氏距离。截断外的点可以跳过远距离求解。[训练距离实现](../veudf/src/veudf/preprocess/distance.py)
 
-CAD SDF 只作审计，生产第一通道固定 `s_mesh`，没有旧 `--sdf-backend cad/mesh/mesh_fast` 切换。[距离实现](../veudf/src/veudf/preprocess/distance.py)
+独立评估调用 `ReferenceEdgeOracle` 和 `ReferenceVertexOracle` 查询完整距离。审计还会对有限采样用穷举 CAD 边核验标签。生产第一通道始终取 `s_mesh`，CAD SDF 用于参考审计。[精确距离实现](../veudf/src/veudf/preprocess/reference.py)
 
-当前 E/V 标签输出包含距离、最近 ID 和边歧义标记，不保存旧 `gradient_E/V`、最近点及梯度 mask 数组。后续梯度监督应在生产目录扩展并重新记录版本；当前后处理固定latent，对邻近空间位置解码UDF，再统一中心差分求E/V梯度，不使用autograd或CAD解析梯度，也不需要预存梯度标签，见[后处理查询接口](Post.md#查询接口)。网格条件 SDF 查询另有梯度和不可微有效性接口。
+产物保存标量距离和有效标签信息。Post1109 通过空间邻点查询连续 E/V，再用中心差分计算梯度。[后处理流程](Post1109.md#field-query)
 
 ## 4. 普通点池、零集与独立评估
 
-默认 `pool_count=1572864`，四池比例及固定预算：
-
-| 池 | 点数 | 位置 |
+| 普通池 | 默认点数 | 来源 |
 |---|---:|---|
-| `surface` / S | 393216 | 最终 CAD 网格面积采样 |
-| `near_surface` / N | 550502 | 表面附近，实际 `abs(s_mesh)≤0.03` |
-| `edge_surface` / E_S | 393216 | CAD 边邻域内的网格表面点 |
-| `vertex_surface` / V_S | 235930 | 必要顶点邻域内的网格表面点 |
+| `surface` | 393216 | 网格表面面积采样，固定几何前缀 S0 |
+| `near_surface` | 275251 | 以 `surface` 为基点的空间扰动 |
+| `edge_neighborhood` | 558367 | 393216 个边附近表面点及 165151 个空间点 |
+| `vertex_neighborhood` | 346030 | 235930 个顶点附近表面点及 110100 个空间点 |
 
-S 的固定前 `geometry_surface_pool_count=393216` 点为 S0，仅依赖网格、点数和几何随机种子，法向取对应三角面。缺 E/V 时配额回退到 S 的扩展部分，S0 不变；不再按每个 CAD face 分配固定最低面点数。
+S0 由网格、点数和几何随机种子确定。特征池缺失时，表面和空间配额分别回到 `surface` 扩展段和 `near_surface`。特征表面点在候选三角形内采样。空间点按 80% 法向扰动和 20% 各向同性扰动生成，在 `[-1,1]^3` 内且 `|s_mesh|≤0.03` 才接受。
 
-E_S/V_S 在候选三角形内部连续采样，不只挑网格顶点，也不是把 CAD 曲线零集直接当 encoder 表面点。每个可达实例最少 32 点，边剩余配额按弧长平方根分配，顶点均分；邻域半径为 `0.002/0.005/0.01/0.02/0.03`，初始权重 `20/30/30/20/0`，最后一层供不足回退。候选局部细分不改变最终条件网格，最终 E/V 和距离层由 CAD 查询决定。
+`edge_zero` 默认有 65536 个 CAD 边点，给每条边留基础配额，其余按弧长分配。样本取等弧长分段中点。`vertex_zero` 包含全部必要顶点。独立评估用自己的普通采样流和边零集预算 4096，顶点零集仍是必要顶点坐标。可选 volume 池只保存 SDF，默认关闭。
 
-N 的基点按 S/E_S/V_S=50/30/20 取样，80% 法向偏移、20% 各向同性扰动；每种来源、模式和层独立按接受点填足配额。越界或超过真实 SDF 带宽时重采，不 clamp。接受时的 SDF 复用为标签。
+## 5. 数值与实例身份
 
-Z 单独保存每边 3 个弧长检查点和所有必要顶点，具有两个通道独立零集 mask；不因普通带宽筛选删除。默认 `evaluation/` 的普通池每组 4096 点，使用独立随机流；Z 按同一几何规则构造，可能与训练 Z 重合。不能把 evaluation 普通池说成训练池行子集。
+训练保存 `[s_mesh,min(dE,0.05),min(dV,0.05)]`。E/V 到达截断上限时标为饱和，`nearest_ids` 置为 `-1`。目标缺失时，训练通道也填 0.05，由 `has_edges/has_vertices` 声明缺失，饱和标记为 false。独立评估使用完整 E/V，空通道填 `2√3`。
 
-默认 `volume_pool_count=0`，没有全域体积池。显式开启后仅为均匀空间点保存 SDF，并另建独立 volume evaluation，不计入四池预算、不计算 E/V。训练采样预算与方案 A/B 属于训练工程，不能反写成预处理固定配置。
-
-## 5. 数值、空集与标签身份
-
-所有非空距离不截断，查询标签在最终存储的 float32 坐标上求值，不硬把表面点 SDF 设为零。空 E/V 通道保存 float32 `2√3`，最近实例 ID 为 `-1`，由 `has_edges / has_vertices` 区分占位与真实距离。旧 `.02` 占位和 `normalize=True` 读取规则不适用。
-
-source instance 是提出采样的目标，不一定等于该点最近的实例。source face、target edge、target vertex、condition triangle ID 分开保存；不能用最近 ID 替代完整关联，也不能把相同邻面的一对独立边合并。
+采样来源实例和最近实例分别保存。目标边、顶点及三角形索引属于不同的 ID 空间。
 
 ## 6. 当前文件与字段
 
@@ -81,7 +73,7 @@ root/
   config.json / manifest.jsonl / identity.json
   assets/<id>/
     condition/{vertices.npy,triangles.npy,meta.json}
-    pools/{surface,near_surface,edge_surface,vertex_surface,zero}/
+    pools/{surface,near_surface,edge_neighborhood,vertex_neighborhood,edge_zero,vertex_zero}/
     evaluation/<对应点池>/
     audit/ / topology.json / meta.json
   results/ / logs/ / index.json / report.json / status.json
@@ -92,13 +84,15 @@ root/
 | 字段 | 形状和用途 |
 |---|---|
 | `points.npy` | float32 `[N,3]` 查询坐标 |
-| `fields.npy` | float32 `[N,3]`，列序 `[s_mesh,dE,dV]` |
+| `fields.npy` | float32 `[N,3]`，列序为 SDF、E、V |
+| `saturated.npy` | bool `[N,2]`，E/V 截断饱和标记 |
+| `sample_type.npy` | uint8 `[N]`，0 表面、1 空间、2 零集 |
 | `nearest_ids.npy` | int32 `[N,2]`，最近 E/V 实例 |
 | `source_instance.npy` | int32 `[N]`，采样来源实例 |
-| `strata.npy` | uint8 `[N,1]`，N 为基点来源，特征池为真实距离层 |
-| `flags.npy` | uint8 `[N]`，bit0 为最近边歧义 |
-| `normals.npy`、`triangle_ids.npy` | 三个表面池的法向及 condition 三角形映射 |
-| `perturbation_mode.npy`、`perturbation_layer.npy` | N 的扰动模式与层 |
+| `strata.npy` | uint8 `[N,1]` 距离分层 |
+| `flags.npy` | uint8 `[N]`，bit0 为最近边歧义，bit1 为最近顶点歧义 |
+| `normals.npy`、`triangle_ids.npy` | 表面采样的法向和 condition 三角形索引，混合池空间行分别填 0 和 -1 |
+| `perturbation_mode.npy`、`perturbation_layer.npy` | 空间样本的扰动模式和层 |
 | `zero_mask.npy` | Z 的 bool `[N,2]` 零集 mask |
 
 `meta.json` 记录目标存在性、归一化、配置／依赖／代码身份、逐池统计、可达性与审计；`topology.json` 保留 CAD source 使用及目标图；condition 顶点 float64、三角形 int64，几何元数据足够重新生成 S0。`audit/` 的独立去重特征和 triangle→CAD face ID 不作为模型几何条件。
@@ -126,10 +120,8 @@ manifest 按 ABC 源文档分组、处理字节重复并固定 split。构建逐
 
 `prepare_remaining_run` 冻结增量候选与独立 `run/code/veudf`；`run_guarded_build` 保留 CPU／内存余量并在资源压力下软停止，可在原身份下续跑。同步仓库不更改已经冻结或运行中的生产任务。
 
-## 8. 历史流程与重建边界
+## 8. 版本与重建兼容性
 
-- 原 `edge_vertex_preprocessing/evudf` 的 `fields.npz / metadata.json / quality.json`、配置和命令已退役；数据不原地转换，历史输出保留。
-- 根目录 `prepare_implicit.py` 的 Voronoi UDF 仅服务原 DualBrep 模型复现，不用于新 E/V 数据。
-- 后处理现直接接收生产 condition 网格与连续预测 E/V，内部网格 SDF 复用生产 `MeshSDFOracle`，默认先纯几何粗加密再E/V近场细加密。`vendor/oracle`、旧 NPZ 插值与 MC 输入已删除，见[后处理入口](../band_brep_reconstruction/README.md)。
-- `ProductionUDFProvider` 接入外部生产模型适配器；点池和离散预测交换文件用于训练/评估，不能替代任意新位置的连续 E/V 查询。
-回归与使用入口见[模块 README](../veudf/README.md#入口与验证)。历史数据和实验范围继续见[实验主文档](ThreeFieldReconstructionExperiments.md#data-and-metrics)，本次整理前规范见[原文归档](archive/20261104_document_sources.json.gz)；更早设计和EMAP原稿按历史归档路径追溯，本次不保证它们仍在本机。
+v3 构建使用新数据根目录。发布索引会校验 schema，续跑会校验配置、代码、清单和依赖身份。历史 v1 数据作为归档保留。几何 condition 的版本和数组契约保持一致。
+
+Post1109 的 STEP 入口调用生产版的精确 reference 距离。新实验从源 STEP 或 v3 几何 condition 起跑，使用当前代码重新计算前缀。训练点池用于离散监督，重建时需提供能在任意查询位置求值的连续 E/V。预测适配器应保留 E/V 存在性和饱和掩码。若必需的查询点落在饱和区，模板会拒绝该查询。[重建入口](../band_brep_reconstruction/README.md)

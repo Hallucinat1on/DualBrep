@@ -22,9 +22,10 @@ from .surface_fitting import initialize_face_surfaces
 @timed_reconstruction
 def reconstruct(mesh,udf,cfg,output_dir,resume=False):
     """Recover B-rep from a closed normalized mesh and continuous metric E/V."""
-    cfg.validate();out=Path(output_dir);out.mkdir(parents=True,exist_ok=True)
+    cfg.validate();out=Path(output_dir)
     from .cache import cache_key,file_hash,load_graph,load_records,load_topology,load_center_fields
     key,cache_input=cache_key(mesh,udf,cfg)
+    out.mkdir(parents=True,exist_ok=True)
     prior=None
     if (out/'run.json').exists():
         require(resume,'output_exists','Use --resume for matching immutable caches or a new directory')

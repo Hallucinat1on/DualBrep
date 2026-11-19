@@ -1,5 +1,7 @@
 # 从三维欧氏距离场点云高精度、低成本拟合三次 B 样条曲线
 
+> 研究备忘，记录候选拟合算法。当前实现及默认参数见 [Post1109.md](Post1109.md)。
+
 ## 执行摘要
 
 问题可表述为：给定三维采样位置 $\mathbf x_i\in\mathbb R^3$ 与带噪的未知曲线欧氏距离观测 $d_i\approx\operatorname{dist}(\mathbf x_i,\Gamma)$，已知曲线两端点，恢复一条三次 B 样条

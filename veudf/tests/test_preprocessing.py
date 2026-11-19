@@ -25,8 +25,16 @@ from OCC.Core.Geom import Geom_Circle
 from OCC.Core.gp import gp_Ax2, gp_Dir, gp_Pnt
 from OCC.Extend.DataExchange import write_step_file
 
-from veudf.schema import EMPTY_DISTANCE, SCHEMA as SCHEMA_VERSION
+from veudf.schema import (
+    EMPTY_DISTANCE,
+    SCHEMA as SCHEMA_VERSION,
+    POOLS,
+    ALL_POOLS,
+    SURFACE,
+    SPATIAL,
+)
 from veudf.preprocess.cad import (
+    Targets,
     PreprocessError,
     compound,
     collect_targets,
@@ -41,11 +49,16 @@ from veudf.preprocess.dedup import (
     features,
     sample_mesh,
 )
-from veudf.preprocess.distance import EdgeOracle, CADSDFOracle, VertexOracle
+from veudf.preprocess.reference import (
+    ReferenceEdgeOracle,
+    CADSDFOracle,
+    ReferenceVertexOracle,
+)
+from veudf.preprocess.distance import FeatureUDFOracle
 from veudf.preprocess.filtering import audit_shape, check_metrics, face_edge_counts
 from veudf.preprocess.manifest import load_manifest, scan_directory
 from veudf.preprocess.pipeline import build_asset, verify_asset
-from veudf.preprocess.sampling import sample_edges, sample_pools
+from veudf.preprocess.sampling import sample_edges, sample_pools, zero_pools
 from veudf.utils import allocate, array_hash
 from veudf.geometry.sampling import base_surface
 from veudf.geometry.mesh import MeshSDFOracle
@@ -59,6 +72,8 @@ SMALL = replace(
     feature_min_samples=2,
     evaluation_points_per_pool=64,
     reference_checks=12,
+    zero_edge_count=256,
+    evaluation_zero_edge_count=64,
     dedup_surface_points=256,
     dedup_edge_points=64,
     dedup_edge_pool_count=128,
@@ -78,18 +93,96 @@ def record(path, uid, split="train", group=None):
 
 
 class DistanceTests(unittest.TestCase):
+    def test_feature_neighborhoods_match_clipped_independent_truth(self):
+        targets = collect_targets(BRepPrimAPI_MakeBox(1, 1, 1).Shape(), SMALL)
+        q = np.concatenate(
+            (
+                np.random.default_rng(91).uniform(-0.1, 1.1, (512, 3)),
+                np.array(
+                    [
+                        [0, 0, 0],
+                        [-0.049999, 0, 0],
+                        [-0.05, 0, 0],
+                        [-0.050001, 0, 0],
+                        [0.02, 0.02, 0],
+                        [0.5, 0.5, 0.5],
+                    ]
+                ),
+            )
+        )
+        feature = FeatureUDFOracle(targets, SMALL)
+        for channel, reference in zip(
+            feature.query(q),
+            (
+                ReferenceEdgeOracle(targets.edges, SMALL, exhaustive=True),
+                ReferenceVertexOracle(targets.vertices, SMALL),
+            ),
+        ):
+            truth = reference.query(q)
+            expected = np.minimum(truth["distance"], SMALL.udf_truncation)
+            np.testing.assert_allclose(channel["distance"], expected, atol=1e-8, rtol=0)
+            active = ~channel["saturated"] & ~truth["tie"]
+            np.testing.assert_array_equal(
+                channel["nearest_id"][active], truth["nearest_id"][active]
+            )
+            self.assertTrue(np.all(channel["nearest_id"][channel["saturated"]] == -1))
+        full = feature.query(q)
+        parts = [feature.query(part) for part in np.array_split(q, 7)]
+        for c in (0, 1):
+            for key in ("distance", "nearest_id", "tie", "saturated"):
+                np.testing.assert_array_equal(
+                    full[c][key], np.concatenate([p[c][key] for p in parts])
+                )
+
+    def test_feature_arc_endcaps_periodic_axis_and_empty_targets(self):
+        arc = BRepBuilderAPI_MakeEdge(
+            Geom_Circle(gp_Ax2(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1)), 0.02),
+            1.75 * np.pi,
+            2.25 * np.pi,
+        ).Edge()
+        curve = __import__(
+            "OCC.Core.BRepAdaptor", fromlist=["BRepAdaptor_Curve"]
+        ).BRepAdaptor_Curve(arc)
+        vertex = np.array(
+            [
+                [
+                    curve.Value(curve.FirstParameter()).X(),
+                    curve.Value(curve.FirstParameter()).Y(),
+                    0,
+                ]
+            ]
+        )
+        targets = Targets([arc], vertex, [], {})
+        q = np.array([[0, 0, 0.01], [0.02, 0, 0], [-0.02, 0, 0], [0.1, 0, 0]])
+        edge, vert = FeatureUDFOracle(targets, SMALL).query(q)
+        for actual, reference in (
+            (edge, ReferenceEdgeOracle([arc], SMALL, exhaustive=True)),
+            (vert, ReferenceVertexOracle(vertex, SMALL)),
+        ):
+            np.testing.assert_allclose(
+                actual["distance"],
+                np.minimum(reference.query(q)["distance"], 0.05),
+                atol=1e-8,
+            )
+        self.assertTrue(edge["tie"][0])
+        empty = FeatureUDFOracle(Targets([], np.empty((0, 3)), [], {}), SMALL).query(q)
+        for channel in empty:
+            self.assertTrue(np.all(channel["distance"] == SMALL.udf_truncation))
+            self.assertFalse(channel["saturated"].any())
+            self.assertTrue(np.all(channel["nearest_id"] == -1))
+
     def test_cube_counts_and_analytic_distances(self):
         shape = BRepPrimAPI_MakeBox(1, 1, 1).Shape()
         targets = collect_targets(shape, SMALL)
         self.assertEqual((len(targets.edges), len(targets.vertices)), (12, 8))
         q = np.array([[0.5, 0.5, 0.5], [0.25, 0.25, 0.25], [2, 0.5, 0.5], [0, 0, 0]])
         np.testing.assert_allclose(
-            EdgeOracle(targets.edges, SMALL).query(q)["distance"],
+            ReferenceEdgeOracle(targets.edges, SMALL).query(q)["distance"],
             [np.sqrt(0.5), np.sqrt(0.125), np.sqrt(1.25), 0],
             atol=1e-6,
         )
         np.testing.assert_allclose(
-            VertexOracle(targets.vertices, SMALL).query(q)["distance"],
+            ReferenceVertexOracle(targets.vertices, SMALL).query(q)["distance"],
             [np.sqrt(0.75), np.sqrt(0.1875), np.sqrt(1.5), 0],
             atol=1e-6,
         )
@@ -103,8 +196,8 @@ class DistanceTests(unittest.TestCase):
     def test_bvh_matches_reference_and_prunes(self):
         targets = collect_targets(BRepPrimAPI_MakeBox(1, 1, 1).Shape(), SMALL)
         q = np.random.default_rng(123).uniform(-1, 2, (150, 3))
-        fast, ref = EdgeOracle(targets.edges, SMALL), EdgeOracle(
-            targets.edges, SMALL, "cad_reference"
+        fast, ref = ReferenceEdgeOracle(targets.edges, SMALL), ReferenceEdgeOracle(
+            targets.edges, SMALL, exhaustive=True
         )
         np.testing.assert_allclose(
             fast.query(q)["distance"], ref.query(q)["distance"], atol=1e-7
@@ -120,9 +213,11 @@ class DistanceTests(unittest.TestCase):
             np.hypot(rho - 1, q[:, 2]), np.hypot(rho - 1, q[:, 2] - 2)
         )
         np.testing.assert_allclose(
-            EdgeOracle(targets.edges, SMALL).query(q)["distance"], expected, atol=1e-6
+            ReferenceEdgeOracle(targets.edges, SMALL).query(q)["distance"],
+            expected,
+            atol=1e-6,
         )
-        empty = VertexOracle(targets.vertices, SMALL).query(q)
+        empty = ReferenceVertexOracle(targets.vertices, SMALL).query(q)
         self.assertTrue(
             np.all(empty["distance"] == EMPTY_DISTANCE)
             and np.all(empty["nearest_id"] == -1)
@@ -132,7 +227,7 @@ class DistanceTests(unittest.TestCase):
         arc = BRepBuilderAPI_MakeEdge(
             Geom_Circle(gp_Ax2(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1)), 1), 0, np.pi / 2
         ).Edge()
-        result = EdgeOracle([arc], SMALL).query([[0, 0, 1], [-1, 0, 0]])
+        result = ReferenceEdgeOracle([arc], SMALL).query([[0, 0, 1], [-1, 0, 0]])
         self.assertTrue(result["tie"][0])
         self.assertAlmostEqual(result["distance"][1], np.sqrt(2), places=6)
 
@@ -163,12 +258,18 @@ class FilterTests(unittest.TestCase):
             p = write_step(tmp, "multiple", compound([small, large]))
             solid, meta = read_normalized(p, SMALL)
             self.assertEqual(meta["source_solid_count"], 2)
-            self.assertEqual(meta["selected_solid_policy"], "largest_valid_positive_volume")
+            self.assertEqual(
+                meta["selected_solid_policy"], "largest_valid_positive_volume"
+            )
             self.assertAlmostEqual(meta["source_volume"], 24.0, places=6)
-            np.testing.assert_allclose(meta["source_bounds"], [[0, 0, 0], [2, 3, 4]], atol=1e-6)
+            np.testing.assert_allclose(
+                meta["source_bounds"], [[0, 0, 0], [2, 3, 4]], atol=1e-6
+            )
             self.assertEqual(len(collect_targets(solid, SMALL).faces), 6)
             _, again = read_normalized(p, SMALL)
-            self.assertEqual(meta["selected_solid_index"], again["selected_solid_index"])
+            self.assertEqual(
+                meta["selected_solid_index"], again["selected_solid_index"]
+            )
 
     def test_face_count_edge_and_length_endpoints(self):
         cfg = Config()
@@ -258,11 +359,26 @@ class SamplingTests(unittest.TestCase):
     def test_profile_counts_and_strict_old_keys(self):
         cfg = load_config(ROOT / "configs/surface_pools.json")
         np.testing.assert_array_equal(
-            allocate(cfg.pool_count, cfg.pool_weights), [393216, 550502, 393216, 235930]
+            allocate(cfg.pool_count, cfg.pool_weights), [393216, 275251, 558367, 346030]
         )
         self.assertEqual(cfg.geometry_surface_pool_count, 393216)
         with self.assertRaises(ValueError):
             load_config(overrides={"query_count": 100})
+
+    def test_default_edge_zero_budget_and_all_vertices(self):
+        targets = collect_targets(BRepPrimAPI_MakeBox(1, 1, 1).Shape(), SMALL)
+        banks = zero_pools(targets, Config())
+        edges, vertices = banks["edge_zero"], banks["vertex_zero"]
+        self.assertEqual(len(edges["points"]), 65536)
+        self.assertEqual(len(np.unique(edges["points"], axis=0)), 65536)
+        np.testing.assert_array_equal(
+            vertices["points"], targets.vertices.astype(np.float32)
+        )
+        self.assertTrue(
+            np.all(np.bincount(edges["source_instance"], minlength=12) >= 8)
+        )
+        with self.assertRaises(ValueError):
+            load_config(overrides={"zero_checks_per_edge": 3})
 
 
 class PipelineTests(unittest.TestCase):
@@ -280,13 +396,7 @@ class PipelineTests(unittest.TestCase):
         result = build_asset(record(p, "cube"), out, cfg)
         verify_asset(out, result["hashes"])
         oracle, _, _, _ = read_geometry(out / "condition")
-        for name in [
-            "surface",
-            "near_surface",
-            "edge_surface",
-            "vertex_surface",
-            "zero",
-        ]:
+        for name in ALL_POOLS:
             bank = out / "pools" / name
             x = np.load(bank / "points.npy")
             f = np.load(bank / "fields.npy")
@@ -295,12 +405,18 @@ class PipelineTests(unittest.TestCase):
             targets = collect_targets(solid, SMALL)
             np.testing.assert_allclose(
                 f[:, 1],
-                EdgeOracle(targets.edges, SMALL).query(x)["distance"],
+                np.minimum(
+                    ReferenceEdgeOracle(targets.edges, SMALL).query(x)["distance"],
+                    SMALL.udf_truncation,
+                ),
                 atol=1e-6,
             )
             np.testing.assert_allclose(
                 f[:, 2],
-                VertexOracle(targets.vertices, SMALL).query(x)["distance"],
+                np.minimum(
+                    ReferenceVertexOracle(targets.vertices, SMALL).query(x)["distance"],
+                    SMALL.udf_truncation,
+                ),
                 atol=1e-6,
             )
             if name == "near_surface":
@@ -311,24 +427,42 @@ class PipelineTests(unittest.TestCase):
         self.assertFalse(any(tuple(x) in seen for x in evaluation))
         meta = json.loads((out / "meta.json").read_text())
         self.assertEqual(
-            sum(v["count"] for k, v in meta["statistics"].items() if k != "zero"),
+            sum(v["count"] for k, v in meta["statistics"].items() if k in POOLS),
             SMALL.pool_count,
         )
         self.assertEqual(meta["channel_names"], ["s_mesh", "dE", "dV"])
-        origin = np.load(out / "pools/near_surface/strata.npy")[:, 0]
-        mode = np.load(out / "pools/near_surface/perturbation_mode.npy")
-        layer = np.load(out / "pools/near_surface/perturbation_layer.npy")
         counts = allocate(SMALL.pool_count, SMALL.pool_weights)
-        for j, n in enumerate(allocate(int(counts[1]), [0.5, 0.3, 0.2])):
-            nc, ic = allocate(int(n), [0.8, 0.2])
+        for name, total, ratio in zip(
+            POOLS[1:], counts[1:], [0, *SMALL.feature_surface_ratios]
+        ):
+            bank = out / "pools" / name
+            types = np.load(bank / "sample_type.npy")
+            spatial_count = (
+                int(total)
+                if name == "near_surface"
+                else int(allocate(int(total), [ratio, 1 - ratio])[1])
+            )
+            self.assertEqual(int((types == SPATIAL).sum()), spatial_count)
+            mode = np.load(bank / "perturbation_mode.npy")[types == SPATIAL]
+            layer = np.load(bank / "perturbation_layer.npy")[types == SPATIAL]
+            nc, ic = allocate(spatial_count, [0.8, 0.2])
             for m, quotas in enumerate(
                 (allocate(int(nc), [0.3, 0.4, 0.3]), allocate(int(ic), [1, 1, 1, 1]))
             ):
                 for k, need in enumerate(quotas):
-                    self.assertEqual(
-                        int(((origin == j) & (mode == m) & (layer == k)).sum()),
-                        int(need),
-                    )
+                    self.assertEqual(int(((mode == m) & (layer == k)).sum()), int(need))
+            owners = np.load(bank / "source_instance.npy")
+            self.assertTrue(
+                np.all(owners == -1) if name == "near_surface" else np.all(owners >= 0)
+            )
+        self.assertEqual(
+            len(np.load(out / "pools/edge_zero/points.npy")), SMALL.zero_edge_count
+        )
+        self.assertEqual(len(np.load(out / "pools/vertex_zero/points.npy")), 8)
+        self.assertEqual(
+            len(np.load(out / "evaluation/edge_zero/points.npy")),
+            SMALL.evaluation_zero_edge_count,
+        )
         for parent, count in [("pools", 128), ("evaluation", 64)]:
             x = np.load(out / parent / "volume/points.npy")
             sdf = np.load(out / parent / "volume/sdf.npy")
@@ -337,10 +471,15 @@ class PipelineTests(unittest.TestCase):
         from veudf.geometry.sampling import face_normals
 
         fn = face_normals(oracle.vertices, oracle.faces)
-        for name in ("surface", "edge_surface", "vertex_surface"):
+        for name in ("surface", "edge_neighborhood", "vertex_neighborhood"):
             bank = out / "pools" / name
             ids = np.load(bank / "triangle_ids.npy")
-            np.testing.assert_array_equal(np.load(bank / "normals.npy"), fn[ids])
+            types = np.load(bank / "sample_type.npy")
+            normals = np.load(bank / "normals.npy")
+            np.testing.assert_array_equal(
+                normals[types == SURFACE], fn[ids[types == SURFACE]]
+            )
+            self.assertTrue(np.all(normals[types == SPATIAL] == 0))
 
     def test_cylinder_empty_vertices_and_geometry_stability(self):
         p = write_step(self.root, "cyl", BRepPrimAPI_MakeCylinder(1, 2).Shape())
@@ -348,10 +487,16 @@ class PipelineTests(unittest.TestCase):
         cfg = replace(SMALL, pool_count=8192)
         build_asset(record(p, "grown"), self.root / "grown", cfg)
         for name in ["base", "grown"]:
-            bank = self.root / name / "pools/vertex_surface/fields.npy"
+            bank = self.root / name / "pools/vertex_neighborhood/fields.npy"
             self.assertEqual(len(np.load(bank)), 0)
             f = np.load(self.root / name / "pools/surface/fields.npy")
-            self.assertTrue(np.all(f[:, 2] == np.float32(EMPTY_DISTANCE)))
+            self.assertTrue(np.all(f[:, 2] == np.float32(cfg.udf_truncation)))
+            ids = np.load(self.root / name / "pools/surface/nearest_ids.npy")
+            sat = np.load(self.root / name / "pools/surface/saturated.npy")
+            self.assertTrue(np.all(ids[:, 1] == -1))
+            self.assertFalse(sat[:, 1].any())
+            evaluation = np.load(self.root / name / "evaluation/surface/fields.npy")
+            self.assertTrue(np.all(evaluation[:, 2] == np.float32(EMPTY_DISTANCE)))
         for array in ["points", "normals"]:
             a = np.load(self.root / "base/pools/surface" / f"{array}.npy")[
                 : SMALL.geometry_surface_pool_count

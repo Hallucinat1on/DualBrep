@@ -1,5 +1,5 @@
 numpy>=1.24,<2
 scipy>=1.10
 veudf==2.0.0
-# Install the local production mirror: pip install -e ./veudf
+# Install the repository veudf mirror with pip install -e ./veudf. The v3 schema is checked at runtime.
 # STEP input and assembly need pythonocc-core 7.7. Mesh SDF needs libigl 2.6.3.

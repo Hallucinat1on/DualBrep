@@ -1,6 +1,6 @@
 # DualBrep：UDF 表示、面分割与 B-rep 拓扑恢复
 
-原始核查：2026-10-15；文档整理：2026-10-31。本说明介绍原 DualBrep 的 GVD-UDF、训练与推理、面分割、学习式参数化及 CAD 后处理。已实现的最近真实边／顶点三场路线见[隔离带算法与实现](BandLabelTopologyRecovery.md)，数据目标见[预处理规范](ABCEdgeVertexUDFPreprocessing.md)。本文不将原 DualBrep 的网络预测流程描述为 `bandbrep` 的执行路径。
+原始核查：2026-10-15；文档整理：2026-10-31。本说明介绍原 DualBrep 的 GVD-UDF、训练与推理、面分割、学习式参数化及 CAD 后处理。已实现的最近真实边／顶点三场路线见[现行后处理](../docs/Post1109.md)，数据目标见[预处理规范](../docs/Pre.md)。本文不将原 DualBrep 的网络预测流程描述为 `bandbrep` 的执行路径。
 
 - [A. UDF 表示与处理流程](#udf-flow)
 - [B. 拓扑恢复、seam 与特殊边](#topology-seam)
@@ -504,7 +504,7 @@ $$
 
 #### 2.2 理想零集关系与实际近似不能混淆
 
-[`prepare_implicit.py`](../prepare_implicit.py) 对 `voronoi.ply` 求无符号距离；[`Voronoi/calculate_voronoi/`](../Voronoi/calculate_voronoi/) 使用带 face 标签的采样点构造分界网格。实际流程还存在有限采样、网格化和神经场预测误差，所以双场交线通常只是目标边界的近似。
+[`prepare_implicit.py`](prepare_implicit.py) 对 `voronoi.ply` 求无符号距离；[`Voronoi/calculate_voronoi/`](Voronoi/calculate_voronoi/) 使用带 face 标签的采样点构造分界网格。实际流程还存在有限采样、网格化和神经场预测误差，所以双场交线通常只是目标边界的近似。
 
 即使限制在实体表面上，到 GVD 分界面的距离也不必等于到真实边界曲线的距离：最近的 GVD 点可能并不位于实体表面。需要区分“零集对应”与“距离值相同”。
 
@@ -529,13 +529,13 @@ $$
 
 #### 4.1 分割阶段交付的是面内部，不是完整曲线图
 
-[`clustering.py`](../clustering.py) 的 `hierarchical_segmentation()` 将低 UDF 三角形视为边界带，对剩余三角形求连通分量。边界带保留为 `label=-1`，默认不回填。
+[`clustering.py`](clustering.py) 的 `hierarchical_segmentation()` 将低 UDF 三角形视为边界带，对剩余三角形求连通分量。边界带保留为 `label=-1`，默认不回填。
 
-随后，[`rebuild.py`](../rebuild.py) 的 `sample_faces()` 排除 `-1` 区域，从每个保留面片采样点和法线。
+随后，[`rebuild.py`](rebuild.py) 的 `sample_faces()` 排除 `-1` 区域，从每个保留面片采样点和法线。
 
 以立方体为例，交给后续网络的更接近于六块边缘被削去的面片，而不是六个共享同一套精确边界的面。
 
-`recon_udf.ply` 也不能视为完整边图：[`mesh_utils.py`](../mesh_utils.py) 的 `udf2mesh()` 提取的是 UDF 正阈值等值面，属于二维偏置壳层，而非一维 CAD 曲线。默认标量分割路径不使用这个 PLY 文件。
+`recon_udf.ply` 也不能视为完整边图：[`mesh_utils.py`](mesh_utils.py) 的 `udf2mesh()` 提取的是 UDF 正阈值等值面，属于二维偏置壳层，而非一维 CAD 曲线。默认标量分割路径不使用这个 PLY 文件。
 
 #### 4.2 参数化网络没有直接接收 UDF 曲线或已知邻接
 
@@ -553,7 +553,7 @@ $$
 
 #### 4.3 网络联合预测曲面、面对邻接与裁剪曲线
 
-[`rebuild_model.py`](../rebuild_model.py) 中的 `Parametrizer`：
+[`rebuild_model.py`](rebuild_model.py) 中的 `Parametrizer`：
 
 1. 编码每个面片，并通过跨面 attention 汇聚上下文。
 2. 为每个面预测 `16×16` 参数曲面网格。
@@ -648,7 +648,7 @@ B-rep 通常用同一条拓扑 `edge`，在同一个 `face` 的边界中反向�
 
 #### 6.1 拟合曲面后，尝试设置周期性
 
-[`brep_post/utils.py`](../brep_post/utils.py) 的 `create_surface()` 先拟合 B-spline 曲面，再由内部函数 `set_face_uv_periodic()` 根据参数边界端点距离与网格平均间距，尝试设置 U/V 周期性。例如 U 方向：
+[`brep_post/utils.py`](brep_post/utils.py) 的 `create_surface()` 先拟合 B-spline 曲面，再由内部函数 `set_face_uv_periodic()` 根据参数边界端点距离与网格平均间距，尝试设置 U/V 周期性。例如 U 方向：
 
 ```776:780:brep_post/utils.py
         u_min, u_max, v_min, v_max = geom_face.Bounds()
@@ -687,7 +687,7 @@ OCC 对 `FixMissingSeam()` 的定义是：闭合曲面上的两个 wire 在三�
 
 #### 6.3 网络预测的同面边没有直接进入最终装配
 
-[`brep_post/construct_brep.py`](../brep_post/construct_brep.py) 在构建面—边关系时，遇到 `face1 == face2` 会直接跳过。将该边保留为 seam 的相关代码被注释了。
+[`brep_post/construct_brep.py`](brep_post/construct_brep.py) 在构建面—边关系时，遇到 `face1 == face2` 会直接跳过。将该边保留为 seam 的相关代码被注释了。
 
 实际分工是：
 
@@ -705,7 +705,7 @@ OCC 对 `FixMissingSeam()` 的定义是：闭合曲面上的两个 wire 在三�
 | **自由边／开边界边** | 只被一个面使用一次，例如开放薄片的外轮廓，另一侧没有面 | 不属于目标闭合实体的常规边。预处理要求保留边有两次面关联，不满足会拒绝 |
 | **同面内部边、裂缝／切口边** | 一般拓扑数据中可能存在的不分隔两个独立 face 的附加结构，不一定是周期 seam | 代码没有专门区分这些语义：同面正反向重复边会跳过，残留的两侧同面边也会删除；没有通用恢复机制。若只出现一次，也可能被面关联数检查拒绝 |
 
-相关过滤逻辑位于 [`Voronoi/calculate_voronoi/calculate_voronoi.cpp`](../Voronoi/calculate_voronoi/calculate_voronoi.cpp) 的 `sample_points_surface()`。
+相关过滤逻辑位于 [`Voronoi/calculate_voronoi/calculate_voronoi.cpp`](Voronoi/calculate_voronoi/calculate_voronoi.cpp) 的 `sample_points_surface()`。
 
 “退化”“自由”“seam”不是完全同一维度的分类：退化描述几何映射性质，自由边和 seam 更多描述边在面边界中的使用方式。
 

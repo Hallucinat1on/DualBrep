@@ -1,7 +1,25 @@
 """Offline nearest-support diagnostics; these are not topology certificates."""
+from types import SimpleNamespace
+
 import numpy as np
 from scipy.sparse import coo_matrix
 from scipy.spatial import cKDTree
+
+
+
+def offline_source(targets, raw, oracle, normalization):
+    """Build scoring references from the source CAD and its triangulated mesh."""
+    from offline_support import PolylineDistance
+
+    return SimpleNamespace(
+        targets=targets,
+        mesh=raw,
+        normalization=normalization,
+        edge=PolylineDistance(targets.edges) if targets.edges else None,
+        vtree=cKDTree(targets.vertices) if len(targets.vertices) else None,
+        truth_face=lambda points: raw[2][oracle.closest(points)[1]],
+        sdf=oracle.query,
+    )
 
 
 def dominant(component, truth, count, truth_count):

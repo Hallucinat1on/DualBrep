@@ -27,6 +27,22 @@ class ContractTests(unittest.TestCase):
             p=Path(tmp)/'config.json';p.write_text('{"sample_timeout_seconds": 9}')
             self.assertEqual(load_config(p,{'sample_timeout_seconds':10}).sample_timeout_seconds,10)
 
+    def test_both_reconstruction_inputs_reject_legacy_veudf(self):
+        from unittest.mock import patch
+        from bandbrep.cad_source import load_cad_source
+
+        mesh, udf = box()
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / 'run'
+            with patch('veudf.schema.SCHEMA', 'edge_vertex_mesh_pools_v1'):
+                with self.assertRaises(ReconstructionError) as mesh_error:
+                    reconstruct(mesh, udf, Config(), out)
+                with self.assertRaises(ReconstructionError) as cad_error:
+                    load_cad_source(Path(tmp) / 'source.step', 'probe')
+            self.assertEqual(mesh_error.exception.code, 'veudf_schema_mismatch')
+            self.assertEqual(cad_error.exception.code, 'veudf_schema_mismatch')
+            self.assertFalse(out.exists())
+
     def test_mesh_sdf_and_metric_udf_gradient(self):
         mesh,udf=box();p=MeshFieldProvider(mesh,udf,Config())
         q=np.array([[.551,.53,.52]])

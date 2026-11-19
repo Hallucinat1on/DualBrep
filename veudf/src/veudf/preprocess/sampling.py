@@ -4,7 +4,7 @@ import numpy as np
 from scipy.spatial import cKDTree
 from OCC.Core.BRepAdaptor import BRepAdaptor_Curve
 from OCC.Core.GCPnts import GCPnts_AbscissaPoint, GCPnts_UniformAbscissa
-from veudf.schema import POOLS
+from veudf.schema import POOLS, SURFACE, SPATIAL, ZERO
 from veudf.utils import allocate, seed_for
 from veudf.geometry.sampling import base_surface, triangle_samples, face_normals
 from veudf.preprocess.cad import PreprocessError, xyz
@@ -50,25 +50,44 @@ def sample_edges(targets, cfg):
     )
 
 
-def zero_pool(targets, cfg):
-    points, masks, ids = [], [], []
-    for i, e in enumerate(targets.edges):
-        p = curve_points(
-            e,
-            cfg.zero_checks_per_edge,
-            cfg.solver_tolerance,
-            targets.topology["edges"][i]["closed"],
+def zero_pools(targets, cfg, evaluation=False):
+    budget = (
+        max(cfg.evaluation_zero_edge_count, len(targets.edges))
+        if evaluation
+        else cfg.zero_edge_count
+    )
+    if len(targets.edges) > budget:
+        raise PreprocessError(
+            "sampling_failed", "Edge zero budget cannot cover every edge"
         )
-        points.extend(p)
-        masks.extend([[True, False]] * len(p))
-        ids.extend([i] * len(p))
-    points.extend(targets.vertices)
-    masks.extend([[True, True]] * len(targets.vertices))
-    ids.extend(range(len(targets.vertices)))
+    points, ids = [], []
+    if targets.edges:
+        lengths = [
+            GCPnts_AbscissaPoint.Length(BRepAdaptor_Curve(e), cfg.solver_tolerance)
+            for e in targets.edges
+        ]
+        minimum = min(cfg.zero_edge_min_samples, budget // len(targets.edges))
+        counts = minimum + allocate(budget - minimum * len(targets.edges), lengths)
+        for i, (edge, n) in enumerate(zip(targets.edges, counts)):
+            # Midpoints of equal arc-length cells exclude endpoints and closed seams.
+            samples = curve_points(edge, 2 * int(n) + 1, cfg.solver_tolerance)[1::2]
+            points.append(samples)
+            ids.extend([i] * len(samples))
+
+    def bank(x, instances, mask):
+        x = np.asarray(x, np.float32).reshape(-1, 3)
+        return dict(
+            points=x,
+            source_instance=np.asarray(instances, np.int32),
+            sample_type=np.full(len(x), ZERO, np.uint8),
+            zero_mask=np.tile(mask, (len(x), 1)).astype(bool),
+        )
+
     return dict(
-        points=np.asarray(points, np.float32).reshape(-1, 3),
-        zero_mask=np.asarray(masks, bool).reshape(-1, 2),
-        source_instance=np.asarray(ids, np.int32),
+        edge_zero=bank(np.concatenate(points) if points else [], ids, [True, False]),
+        vertex_zero=bank(
+            targets.vertices, np.arange(len(targets.vertices)), [True, True]
+        ),
     )
 
 
@@ -288,65 +307,83 @@ class FeatureSurfaceSampler:
         )
 
 
-def near_pool(surface_pools, count, oracle, cfg, seed):
-    """Fill quotas on *accepted* points, rather than mixing before rejection."""
+def spatial_pool(base, count, oracle, cfg, seed):
+    """Perturb one surface source, preserving accepted mode/layer quotas and owner."""
     rng = np.random.default_rng(seed)
-    weights = np.array([0.5, 0.3, 0.2])
-    for j, p in enumerate(surface_pools):
-        if not len(p["points"]):
-            weights[0] += weights[j]
-            weights[j] = 0
-    chunks, values, origins, modes, layers = [], [], [], [], []
+    chunks, values, instances, modes, layers = [], [], [], [], []
     bounds = [0, 0.002, 0.01, cfg.band_max]
-    for origin, n in enumerate(allocate(count, weights)):
-        normal_count, isotropic_count = allocate(int(n), [0.8, 0.2])
-        normal_layers = allocate(int(normal_count), [0.3, 0.4, 0.3])
-        noise_layers = allocate(int(isotropic_count), [1, 1, 1, 1])
-        for mode, quotas in enumerate((normal_layers, noise_layers)):
-            for layer, quota in enumerate(quotas):
-                remaining = int(quota)
-                for _ in range(cfg.sampling_rounds):
-                    if not remaining:
-                        break
-                    base = surface_pools[origin]
-                    idx = rng.integers(
-                        len(base["points"]), size=min(max(remaining * 2, 128), 131072)
-                    )
-                    p = base["points"][idx].astype(np.float64)
-                    if mode == 0:
-                        delta = rng.uniform(
-                            bounds[layer], bounds[layer + 1], len(p)
-                        ) * rng.choice([-1, 1], len(p))
-                        q = p + base["normals"][idx] * delta[:, None]
-                    else:
-                        q = (
-                            p
-                            + rng.normal(size=p.shape)
-                            * [0.001, 0.005, 0.01, 0.02][layer]
-                        )
-                    q = q.astype(np.float32)
-                    q = q[(np.abs(q) <= 1).all(1)]
-                    sdf = oracle.query(q)
-                    good = np.abs(sdf) <= cfg.band_max
-                    q, sdf = q[good][:remaining], sdf[good][:remaining]
-                    chunks.append(q)
-                    values.append(sdf)
-                    origins.extend([origin] * len(q))
-                    modes.extend([mode] * len(q))
-                    layers.extend([layer] * len(q))
-                    remaining -= len(q)
-                if remaining:
-                    raise PreprocessError(
-                        "sampling_failed",
-                        f"Near-surface quota unfilled: origin={origin}, mode={mode}, layer={layer}, missing={remaining}",
-                    )
+    normal_count, isotropic_count = allocate(count, [0.8, 0.2])
+    for mode, quotas in enumerate(
+        (
+            allocate(int(normal_count), [0.3, 0.4, 0.3]),
+            allocate(int(isotropic_count), [1, 1, 1, 1]),
+        )
+    ):
+        for layer, quota in enumerate(quotas):
+            remaining = int(quota)
+            for _ in range(cfg.sampling_rounds):
+                if not remaining:
+                    break
+                idx = rng.integers(
+                    len(base["points"]), size=min(max(remaining * 2, 128), 131072)
+                )
+                p = base["points"][idx].astype(np.float64)
+                if mode == 0:
+                    delta = rng.uniform(
+                        bounds[layer], bounds[layer + 1], len(p)
+                    ) * rng.choice([-1, 1], len(p))
+                    q = p + base["normals"][idx] * delta[:, None]
+                else:
+                    q = p + rng.normal(size=p.shape) * [0.001, 0.005, 0.01, 0.02][layer]
+                q = q.astype(np.float32)
+                inside = (np.abs(q) <= 1).all(1)
+                q, idx = q[inside], idx[inside]
+                sdf = oracle.query(q)
+                good = np.abs(sdf) <= cfg.band_max
+                accepted = q[good][:remaining]
+                chunks.append(accepted)
+                values.append(sdf[good][:remaining])
+                instances.extend(base["source_instance"][idx[good]][:remaining])
+                modes.extend([mode] * len(accepted))
+                layers.extend([layer] * len(accepted))
+                remaining -= len(accepted)
+            if remaining:
+                raise PreprocessError(
+                    "sampling_failed",
+                    f"Spatial quota unfilled: mode={mode}, layer={layer}, missing={remaining}",
+                )
     return dict(
         points=np.concatenate(chunks) if chunks else np.empty((0, 3), np.float32),
         _sdf=np.concatenate(values) if values else np.empty(0),
-        source_instance=np.full(count, -1, np.int32),
-        strata=np.asarray(origins, np.uint8)[:, None],
+        source_instance=np.asarray(instances, np.int32),
+        sample_type=np.full(count, SPATIAL, np.uint8),
         perturbation_mode=np.asarray(modes, np.uint8),
         perturbation_layer=np.asarray(layers, np.uint8),
+    )
+
+
+def merge_neighborhood(surface, spatial):
+    """Surface normals/triangle IDs are meaningful only on sample_type=SURFACE."""
+    n, m = len(surface["points"]), len(spatial["points"])
+    return dict(
+        points=np.concatenate((surface["points"], spatial["points"])),
+        normals=np.concatenate((surface["normals"], np.zeros((m, 3), np.float32))),
+        triangle_ids=np.concatenate(
+            (surface["triangle_ids"], np.full(m, -1, np.int32))
+        ),
+        source_instance=np.concatenate(
+            (surface["source_instance"], spatial["source_instance"])
+        ),
+        sample_type=np.concatenate(
+            (np.full(n, SURFACE, np.uint8), spatial["sample_type"])
+        ),
+        perturbation_mode=np.concatenate(
+            (np.full(n, 255, np.uint8), spatial["perturbation_mode"])
+        ),
+        perturbation_layer=np.concatenate(
+            (np.full(n, 255, np.uint8), spatial["perturbation_layer"])
+        ),
+        _sdf=np.concatenate((np.full(n, np.nan), spatial["_sdf"])),
     )
 
 
@@ -360,19 +397,27 @@ def sample_pools(targets, mesh, oracle, cfg, seed, counts=None, geometry_count=N
         cfg.geometry_surface_pool_count if geometry_count is None else geometry_count
     )
     s, n, e, v = map(int, counts)
-    if not targets.edges:
-        s += e
-        e = 0
-    if not len(targets.vertices):
-        s += v
-        v = 0
     fs = FeatureSurfaceSampler(mesh, cfg)
-    ep, es = fs.pool(targets, e, "edge", seed_for(seed, "edge"))
-    vp, vs = fs.pool(targets, v, "vertex", seed_for(seed, "vertex"))
-    if not len(ep["points"]):
-        s += e
-    if not len(vp["points"]):
-        s += v
+    feature_bases, feature_spatial_counts, reachability = [], [], {}
+    for count, ratio, kind in zip(
+        (e, v), cfg.feature_surface_ratios, ("edge", "vertex")
+    ):
+        surface_count, spatial_count = map(int, allocate(count, [ratio, 1 - ratio]))
+        # A feature spatial sample needs a surface seed, even for a space-only quota.
+        present = bool(targets.edges) if kind == "edge" else bool(len(targets.vertices))
+        base, reach = fs.pool(
+            targets,
+            max(surface_count, int(spatial_count > 0)) if present else 0,
+            kind,
+            seed_for(seed, kind),
+        )
+        reachability[kind] = reach
+        if not len(base["points"]):
+            s += surface_count
+            n += spatial_count
+            spatial_count = 0
+        feature_bases.append((base, surface_count))
+        feature_spatial_counts.append(spatial_count)
     if s < geometry_count:
         raise ValueError("Surface pool smaller than geometry prefix")
     p, normal, base_ids = base_surface(mesh, geometry_count, cfg.seed, return_ids=True)
@@ -387,6 +432,16 @@ def sample_pools(targets, mesh, oracle, cfg, seed, counts=None, geometry_count=N
         normals=np.concatenate((normal, face_normals(*mesh)[extra_ids])),
         triangle_ids=np.concatenate((base_ids, extra_ids)).astype(np.int32),
         source_instance=np.full(s, -1, np.int32),
+        sample_type=np.full(s, SURFACE, np.uint8),
     )
-    npool = near_pool([sp, ep, vp], n, oracle, cfg, seed_for(seed, "near"))
-    return dict(zip(POOLS, [sp, npool, ep, vp])), dict(edge=es, vertex=vs)
+    npool = spatial_pool(sp, n, oracle, cfg, seed_for(seed, "near"))
+    features = []
+    for (base, surface_count), count, kind in zip(
+        feature_bases, feature_spatial_counts, ("edge", "vertex")
+    ):
+        spatial = spatial_pool(
+            base, count, oracle, cfg, seed_for(seed, kind, "spatial")
+        )
+        surface = {key: value[:surface_count] for key, value in base.items()}
+        features.append(merge_neighborhood(surface, spatial))
+    return dict(zip(POOLS, [sp, npool, *features])), reachability

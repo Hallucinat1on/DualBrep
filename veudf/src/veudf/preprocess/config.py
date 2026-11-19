@@ -27,15 +27,20 @@ class Config:
     feature_curve_spacing: float = 0.002
     geometry_surface_pool_count: int = 393216
     pool_count: int = 1572864
-    pool_weights: tuple = (0.25, 0.35, 0.25, 0.15)
+    pool_weights: tuple = (0.25, 0.175, 0.355, 0.22)
+    feature_surface_ratios: tuple = (393216 / 558367, 235930 / 346030)
     band_max: float = 0.03
     feature_radii: tuple = (0.002, 0.005, 0.01, 0.02, 0.03)
     feature_weights: tuple = (0.2, 0.3, 0.3, 0.2, 0.0)
     feature_min_samples: int = 32
     sampling_rounds: int = 32
     evaluation_points_per_pool: int = 4096
-    zero_checks_per_edge: int = 3
+    zero_edge_count: int = 65536
+    zero_edge_min_samples: int = 8
+    evaluation_zero_edge_count: int = 4096
     batch_size: int = 4096
+    label_batch_size: int = 32768
+    udf_truncation: float = 0.05
     reference_checks: int = 128
     seed: int = 0
     # Geometric near-duplicate policy (project thresholds, not DualBrep's)
@@ -73,6 +78,12 @@ class Config:
             )
         if self.max_faces < self.min_faces:
             raise ValueError("max_faces < min_faces")
+        if self.udf_truncation <= max(self.feature_radii) + self.label_tolerance:
+            raise ValueError("UDF truncation must cover all feature sampling layers")
+        if len(self.feature_surface_ratios) != 2 or any(
+            not math.isfinite(r) or not 0 <= r <= 1 for r in self.feature_surface_ratios
+        ):
+            raise ValueError("feature_surface_ratios must contain two ratios in [0,1]")
         from veudf.utils import allocate
 
         if (
@@ -111,7 +122,12 @@ def load_config(path=None, overrides=None):
     unknown = set(data) - {f.name for f in fields(Config)}
     if unknown:
         raise ValueError(f"Unknown configuration keys: {sorted(unknown)}")
-    for key in ("pool_weights", "feature_radii", "feature_weights"):
+    for key in (
+        "pool_weights",
+        "feature_surface_ratios",
+        "feature_radii",
+        "feature_weights",
+    ):
         if key in data:
             data[key] = tuple(data[key])
     return Config(**data).validate()

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Check or import the authoritative production veudf implementation.
 
-Only package source, tests, configuration and packaging files are managed.
-README, provenance, datasets, frozen jobs and generated files are never copied.
+Manage package source, tests, configuration, packaging and production tools.
+Keep the local module README, datasets, frozen jobs and generated files separate.
 """
 
 import argparse
@@ -14,8 +14,10 @@ import shutil
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SOURCE = Path('/opt/data/private/yihengxu/Hunyuan3D/veudf')
-TOP_LEVEL = ('pyproject.toml', 'requirements.txt', 'environment.yml')
-GROUPS = (('src', '*.py'), ('tests', '*.py'), ('configs', '*.json'))
+TOP_LEVEL = ('pyproject.toml', 'requirements.txt', 'environment.yml',
+             'adaptive_build.py', 'benchmarks/README.md')
+GROUPS = (('src', '*.py'), ('tests', '*.py'), ('configs', '*.json'),
+          ('scripts', '*.py'), ('benchmarks', '*.py'))
 
 
 def managed_files(directory):

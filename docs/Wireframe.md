@@ -1,5 +1,7 @@
 # CAD B-Rep 中球面 Seam、退化边与 Wireframe 表示
 
+> CAD 表示研究备忘。现行 E/V 监督排除合法 seam，数据目标定义见 [Pre.md](Pre.md)。
+
 ## Executive summary
 
 对完整球面这类闭合解析曲面，最容易混淆的是三件完全不同的事：**曲面参数化的周期 seam、Face 的拓扑边界、以及 B-Rep kernel 为了让二维参数域形成合法拓扑而实际创建的 Edge/Coedge**。它们不能简单等同。

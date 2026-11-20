@@ -26,6 +26,9 @@ def test_edge_first_step(tmp_path, monkeypatch, factory, expected, method):
     assert (tmp_path / 'reconstruction.step').is_file()
     assert (tmp_path / 'split_mesh.npz').exists() == (method == 'cut_mesh')
     assert result['report']['stages']['wireframe']['optional_e_queries'] == 0
+    assert result['report']['extraction'] == 'thinning'
+    assert (tmp_path / 'edge_skeleton.npz').is_file()
+    assert len(result['report']['stages']['wireframe']['skeleton']['paths']) == expected[1]
     if method == 'coarse_projection':
         with np.load(tmp_path / 'face_regions.npz') as regions:
             np.testing.assert_array_equal(regions['vertices'], mesh.vertices)

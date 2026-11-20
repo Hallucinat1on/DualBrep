@@ -4,6 +4,7 @@ import pytest
 from bandbrep.config import Config
 from bandbrep.curve_fitting import CurveRecord
 from bandbrep.edge_first_embedding import cut_surface
+from bandbrep.edge_geometry import order_general
 from bandbrep.edge_first_graph import Path, fit_geometry
 from bandbrep.edge_first_grid import GridSamples
 from bandbrep.edge_first_mc import extract_shell
@@ -37,6 +38,20 @@ def test_cut_port_and_fit_sub_grid_edge():
     curve = fit_geometry(0, Path([0,1],support,False), ends, Config())
     assert curve.kind == 'line'
     np.testing.assert_array_equal(curve.evaluate(np.array([0.,1.])),ends)
+
+
+def test_curve_support_warning_preserves_ordered_path():
+    ends = np.array([[0., 0., 0.], [.03, 0., 0.]])
+    points = np.vstack((np.linspace(*ends, 31), [.015, .004, 0.]))
+    with pytest.raises(ReconstructionError, match='misses its support'):
+        order_general(points, ends, Config())
+
+    warnings = []
+    path = order_general(points, ends, Config(), warnings=warnings)
+    np.testing.assert_array_equal(path[[0, -1]], ends)
+    np.testing.assert_allclose(path[:, 1], 0.)
+    assert warnings[0]['reason'] == 'curve_support_branching'
+    assert warnings[0]['details'] == pytest.approx(dict(error=.004, limit=.003))
 
 
 def test_v_shell_sphere_radius_is_not_fixed_to_level():

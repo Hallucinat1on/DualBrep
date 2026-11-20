@@ -9,6 +9,8 @@
   "scout_point_budget": 4000000,
   "vertex_level": 0.005,
   "mc_udf_refine": "off",
+  "centerline_method": "thinning",
+  "allow_partial_wireframe": false,
   "fast_faces": true,
   "patch_budget": 4,
   "query_batch_size": 65536,

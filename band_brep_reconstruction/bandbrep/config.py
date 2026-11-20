@@ -15,6 +15,8 @@ class Config:
     scout_point_budget: int = 4000000
     vertex_level: float = 0.005
     mc_udf_refine: str = 'off'
+    centerline_method: str = 'thinning'
+    allow_partial_wireframe: bool = False
     fast_faces: bool = True
     hybrid_projection: bool = False
     patch_budget: int = 4
@@ -58,6 +60,10 @@ class Config:
             raise ValueError('Shell levels must be smaller than band_width')
         if not math.isfinite(self.coarse_error_margin) or self.coarse_error_margin < 0:
             raise ValueError('coarse_error_margin must be non-negative')
+        if self.centerline_method not in ('thinning', 'sections'):
+            raise ValueError('Use centerline_method=thinning or sections')
+        if type(self.allow_partial_wireframe) is not bool:
+            raise ValueError('allow_partial_wireframe must be a boolean')
         if type(self.hybrid_projection) is not bool:
             raise ValueError('hybrid_projection must be a boolean')
         if self.mc_udf_refine not in ('off', 'sparse') or type(self.fast_faces) is not bool:

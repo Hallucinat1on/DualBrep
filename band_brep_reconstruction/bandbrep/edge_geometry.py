@@ -25,11 +25,11 @@ def circle_order(points, data, ends, cfg):
     return np.vstack((ends[0],points[order],ends[1]))
 
 
-def order_general(points, ends, cfg):
+def order_general(points, ends, cfg, *, warnings=None):
     """Local projected-support graph, not global face competition.
 
     Open paths use an MST backbone. A closed path is cut locally then reclosed;
-    coverage checks reject branch loss rather than inventing a connecting curve.
+    coverage checks report branch loss on the resulting path.
     """
     cell=max(cfg.curve_tolerance*.15,1e-7)
     _,ids=np.unique(np.round(points/cell).astype(np.int64),axis=0,return_index=True)
@@ -77,5 +77,8 @@ def order_general(points, ends, cfg):
         # Candidate-segment distance is an upper bound: it may reject, never
         # certify missing support through an optimistic nearest-point estimate.
         worst=max(worst,float(dist.max()))
-    require(worst<=cfg.curve_tolerance*3,'curve_support_branching','Ordered curve misses its support',error=worst)
+    limit = cfg.curve_tolerance * 3
+    if worst > limit:
+        require(warnings is not None, 'curve_support_branching', 'Ordered curve misses its support', error=worst)
+        warnings.append(dict(reason='curve_support_branching', details=dict(error=worst, limit=limit)))
     return q

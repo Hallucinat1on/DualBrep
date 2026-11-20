@@ -28,7 +28,7 @@ class Run:
         self.out = out
         self.start = self.tick = time.monotonic()
         self.stage = 'mesh'
-        self.report = dict(status='running', extraction='shell_sections', config=cfg.to_dict(),
+        self.report = dict(status='running', extraction=cfg.centerline_method, config=cfg.to_dict(),
                            input_identity=identity, inputs=inputs, stages={})
         if 'source_step_sha256' in mesh.report:
             self.report['source_step_sha256'] = mesh.report['source_step_sha256']
@@ -105,23 +105,33 @@ def run_route(mesh, provider, grid, cfg, run):
     out = run.out
     run.stage = 'wireframe'
     tick = time.monotonic()
-    shell, triangles, e_report = extract_shell(grid,cfg,channel=1)
-    v_shell, v_faces, v_report = extract_shell(grid,cfg,channel=2)
-    shell_report = dict(edge=e_report, vertex=v_report, seconds=time.monotonic()-tick)
-    np.savez_compressed(out/'edge_shell.npz',vertices=shell,triangles=triangles)
+    shell = triangles = None
+    shell_report = {}
+    if cfg.centerline_method == 'sections':
+        shell, triangles, shell_report['edge'] = extract_shell(grid,cfg,channel=1)
+        np.savez_compressed(out/'edge_shell.npz',vertices=shell,triangles=triangles)
+    v_shell, v_faces, shell_report['vertex'] = extract_shell(grid,cfg,channel=2)
+    shell_report['seconds'] = time.monotonic()-tick
     np.savez_compressed(out/'vertex_shell.npz',vertices=v_shell,triangles=v_faces)
-    graph, curves, support = recover_wireframe(grid,provider,cfg,shell,triangles,v_shell,v_faces)
+    graph, curves, support, skeleton = recover_wireframe(grid,provider,cfg,shell,triangles,v_shell,v_faces)
+    if skeleton is not None:
+        points, links, _ = skeleton
+        np.savez_compressed(out/'edge_skeleton.npz', points=points, links=links)
     write_json(out / 'wireframe.json', graph)
     write_json(out / 'curves.json', curves)
     np.savez_compressed(out / 'edge_support.npz', points=support)
     wireframe = graph.report['wireframe']
-    run.record({**wireframe, 'shell': shell_report})
-    incomplete = (provider.presence()[0] == 'present' and
-                  (not curves or wireframe['unresolved'] or wireframe.get('uncovered_support')))
+    incomplete = provider.presence()[0] == 'present' and bool(
+        not curves or wireframe['unresolved'] or wireframe['uncovered_support'] or wireframe['warnings'])
+    continue_partial = incomplete and cfg.allow_partial_wireframe and bool(curves)
+    run.record({**wireframe, 'shell': shell_report, 'incomplete': incomplete,
+                'continued_with_warnings': continue_partial and cfg.stop_after != 'wireframe'})
     if cfg.stop_after == 'wireframe':
         status = 'wireframe_partial' if incomplete else 'wireframe_ready'
         return run.finish(status, graph=graph, curves=curves)
-    require(not incomplete, 'wireframe_unresolved', 'Unresolved branches remain in the wireframe')
+    require(not incomplete or continue_partial, 'wireframe_unresolved',
+            'Unresolved branches remain in the wireframe' if curves else 'No edge could be recovered',
+            unresolved=len(wireframe['unresolved']), uncovered_support=wireframe['uncovered_support'])
 
     if cfg.fast_faces and not cfg.hybrid_projection and cfg.stop_after=='solid':
         fast = try_fast(mesh,graph,curves,cfg,run)

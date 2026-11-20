@@ -1,5 +1,4 @@
-"""Parameterize E-shell sections and V-shell centers without UDF gradients."""
-from dataclasses import dataclass
+"""Recover vertex-edge topology and fit curves without UDF gradients."""
 from time import perf_counter
 
 import numpy as np
@@ -13,14 +12,8 @@ from .edge_geometry import circle_order, order_general
 from .schemas import EdgeInstance, LogicalGraph, ReconstructionError, require
 from .shell_geometry import shell_vertices, sphere_hits, tube_sections
 from .surface_mesh import components
-
-
-@dataclass
-class Path:
-    nodes: list
-    points: np.ndarray
-    closed: bool
-    ports: list | None = None
+from .skeleton_paths import Path, refine_voxel_centers, trace_paths
+from .voxel_skeleton import thin_volume
 
 
 def local_tangents(points, tree, radius):
@@ -50,7 +43,7 @@ def clip_ports(ordered, ids, vertices):
     return np.vstack((first, interior, last)), [first.tolist(), last.tolist()]
 
 
-def paths_from_sections(cloud, owners, vertices, cfg):
+def paths_from_sections(cloud, owners, vertices, cfg, *, warnings=None):
     h = cfg.fine_spacing
     if not len(cloud):
         return [], []
@@ -91,7 +84,10 @@ def paths_from_sections(cloud, owners, vertices, cfg):
             else:
                 ordered=None
             if ordered is None:
-                ordered=order_general(points,ends,cfg)
+                path_warnings = [] if warnings is not None else None
+                ordered=order_general(points,ends,cfg,warnings=path_warnings)
+                if path_warnings:
+                    warnings.extend(dict(warning, vertices=ids, points=len(points)) for warning in path_warnings)
             if len(ids)==1:
                 # A self-loop must approach the same ball from two directions.
                 p0,p1=ordered[[1,-2]]-ends[0]
@@ -237,13 +233,30 @@ def recover_wireframe(grid, provider, cfg, shell, triangles, v_shell, v_faces):
     if provider.presence()[1]=='present' and not vertices:
         rejected.append(dict(reason='vertex_shell_empty'))
     vertices_done=perf_counter()
-    cloud,owners=tube_sections(shell,triangles,cfg)
-    if len(triangles) and not len(cloud):
-        rejected.append(dict(reason='no_trusted_section'))
-    sections_done=perf_counter()
-    paths,unresolved=paths_from_sections(cloud,owners,vertices,cfg)
+    warnings = []
+    skeleton = None
+    if cfg.centerline_method == 'thinning':
+        cloud, links, statistics = thin_volume(grid, vertices, cfg)
+        paths, unresolved = trace_paths(cloud, links, vertices)
+        statistics['paths'] = [dict(vertices=path.nodes, closed=path.closed, ports=path.ports,
+                                    samples=len(path.points)) for path in paths]
+        skeleton = cloud, links, statistics
+        if statistics['unknown_interface']:
+            warnings.append(dict(reason='skeleton_unknown_interface',
+                                 points=statistics['unknown_interface']))
+        if len(cloud) and not len(links):
+            unresolved.append(dict(reason='skeleton_no_links', points=len(cloud)))
+        extraction_done = perf_counter()
+        refine_voxel_centers(paths, grid, cfg)
+    else:
+        cloud,owners=tube_sections(shell,triangles,cfg)
+        if len(triangles) and not len(cloud):
+            rejected.append(dict(reason='no_trusted_section'))
+        paths,unresolved=paths_from_sections(cloud,owners,vertices,cfg,
+                                             warnings=warnings if cfg.allow_partial_wireframe else None)
+        extraction_done = perf_counter()
+        add_short_paths(paths,vertices,grid,cfg)
     rejected.extend(unresolved)
-    add_short_paths(paths,vertices,grid,cfg)
     probes=refine_sections(paths,provider,cfg)
     paths_done=perf_counter()
     edges,curves,ports=[],{},{}
@@ -274,8 +287,10 @@ def recover_wireframe(grid, provider, cfg, shell, triangles, v_shell, v_faces):
         valid=grid.valid[:,1] & (grid.values[:,1]<=min(cfg.fine_spacing,cfg.shell_radius*.6))
         gap=tree.query(grid.points[valid])[0]
         miss+=int((gap>grid.values[valid,1]+3*cfg.fine_spacing).sum())
-    report=dict(vertices=len(vertices),edges=len(edges),sections=len(cloud),unresolved=rejected,
+    report=dict(vertices=len(vertices),edges=len(edges),support_points=len(cloud),unresolved=rejected,warnings=warnings,
                 uncovered_support=miss,optional_e_queries=probes,sphere_ports=ports,
-                timings=dict(vertices=vertices_done-started,sections=sections_done-vertices_done,
-                             paths=paths_done-sections_done,fit_and_coverage=perf_counter()-paths_done))
-    return LogicalGraph(0,vertices,edges,report={'wireframe':report}),curves,cloud
+                timings=dict(vertices=vertices_done-started,centerline_extraction=extraction_done-vertices_done,
+                             refinement=paths_done-extraction_done,fit_and_coverage=perf_counter()-paths_done))
+    if skeleton is not None:
+        report['skeleton'] = skeleton[2]
+    return LogicalGraph(0,vertices,edges,report={'wireframe':report}),curves,cloud,skeleton

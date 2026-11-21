@@ -28,7 +28,7 @@ class Run:
         self.out = out
         self.start = self.tick = time.monotonic()
         self.stage = 'mesh'
-        self.report = dict(status='running', extraction=cfg.centerline_method, config=cfg.to_dict(),
+        self.report = dict(status='running', extraction='thinning', config=cfg.to_dict(),
                            input_identity=identity, inputs=inputs, stages={})
         if 'source_step_sha256' in mesh.report:
             self.report['source_step_sha256'] = mesh.report['source_step_sha256']
@@ -79,44 +79,38 @@ def try_fast(mesh, graph, curves, cfg, run):
         return None
     run.record(dict(accepted=True, faces=proposed.face_count, **proposed.report['coarse_projection']))
     run.stage = 'cad'
-    trial = out/'planar_trial'
+    trial = out / 'planar_trial'
     trial.mkdir()
     try:
-        solid,mapping,cad=export(proposed,curves,patches,cfg,trial)
+        solid, mapping, cad = export(proposed, curves, patches, cfg, trial)
     except ReconstructionError as exc:
-        if exc.code=='sample_timeout':
+        if exc.code == 'sample_timeout':
             raise
-        run.stage='fast_cad'
-        run.record(dict(accepted=False,reason=exc.code))
+        run.stage = 'fast_cad'
+        run.record(dict(accepted=False, reason=exc.code))
         return None
     for item in trial.iterdir():
-        shutil.move(item,out/item.name)
+        shutil.move(item, out / item.name)
     trial.rmdir()
-    np.savez_compressed(out/'face_regions.npz',vertices=mesh.vertices,triangles=mesh.triangles,face_labels=labels)
-    write_json(out/'logical_graph.json',proposed)
-    write_json(out/'face_patches.json',patches)
-    write_json(out/'logical_to_cad.json',mapping)
+    np.savez_compressed(out / 'face_regions.npz', vertices=mesh.vertices, triangles=mesh.triangles, face_labels=labels)
+    write_json(out / 'logical_graph.json', proposed)
+    write_json(out / 'face_patches.json', patches)
+    write_json(out / 'logical_to_cad.json', mapping)
     run.record(cad)
-    run.report.update(step_sha256=file_hash(out/'reconstruction.step'),face_method='coarse_projection')
-    return run.finish('solid_validated',solid=solid,graph=proposed,curves=curves,patches=patches)
+    run.report.update(step_sha256=file_hash(out / 'reconstruction.step'), face_method='coarse_projection')
+    return run.finish('solid_validated', solid=solid, graph=proposed, curves=curves, patches=patches)
 
 
 def run_route(mesh, provider, grid, cfg, run):
     out = run.out
     run.stage = 'wireframe'
     tick = time.monotonic()
-    shell = triangles = None
-    shell_report = {}
-    if cfg.centerline_method == 'sections':
-        shell, triangles, shell_report['edge'] = extract_shell(grid,cfg,channel=1)
-        np.savez_compressed(out/'edge_shell.npz',vertices=shell,triangles=triangles)
-    v_shell, v_faces, shell_report['vertex'] = extract_shell(grid,cfg,channel=2)
-    shell_report['seconds'] = time.monotonic()-tick
-    np.savez_compressed(out/'vertex_shell.npz',vertices=v_shell,triangles=v_faces)
-    graph, curves, support, skeleton = recover_wireframe(grid,provider,cfg,shell,triangles,v_shell,v_faces)
-    if skeleton is not None:
-        points, links, _ = skeleton
-        np.savez_compressed(out/'edge_skeleton.npz', points=points, links=links)
+    v_shell, v_faces, v_report = extract_shell(grid, cfg, channel=2)
+    shell_report = dict(vertex=v_report, seconds=time.monotonic() - tick)
+    np.savez_compressed(out / 'vertex_shell.npz', vertices=v_shell, triangles=v_faces)
+    graph, curves, support, skeleton = recover_wireframe(grid, provider, cfg, v_shell, v_faces)
+    points, links, _ = skeleton
+    np.savez_compressed(out / 'edge_skeleton.npz', points=points, links=links)
     write_json(out / 'wireframe.json', graph)
     write_json(out / 'curves.json', curves)
     np.savez_compressed(out / 'edge_support.npz', points=support)
@@ -133,8 +127,8 @@ def run_route(mesh, provider, grid, cfg, run):
             'Unresolved branches remain in the wireframe' if curves else 'No edge could be recovered',
             unresolved=len(wireframe['unresolved']), uncovered_support=wireframe['uncovered_support'])
 
-    if cfg.fast_faces and not cfg.hybrid_projection and cfg.stop_after=='solid':
-        fast = try_fast(mesh,graph,curves,cfg,run)
+    if cfg.fast_faces and not cfg.hybrid_projection and cfg.stop_after == 'solid':
+        fast = try_fast(mesh, graph, curves, cfg, run)
         if fast is not None:
             return fast
 
@@ -145,7 +139,7 @@ def run_route(mesh, provider, grid, cfg, run):
     paths = {}
     if cfg.hybrid_projection:
         run.stage = 'coarse_projection'
-        radius = min(cfg.fine_spacing, cfg.feature_sdf_limit)
+        radius = min(cfg.fine_spacing, cfg.feature_sdf_tolerance)
         paths, _, projection = coarse_paths(mesh, graph, curves, radius, cfg.fine_spacing,
                                             mesh_edges(mesh.triangles), allow_partial=True,
                                             anchor_tolerance=min(radius, cfg.boundary_tolerance))
@@ -153,8 +147,44 @@ def run_route(mesh, provider, grid, cfg, run):
                         **projection))
 
     run.stage = 'split_mesh'
-    cut, labels, constraints = cut_surface(mesh, provider.oracle, graph, curves, cfg,
-                                          save_partial=save_cut, coarse_paths=paths)
+    for _attempt in range(5 if cfg.allow_feature_collapse else 1):
+        try:
+            cut, labels, constraints = cut_surface(mesh, provider.oracle, graph, curves, cfg,
+                                                   save_partial=save_cut, coarse_paths=paths)
+            break
+        except ReconstructionError as exc:
+            e1 = exc.details.get('edge')
+            e2 = exc.details.get('other_edge')
+            if (not cfg.allow_feature_collapse or exc.code != 'curve_embedding_overlap'
+                    or e1 is None or e2 is None or e1 == e2 or _attempt == 4):
+                raise
+            # Drop the shorter overlapping edge and mark the surviving edge as collapsed.
+            def _elen(eid):
+                pts = curves[eid].evaluate(np.linspace(0, 1, 33))
+                return float(np.linalg.norm(np.diff(pts, axis=0), axis=1).sum())
+            drop, keep = (e1, e2) if _elen(e1) <= _elen(e2) else (e2, e1)
+            new_edges, new_curves, new_paths = [], {}, {}
+            old_collapsed = set(graph.report.get('wireframe', {}).get('collapsed_edges', []))
+            old_collapsed.add(keep)
+            new_collapsed = []
+            for e in graph.edges:
+                if e.id == drop:
+                    continue
+                nid = len(new_edges)
+                old_id = e.id
+                e.id = nid
+                c = curves[old_id]
+                c.id = nid
+                new_edges.append(e)
+                new_curves[nid] = c
+                if old_id in paths:
+                    new_paths[nid] = paths[old_id]
+                if old_id in old_collapsed:
+                    new_collapsed.append(nid)
+            graph.edges = new_edges
+            curves = new_curves
+            paths = new_paths
+            graph.report.setdefault('wireframe', {})['collapsed_edges'] = new_collapsed
     np.savez_compressed(out / 'split_mesh.npz', vertices=cut.vertices, triangles=cut.triangles,
                         face_labels=labels, constraints=constraints)
     write_json(out / 'logical_graph.json', graph)
@@ -164,17 +194,17 @@ def run_route(mesh, provider, grid, cfg, run):
 
     run.stage = 'surfaces'
     patches, assembly_graph, assembly_curves, face_map, seams = fit_with_patch_fallback(
-        cut,labels,constraints,graph,curves,provider,cfg)
+        cut, labels, constraints, graph, curves, provider, cfg)
     write_json(out / 'face_patches.json', patches)
-    run.record(dict(faces=len(patches),patch_seams=seams))
+    run.record(dict(faces=len(patches), patch_seams=seams))
 
     run.stage = 'cad'
-    solid, mapping, cad = export(assembly_graph,assembly_curves,patches,cfg,out)
-    mapping['patch_to_logical_face']=face_map
-    mapping['internal_patch_seams']=seams
+    solid, mapping, cad = export(assembly_graph, assembly_curves, patches, cfg, out)
+    mapping['patch_to_logical_face'] = face_map
+    mapping['internal_patch_seams'] = seams
     if seams:
-        write_json(out/'assembly_graph.json',assembly_graph)
-        write_json(out/'assembly_curves.json',assembly_curves)
+        write_json(out / 'assembly_graph.json', assembly_graph)
+        write_json(out / 'assembly_curves.json', assembly_curves)
     write_json(out / 'logical_to_cad.json', mapping)
     run.record(cad)
     method = 'hybrid_projection' if cfg.hybrid_projection else 'cut_mesh'

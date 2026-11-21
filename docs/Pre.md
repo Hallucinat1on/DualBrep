@@ -45,7 +45,7 @@ E/V 仍对应 CAD，网格表面不一定精确经过 CAD 边，因此不能无�
 
 独立评估调用 `ReferenceEdgeOracle` 和 `ReferenceVertexOracle` 查询完整距离。审计还会对有限采样用穷举 CAD 边核验标签。生产第一通道始终取 `s_mesh`，CAD SDF 用于参考审计。[精确距离实现](../veudf/src/veudf/preprocess/reference.py)
 
-产物保存标量距离和有效标签信息。边优先重建通过空间邻点查询连续 E/V，再用中心差分计算梯度。[后处理流程](ScanEdgeFirst.md)
+产物保存标量距离和有效标签信息。边优先重建通过空间邻点查询连续 E/V，再用中心差分计算梯度。[后处理流程](Post1121.md)
 
 ## 4. 普通点池、零集与独立评估
 

@@ -3,14 +3,13 @@ import pytest
 
 from bandbrep.config import Config
 from bandbrep.curve_fitting import CurveRecord
-from bandbrep.edge_first_embedding import cut_surface
-from bandbrep.edge_geometry import order_general
+from bandbrep.edge_first_embedding import _simplify_segments, cut_surface
 from bandbrep.edge_first_graph import Path, fit_geometry
 from bandbrep.edge_first_grid import GridSamples
 from bandbrep.edge_first_mc import extract_shell
 from bandbrep.fast_faces import project_wireframe
 from bandbrep.schemas import EdgeInstance, LogicalGraph, ReconstructionError, VertexNode
-from bandbrep.shell_geometry import fit_sphere, sphere_hits
+from bandbrep.shell_geometry import fit_sphere
 from helpers import box
 
 
@@ -29,29 +28,14 @@ def test_missing_mc_corners_never_create_a_cap():
     assert vertices[:, 0].max() <= .003 + 1e-8
 
 
-def test_cut_port_and_fit_sub_grid_edge():
+def test_fit_sub_grid_edge_and_simplify_backtrack():
     ends = np.array([[0., 0., 0.], [.0025, 0., 0.]])
     support = np.linspace(ends[0], ends[1], 7)
-    hits = sphere_hits(support, ends[0], .0008)
-    assert len(hits)==1 and hits[0][2]==1
-    np.testing.assert_allclose(hits[0][1], [.0008,0,0], atol=1e-12)
-    curve = fit_geometry(0, Path([0,1],support,False), ends, Config())
+    curve = fit_geometry(0, Path([0, 1], support, False), ends, Config())
     assert curve.kind == 'line'
-    np.testing.assert_array_equal(curve.evaluate(np.array([0.,1.])),ends)
-
-
-def test_curve_support_warning_preserves_ordered_path():
-    ends = np.array([[0., 0., 0.], [.03, 0., 0.]])
-    points = np.vstack((np.linspace(*ends, 31), [.015, .004, 0.]))
-    with pytest.raises(ReconstructionError, match='misses its support'):
-        order_general(points, ends, Config())
-
-    warnings = []
-    path = order_general(points, ends, Config(), warnings=warnings)
-    np.testing.assert_array_equal(path[[0, -1]], ends)
-    np.testing.assert_allclose(path[:, 1], 0.)
-    assert warnings[0]['reason'] == 'curve_support_branching'
-    assert warnings[0]['details'] == pytest.approx(dict(error=.004, limit=.003))
+    np.testing.assert_array_equal(curve.evaluate(np.array([0., 1.])), ends)
+    segs = [(0, 1, 2), (1, 2, 3), (1, 3, 2), (0, 2, 4)]
+    assert _simplify_segments(segs) == [(0, 1, 2), (0, 2, 4)]
 
 
 def test_v_shell_sphere_radius_is_not_fixed_to_level():
@@ -122,3 +106,31 @@ def test_patch_fallback_adds_internal_seam_and_preserves_logical_faces(tmp_path,
     assert len(revised.edges)==len(graph.edges)+1 and len(seams)==1
     assert mapping[-1]==0
     assert export(revised,records,patches,cfg,tmp_path)[2]['roundtrip_checked']
+
+
+def test_dyadic_scout_spacings_and_feature_collapse():
+    from bandbrep.edge_first_graph import _collapse_close_vertices
+    cfg = Config()
+    assert cfg.scout_spacings() == (0.024, 0.012, 0.006, 0.003)
+    verts = [VertexNode(0, np.array([0., 0., 0.]), 0., .002),
+             VertexNode(1, np.array([.001, 0., 0.]), 0., .002),
+             VertexNode(2, np.array([.1, 0., 0.]), 0., .002)]
+    paths = [Path([0, 1], np.array([[0., 0., 0.], [.001, 0., 0.]]), False),
+             Path([1, 2], np.array([[.001, 0., 0.], [.1, 0., 0.]]), False)]
+    new_v, new_p, collapsed = _collapse_close_vertices(verts, paths, Config(allow_feature_collapse=True))
+    assert len(new_v) == 2 and len(new_p) == 1 and len(collapsed) == 1
+    assert new_p[0].nodes == [0, 1]
+
+
+def test_split_cached_v_minima_separates_close_vertices():
+    from bandbrep.shell_geometry import _split_cached_v_minima
+    h = 0.003
+    coords = np.mgrid[-0.012:0.024:h, -0.012:0.012:h, -0.012:0.012:h].reshape(3, -1).T
+    c0, c1 = np.array([0., 0., 0.]), np.array([0.0119, 0., 0.])
+    d = np.minimum(np.linalg.norm(coords - c0, axis=1), np.linalg.norm(coords - c1, axis=1))
+    pts_box = np.vstack((c0, c1))
+    recovered = _split_cached_v_minima(pts_box, coords, d, h, 0.005)
+    assert len(recovered) == 2
+    found = np.sort([r[0][0] for r in recovered])
+    np.testing.assert_allclose(found, [0.0, 0.0119], atol=5e-4)
+

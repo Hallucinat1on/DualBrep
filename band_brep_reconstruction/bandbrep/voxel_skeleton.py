@@ -97,28 +97,31 @@ def lattice_neighbors(grid, level):
     return fg_keys, grid.values[inside, 1][order], neighbors, masks, frozen, grid.keys[exterior_rows[boundary]]
 
 
-def thin_volume(grid, vertices, cfg):
+def thin_volume(grid, vertices, cfg, *, spacing=None, level=None):
     """Return skeleton positions and links using only the observed E sublevel set."""
     started = perf_counter()
-    if not np.any(grid.valid[:, 1] & (grid.values[:, 1] <= cfg.shell_radius)):
+    h = cfg.fine_spacing if spacing is None else float(spacing)
+    r = cfg.shell_radius if level is None else float(level)
+    if not len(grid.keys) or not np.any(grid.valid[:, 1] & (grid.values[:, 1] <= r)):
         report = dict(foreground=0, skeleton_nodes=0, skeleton_links=0, unknown_interface=0,
-                      protected_vertices=0, seconds=perf_counter()-started)
+                      protected_vertices=0, seconds=perf_counter() - started)
         return np.empty((0, 3)), np.empty((0, 2), int), report
-    keys, values, neighbors, masks, frozen, boundary = lattice_neighbors(grid, cfg.shell_radius)
+    keys, values, neighbors, masks, frozen, boundary = lattice_neighbors(grid, r)
     fixed = frozen.copy()
     tree = cKDTree(keys)
     protected = set()
     for vertex in vertices:
-        distance, idx = tree.query(vertex.position / cfg.fine_spacing)
-        if distance * cfg.fine_spacing <= vertex.support_radius:
+        distance, idx = tree.query(vertex.position / h)
+        if distance * h <= vertex.support_radius:
             protected.add(int(idx))
     fixed[list(protected)] = True
 
-    # A sparse Euclidean distance transform: only observed exterior voxels
-    # touching foreground can affect its boundary-voxel deletion order.
     depth = cKDTree(boundary).query(keys)[0] if len(boundary) else np.full(len(keys), np.inf)
+    # Blend boundary depth with normalized E valley preference so noisy or
+    # asymmetric tubes thin toward the true E minimum rather than only binary centers.
+    priority = depth - 0.35 * (values / max(h, 1e-9))
     ready = ~fixed & ((masks & FACE_BITS) != FACE_BITS)
-    queue = [(depth[i], -values[i], int(i)) for i in np.flatnonzero(ready)]
+    queue = [(float(priority[i]), -float(values[i]), int(i)) for i in np.flatnonzero(ready)]
     heapq.heapify(queue)
     active = np.ones(len(keys), dtype=bool)
     visits = 0
@@ -137,7 +140,7 @@ def thin_volume(grid, vertices, cfg):
             masks[neighbor] &= ALL_BITS ^ (1 << (25 - j))
             if not fixed[neighbor] and not ready[neighbor]:
                 item = int(neighbor)
-                heapq.heappush(queue, (depth[item], -values[item], item))
+                heapq.heappush(queue, (float(priority[item]), -float(values[item]), item))
                 ready[neighbor] = True
 
     ids = np.flatnonzero(active)
@@ -154,6 +157,7 @@ def thin_volume(grid, vertices, cfg):
                 continue
             links.append((remap[i], remap[neighbor]))
     link_array = np.asarray(links, dtype=int).reshape(-1, 2)
-    return keys[ids] * cfg.fine_spacing, link_array, dict(
+    return keys[ids] * h, link_array, dict(
         foreground=len(keys), skeleton_nodes=len(ids), skeleton_links=len(links),
-        unknown_interface=int(frozen.sum()), protected_vertices=len(protected), seconds=perf_counter()-started)
+        unknown_interface=int(frozen.sum()), protected_vertices=len(protected),
+        seconds=perf_counter() - started)

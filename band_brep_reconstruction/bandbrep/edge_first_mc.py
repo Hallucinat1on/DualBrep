@@ -6,15 +6,19 @@ import numpy as np
 from .deadline import checkpoint
 
 
-def extract_shell(grid, cfg, *, channel=1):
+def extract_shell(grid, cfg, *, channel=1, spacing=None, level=None):
     from skimage.measure import marching_cubes
 
     vertices, faces = [], []
     offset = 0
-    factor = grid.block_indices.shape[1] - 1
-    h = cfg.fine_spacing
-    r = cfg.shell_radius if channel == 1 else cfg.vertex_level
-    corner_slices = [tuple(slice(i, factor + i) for i in corner)
+    shape = grid.block_indices.shape[1:]
+    cell_shape = tuple(s - 1 for s in shape)
+    h = cfg.fine_spacing if spacing is None else float(spacing)
+    if level is None:
+        r = cfg.shell_radius if channel == 1 else cfg.vertex_level
+    else:
+        r = float(level)
+    corner_slices = [tuple(slice(i, n + i) for i, n in zip(corner, cell_shape))
                      for corner in product((0, 1), repeat=3)]
     valid_cells = clipped_cells = 0
     for block, indices in zip(grid.blocks, grid.block_indices):
@@ -36,7 +40,8 @@ def extract_shell(grid, cfg, *, channel=1):
         field = np.where(valid, values - r, r).astype(np.float32)
         points, triangles, _, _ = marching_cubes(field, 0, spacing=(h, h, h),
                                                  mask=mask, allow_degenerate=False)
-        vertices.append(points + block * factor * h)
+        origin = block * np.asarray(cell_shape, dtype=float) * h if getattr(grid, 'origin', None) is None else grid.origin
+        vertices.append(points + origin)
         faces.append(triangles + offset)
         offset += len(points)
     if not vertices:

@@ -101,15 +101,32 @@ def _constraints(breaks,periodic,ends=None):
     return np.asarray(rows),rhs
 
 
+def _constrained_lstsq(A, X, B, C, regularization=1e-10):
+    from scipy import linalg
+    from .schemas import require
+    A = np.asarray(A, float); B = np.asarray(B, float); X = np.asarray(X, float); C = np.asarray(C, float)
+    n = A.shape[1]
+    if not len(B):
+        return np.linalg.lstsq(np.vstack((A, np.sqrt(regularization) * np.eye(n))),
+                               np.vstack((X, np.zeros((n, X.shape[1])))), rcond=None)[0]
+    P = np.linalg.lstsq(B, C, rcond=1e-11)[0]
+    require(np.max(np.abs(B @ P - C)) < 1e-7, 'boundary_constraints_conflict', 'Curve constraints are inconsistent')
+    N = linalg.null_space(B, rcond=1e-11)
+    if N.shape[1]:
+        lhs = np.vstack((A @ N, np.sqrt(regularization) * N))
+        rhs = np.vstack((X - A @ P, -np.sqrt(regularization) * P))
+        P += N @ np.linalg.lstsq(lhs, rhs, rcond=1e-11)[0]
+    return P
+
+
 def projected_seed(ordered,ends,breaks,edge_id,periodic):
     """Robust point fit constrained to shared endpoints or a C1 periodic seam."""
-    from .surface_fitting import constrained_lstsq
     basis=bezier_basis(arclength_parameters(ordered),breaks)
     a,rhs=_constraints(breaks,periodic,ends if len(ends)==2 else None)
     weights=np.ones(len(ordered));poles=None
     for _ in range(4):
         w=np.sqrt(weights)[:,None]
-        poles=constrained_lstsq(w*basis,w*ordered,a,rhs,regularization=1e-10)
+        poles=_constrained_lstsq(w*basis,w*ordered,a,rhs,regularization=1e-10)
         residual=np.linalg.norm(basis@poles-ordered,axis=1)
         scale=max(1e-6,1.4826*np.median(abs(residual-np.median(residual))))
         weights=np.minimum(1.,1.5*scale/np.maximum(residual,1e-12))

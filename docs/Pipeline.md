@@ -1,6 +1,6 @@
 # 从连续 E/V 距离场直接提取边图：研究设计
 
-面向粗网格与扫描件的配对训练、两轮查询、边优先切面和验收设计见 [ScanEdgeFirst.md](ScanEdgeFirst.md)。
+面向粗网格与扫描件的配对训练、两轮查询、边优先切面和验收设计见 [Post1121.md](Post1121.md)。
 
 整理：2026-11-04。本文保留“先边图、后面域”的备选路线；[Post1109](Post1109.md)记录先分割面域的历史路线，本分支的边优先实现以[模块 README](../band_brep_reconstruction/README.md)为准。公共目标、坐标和数据字段统一见[生产数据规范](Pre.md)，原 DualBrep 的 GVD 与学习式拓扑背景仍见[原说明](../legacy_dualbrep/DualBrep.md)。
 

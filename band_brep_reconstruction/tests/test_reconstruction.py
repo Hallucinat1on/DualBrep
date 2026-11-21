@@ -1,7 +1,7 @@
 import unittest
 import numpy as np
 from bandbrep.curve_fitting import fit_circle
-from bandbrep.surface_fitting import constrained_lstsq
+from bandbrep.curve_geometry import _constrained_lstsq as constrained_lstsq
 from bandbrep.schemas import ReconstructionError
 
 class CoreTests(unittest.TestCase):

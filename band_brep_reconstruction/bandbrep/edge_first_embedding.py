@@ -9,10 +9,11 @@ from shapely.ops import polygonize
 from .boundary_cycles import complete_face_regions_and_cycles
 from .deadline import checkpoint
 from .schemas import SurfaceMesh, require
-from .surface_mesh import components, mesh_edges
+from .surface_mesh import components, mesh_edges, normals as mesh_normals
 
 
 EPS = 2e-9
+SNAP = 1e-5
 
 
 def _edge_point(a, b, c, d):
@@ -20,10 +21,35 @@ def _edge_point(a, b, c, d):
     edge, path = b - a, d - c
     u, t = np.linalg.lstsq(np.column_stack((edge, -path)), c - a, rcond=None)[0]
     if t < 0 or t > 1:
-        u = (c + np.clip(t, 0, 1) * path - a) @ edge / (edge @ edge)
+        u = (c + np.clip(t, 0, 1) * path - a) @ edge / max(edge @ edge, 1e-30)
     p = a + np.clip(u, 0, 1) * edge
     t = np.clip((p - c) @ path / max(path @ path, 1e-30), 0, 1)
     return p, np.linalg.norm(p - (c + t * path))
+
+
+def _simplify_segments(segs):
+    """Remove immediate backtracking spikes (u -> v -> u) from a routed curve."""
+    stack = []
+    for tri, a, b in segs:
+        if a == b:
+            continue
+        if stack and stack[-1][1] == b and stack[-1][2] == a:
+            stack.pop()
+            continue
+        stack.append((tri, a, b))
+    # Also collapse short 2-step micro-backtracks (u -> v -> w -> v -> u) if any remain.
+    changed = True
+    while changed and len(stack) >= 2:
+        changed = False
+        cleaned = []
+        for item in stack:
+            if cleaned and cleaned[-1][1] == item[2] and cleaned[-1][2] == item[1]:
+                cleaned.pop()
+                changed = True
+            else:
+                cleaned.append(item)
+        stack = cleaned
+    return stack
 
 
 class SurfaceCut:
@@ -31,6 +57,7 @@ class SurfaceCut:
         self.mesh, self.oracle, self.tolerance = mesh, oracle, tolerance
         self.points = list(mesh.vertices)
         self.point_ids = {self.key(p): i for i, p in enumerate(mesh.vertices)}
+        self.tri_normals = mesh_normals(mesh)
         edges, inverse, counts = mesh_edges(mesh.triangles)
         self.face_edges = edges[inverse]
         self.edge_faces = defaultdict(list)
@@ -49,6 +76,7 @@ class SurfaceCut:
         self.cuts = defaultdict(list)
         self.barriers = {}
         self.coarse_barriers = {}
+        self.claimed_interior = set()
 
     @staticmethod
     def key(point):
@@ -63,29 +91,77 @@ class SurfaceCut:
 
     def on_edge(self, edge, p):
         a, b = self.mesh.vertices[list(edge)]
-        t = np.clip((p - a) @ (b - a) / ((b - a) @ (b - a)), 0, 1)
-        return a + t * (b - a)
+        d = b - a
+        t = np.clip((p - a) @ d / max(d @ d, 1e-30), 0, 1)
+        return a + t * d
 
-    def edge_node(self, edge, point):
+    def edge_node(self, edge, point, *, avoid_claimed=False):
         p = self.on_edge(edge, point)
+        a, b = self.mesh.vertices[list(edge)]
+        edge_vec = b - a
+        edge_len = float(np.linalg.norm(edge_vec))
+        snap = max(EPS * 2, min(SNAP, 0.05 * edge_len))
+        if avoid_claimed and edge_len > EPS * 10:
+            # Physically nudge away from claimed interior endpoints AND claimed Steiner nodes
+            # on this edge so self.point(p) cannot hash onto another edge's interior node.
+            nudge_dist = min(0.05 * edge_len, max(SNAP * 3, EPS * 10))
+            if int(edge[0]) in self.claimed_interior and np.linalg.norm(p - a) <= snap * 2:
+                p = a + (nudge_dist / edge_len) * edge_vec
+            elif int(edge[1]) in self.claimed_interior and np.linalg.norm(p - b) <= snap * 2:
+                p = b - (nudge_dist / edge_len) * edge_vec
+            for node in list(self.edge_nodes[edge]):
+                if node in self.claimed_interior and np.linalg.norm(p - self.points[node]) <= snap * 2:
+                    # Nudge toward the farther endpoint of this mesh edge.
+                    target = b if np.linalg.norm(b - p) >= np.linalg.norm(a - p) else a
+                    step_dir = target - p
+                    step_len = float(np.linalg.norm(step_dir))
+                    if step_len > EPS * 10:
+                        p = p + min(0.25, nudge_dist / step_len) * step_dir
         for node in edge:
-            if np.linalg.norm(p - self.points[node]) <= EPS * 2:
+            if avoid_claimed and int(node) in self.claimed_interior:
+                continue
+            if np.linalg.norm(p - self.points[node]) <= snap:
                 return int(node)
         for node in self.edge_nodes[edge]:
-            if np.linalg.norm(p - self.points[node]) <= EPS * 2:
+            if avoid_claimed and node in self.claimed_interior:
+                continue
+            if np.linalg.norm(p - self.points[node]) <= snap:
                 return node
         node = self.point(p)
         self.edge_nodes[edge].add(node)
         return node
 
-    def locate(self, triangle, point):
-        for node in self.mesh.triangles[triangle]:
-            if np.linalg.norm(self.points[node] - point) <= EPS * 2:
-                return int(node), self.vertex_faces[node]
+    def locate(self, triangle, point, *, is_endpoint=False):
+        tri = self.mesh.triangles[triangle]
+        verts = self.mesh.vertices[tri]
+        min_edge = float(min(np.linalg.norm(verts[1] - verts[0]),
+                             np.linalg.norm(verts[2] - verts[1]),
+                             np.linalg.norm(verts[0] - verts[2])))
+        snap = max(EPS * 2, min(SNAP, 0.05 * min_edge))
+        for node in tri:
+            if not is_endpoint and int(node) in self.claimed_interior:
+                continue
+            if np.linalg.norm(self.points[node] - point) <= snap:
+                return int(node), self.vertex_faces[int(node)]
+        best_edge = None
+        best_dist = snap
         for edge in map(tuple, self.face_edges[triangle]):
-            if np.linalg.norm(self.on_edge(edge, point) - point) <= EPS * 2:
-                return self.edge_node(edge, point), set(self.edge_faces[edge])
-        return self.point(point), {int(triangle)}
+            dist = float(np.linalg.norm(self.on_edge(edge, point) - point))
+            if dist <= best_dist:
+                best_dist = dist
+                best_edge = edge
+        if best_edge is not None:
+            return self.edge_node(best_edge, point, avoid_claimed=not is_endpoint), set(self.edge_faces[best_edge])
+        p = np.asarray(point, float)
+        if not is_endpoint:
+            existing = self.point_ids.get(self.key(p))
+            if existing is not None and existing in self.claimed_interior:
+                centroid = verts.mean(axis=0)
+                delta = centroid - p
+                dlen = float(np.linalg.norm(delta))
+                if dlen > EPS * 10:
+                    p = p + min(0.1, max(SNAP * 3, EPS * 10) / dlen) * delta
+        return self.point(p), {int(triangle)}
 
     def route(self, src, dst, starts, ends):
         """Route through triangles in the local continuous segment corridor."""
@@ -106,12 +182,24 @@ class SurfaceCut:
             if triangle in ends:
                 last = triangle
                 break
+            n_cur = self.tri_normals[triangle]
             for neighbor, edge in self.neighbors[triangle]:
                 a, b = self.mesh.vertices[list(edge)]
                 mid, error = _edge_point(a, b, p, q)
                 if error > corridor:
                     continue
-                cost = value + error + corridor * .05
+                # Mild penalty against flipping onto opposite-facing thin-wall sheets,
+                # and strong penalty against pinching onto another edge's interior mesh vertex.
+                n_dot = float(n_cur @ self.tri_normals[neighbor])
+                flip_penalty = corridor * 0.15 * max(0.0, -n_dot)
+                pinch_penalty = 0.0
+                if self.claimed_interior:
+                    for v_end in edge:
+                        if int(v_end) in self.claimed_interior and int(v_end) not in (src, dst):
+                            if np.linalg.norm(mid - self.points[int(v_end)]) <= max(SNAP * 2, EPS * 4):
+                                pinch_penalty = corridor * 0.8
+                                break
+                cost = value + error + corridor * .05 + flip_penalty + pinch_penalty
                 if cost < costs.get(neighbor, np.inf):
                     costs[neighbor] = cost
                     previous[neighbor] = (triangle, edge, mid)
@@ -120,7 +208,7 @@ class SurfaceCut:
         parts = []
         while last in previous:
             before, edge, mid = previous[last]
-            node = self.edge_node(edge, mid)
+            node = self.edge_node(edge, mid, avoid_claimed=True)
             parts.append((last, node, dst))
             last, dst = before, node
         return [(last, src, dst)] + parts[::-1]
@@ -131,6 +219,8 @@ class SurfaceCut:
             if edge.id in coarse_paths:
                 path = coarse_paths[edge.id]
                 mesh_anchors.update(zip(edge.vertices, (path[0], path[-1])))
+                interior = path[1:-1] if edge.vertices else path[:-1]
+                self.claimed_interior.update(int(n) for n in interior)
                 for u, v in zip(path, path[1:]):
                     self.coarse_barriers[(min(u, v), max(u, v))] = (edge.id, u, v)
         shared = {vertex: (node, self.vertex_faces[node]) for vertex, node in mesh_anchors.items()}
@@ -141,8 +231,17 @@ class SurfaceCut:
             curve = curves[edge.id]
             coarse = curve.evaluate(np.linspace(0, 1, 129))
             lengths = np.linalg.norm(np.diff(coarse, axis=0), axis=1)
-            count = max(17, int(np.ceil(lengths.sum() / spacing)) + 1)
+            total_len = float(lengths.sum())
+            count = max(17, int(np.ceil(total_len / spacing)) + 1)
             q = curve.evaluate(np.linspace(0, 1, count))
+            if edge.vertices and total_len > 4.0 * spacing:
+                # Skip interior samples cramped right next to shared vertices so acute-angle
+                # incident edges enter distinct mesh sectors cleanly.
+                keep_q = np.ones(len(q), dtype=bool)
+                keep_q[1:-1] = ((np.linalg.norm(q[1:-1] - q[0], axis=1) >= 1.5 * spacing)
+                                & (np.linalg.norm(q[1:-1] - q[-1], axis=1) >= 1.5 * spacing))
+                if keep_q.sum() >= 3:
+                    q = q[keep_q]
             sq, tids, projected = self.oracle.closest(q)
             require(sq.max() <= self.tolerance ** 2, 'curve_embedding_offset',
                     'Curve is too far from the input surface', edge=edge.id, offset=float(np.sqrt(sq.max())))
@@ -157,28 +256,36 @@ class SurfaceCut:
                             vertex=vertex, edge=edge.id)
                     anchors.append(anchor)
                 else:
-                    anchors.append(self.locate(f, p))
+                    anchors.append(self.locate(f, p, is_endpoint=(vertex is not None)))
             if edge.vertices:
                 for index, vertex in zip((0, -1), edge.vertices):
                     anchor = shared.setdefault(vertex, anchors[index])
-                    require(np.linalg.norm(self.points[anchor[0]] - self.points[anchors[index][0]]) <= EPS * 4,
+                    require(np.linalg.norm(self.points[anchor[0]] - self.points[anchors[index][0]]) <= max(SNAP * 4, EPS * 4),
                             'curve_embedding_vertex_conflict', 'Uses of a vertex project to different sheets', vertex=vertex)
                     anchors[index] = anchor
             elif edge.closed:
                 anchors[-1] = anchors[0]
+            edge_segs = []
             for (src, starts), (dst, ends) in zip(anchors, anchors[1:]):
                 if src != dst:
-                    for triangle, a, b in self.route(src, dst, starts, ends):
-                        if a != b:
-                            self.cuts[triangle].append((a, b, edge.id))
+                    edge_segs.extend(self.route(src, dst, starts, ends))
+            simplified = _simplify_segments(edge_segs)
+            end_ids = {anchors[0][0], anchors[-1][0]} if edge.vertices else set()
+            for triangle, a, b in simplified:
+                if a != b:
+                    self.cuts[triangle].append((a, b, edge.id))
+                    if a not in end_ids:
+                        self.claimed_interior.add(a)
+                    if b not in end_ids:
+                        self.claimed_interior.add(b)
 
     def _expanded(self, fid, a, b):
-        # A path lying on an original mesh edge must also honor split points
-        # inserted later by another path or by the opposite triangle.
         p, q = self.points[a], self.points[b]
         for edge in map(tuple, self.face_edges[fid]):
             if max(np.linalg.norm(self.on_edge(edge, x) - x) for x in (p, q)) <= EPS * 4:
                 delta = q - p
+                if delta @ delta <= 1e-24:
+                    return [a, b]
                 nodes = [(0., a), (1., b)]
                 for node in self.edge_nodes[edge] - {a, b}:
                     t = (self.points[node] - p) @ delta / (delta @ delta)
@@ -241,6 +348,7 @@ class SurfaceCut:
                     triangles.append([uv_to_id[tuple(p)] for p in coordinates])
         return SurfaceMesh(np.asarray(self.points), np.array(triangles), dict(self.mesh.report))
 
+
 def label_barriers(triangles, graph, barriers, edge_index=None):
     """Group original or cut triangles and assign the oriented sides of each barrier."""
     edges, inverse, counts = mesh_edges(triangles) if edge_index is None else edge_index
@@ -283,7 +391,6 @@ def cut_surface(mesh, oracle, graph, curves, cfg, *, save_partial=None, coarse_p
     cutter = SurfaceCut(mesh, oracle, cfg.feature_sdf_limit)
     cutter.embed(graph, curves, cfg.fine_spacing, coarse_paths or {})
     cut = cutter.triangulate()
-    # Preserve the constraint-to-curve map, including on label failure.
     constraints = np.asarray(list(cutter.barriers.values()), dtype=int).reshape(-1, 3)
     if save_partial is not None:
         save_partial(cut, constraints)

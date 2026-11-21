@@ -13,7 +13,7 @@ from OCC.Core.TopoDS import TopoDS_Face,TopoDS_Wire,TopoDS_Shell,TopoDS_Solid,to
 from OCC.Core.BRepLib import breplib
 from OCC.Core.BRepCheck import BRepCheck_Analyzer
 from OCC.Core.BRepTools import breptools
-from OCC.Core.ShapeFix import ShapeFix_Face,ShapeFix_Solid
+from OCC.Core.ShapeFix import ShapeFix_Edge,ShapeFix_Face,ShapeFix_Solid
 from OCC.Core.TopAbs import TopAbs_EDGE,TopAbs_FACE,TopAbs_VERTEX,TopAbs_SHELL
 from OCC.Core.TopExp import TopExp_Explorer,topexp
 from OCC.Core.TopTools import TopTools_IndexedMapOfShape
@@ -108,55 +108,87 @@ def make_pcurve(patch,record,first,last,tolerance,adjust=None):
     return curve,uv,float(error)
 
 def plan_periodic_band(patch,cycles,curves,graph,offsets,anchor):
-    """UV layout for a cylinder/cone face bounded by two loops that each wrap once.
+    """UV layout for a periodic face bounded by two loops that each wrap once in u.
 
-    Both loops are shifted so their u-range is [u_a, u_a + 2*pi], where u_a is the
-    meridian through the anchor vertex.  Non-wrapping loops must lie strictly
-    inside that strip (they become holes).  Returns None if the layout fails.
+    Supports cylinder, cone, torus, and sphere, including loops whose anchor
+    vertices lie on different meridians (handled via an explicit UV-linear seam).
     """
     offsets={k:np.array(v,float) for k,v in offsets.items()}
-    u_a=float(patch.uv(anchor[None])[0,0]);wraps=[];holes=[]
+    wraps=[];holes=[]
     for cycle in cycles:
         traced=[]
         for use in cycle:
             uv=patch.uv(curves[use.edge].evaluate(np.linspace(0,1,129)),ordered=True)+offsets[use.edge]
             traced.append(uv if use.forward else uv[::-1])
-        uv=np.vstack(traced);turn=uv[-1,0]-uv[0,0]
-        (wraps if abs(abs(turn)-2*np.pi)<.1 else holes).append((cycle,uv,turn))
-    if len(wraps)!=2 or any(abs(t)>.1 for _,_,t in holes):return None
+        uv=np.vstack(traced);turn=float(uv[-1,0]-uv[0,0])
+        (wraps if abs(abs(turn)-2*np.pi)<.15 else holes).append((cycle,uv,turn))
+    if len(wraps)!=2 or any(abs(t)>.15 for _,_,t in holes):return None
     layout=[]
     for cycle,uv,turn in wraps:
-        shift=2*np.pi*np.round((u_a-uv[:,0].min())/(2*np.pi))
-        if abs(uv[:,0].min()+shift-u_a)>1e-3:return None
-        for use in cycle:offsets[use.edge][0]+=shift
-        start=uv[0]+[shift,0];layout.append(dict(cycle=cycle,turn=turn,v=float(start[1]),u_start=float(start[0])))
-    for cycle,uv,_ in holes:
-        shift=2*np.pi*np.floor((uv[:,0].min()-u_a)/(2*np.pi))
-        if uv[:,0].max()-shift>=u_a+2*np.pi:return None
-        for use in cycle:offsets[use.edge][0]-=shift
+        u_start=float(uv[0,0])
+        v_start=float(uv[0,1])
+        # Shift so the loop begins at u_start and spans [u_start, u_start+2*pi] when traversed in +u.
+        if turn<0:
+            # Reversing traversal starts at uv[-1] and ends at uv[0] = uv[-1] + 2*pi.
+            u_base=float(uv[-1,0])
+        else:
+            u_base=u_start
+        layout.append(dict(cycle=cycle,turn=turn,v=v_start,u_start=u_base,uv_min=float(uv[:,0].min()),uv_max=float(uv[:,0].max())))
     layout.sort(key=lambda item:item['v'])
-    return dict(offsets=offsets,u_a=u_a,layout=layout,holes=[c for c,_,_ in holes])
+    if patch.kind=='torus':
+        inner=float(patch.uv(np.asarray(patch.data['orientation_point'])[None])[0,1])
+        if layout[0]['v']+np.mod(inner-layout[0]['v'],2*np.pi)>layout[1]['v']:
+            for use in layout[0]['cycle']:offsets[use.edge][1]+=2*np.pi
+            layout[0]['v']+=2*np.pi
+            layout=[layout[1],layout[0]]
+    # Align upper loop's u_start within [-pi, pi] of lower loop's u_start for shortest seam.
+    u0=layout[0]['u_start']
+    u1=layout[1]['u_start']
+    shift1=2*np.pi*np.round((u0-u1)/(2*np.pi))
+    for use in layout[1]['cycle']:offsets[use.edge][0]+=shift1
+    layout[1]['u_start']+=shift1
+    u_min=min(layout[0]['u_start'],layout[1]['u_start'])
+    for cycle,uv,_ in holes:
+        shift=2*np.pi*np.floor((uv[:,0].min()-u_min)/(2*np.pi))
+        if uv[:,0].max()-shift>=u_min+2*np.pi:return None
+        for use in cycle:offsets[use.edge][0]-=shift
+    return dict(offsets=offsets,layout=layout,holes=[c for c,_,_ in holes])
 
 
 def make_periodic_band(patch,surface,plan,graph,edges,occ_vertices,cfg,builder,face):
-    """Seam = straight generator through the two loops' anchor vertices."""
-    def anchor_vertex(cycle):
+    """Explicit seam (straight meridian or UV-linear helical curve) between existing loop anchors."""
+    def anchor_vertex(item):
+        cycle=item['cycle']
+        # When turn < 0, the +u start of the loop is the end of the last use (same as start of cycle[0]).
         use=cycle[0];e=graph.edges[use.edge]
         if e.closed:return topexp.FirstVertex(edges[use.edge])
         return occ_vertices[e.vertices[0 if use.forward else 1]]
-    lower,upper=plan['layout'];u_a=plan['u_a']
-    a=anchor_vertex(lower['cycle']);b=anchor_vertex(upper['cycle'])
+    lower,upper=plan['layout']
+    a=anchor_vertex(lower);b=anchor_vertex(upper)
     pa,pb=BRep_Tool.Pnt(a),BRep_Tool.Pnt(b)
-    v0,v1=lower['v'],upper['v']
+    u0,v0=lower['u_start'],lower['v']
+    u1,v1=upper['u_start'],upper['v']
     require(v1>v0+1e-9,'periodic_band_degenerate','Band loops share one parameter level',face=patch.id)
-    geom=Geom_BSplineCurve(array1(TColgp_Array1OfPnt,[pa,pb]),array1(TColStd_Array1OfReal,[v0,v1]),array1(TColStd_Array1OfInteger,[2,2]),1)
-    make=BRepBuilderAPI_MakeEdge(geom,a,b,v0,v1)
+    if abs(u1-u0)<=1e-4 and patch.kind in ('cylinder','cone'):
+        geom=Geom_BSplineCurve(array1(TColgp_Array1OfPnt,[pa,pb]),array1(TColStd_Array1OfReal,[0.,1.]),array1(TColStd_Array1OfInteger,[2,2]),1)
+        def line(du):
+            return Geom2d_BSplineCurve(array1(TColgp_Array1OfPnt2d,[gp_Pnt2d(u0+du,v0),gp_Pnt2d(u1+du,v1)]),
+                array1(TColStd_Array1OfReal,[0.,1.]),array1(TColStd_Array1OfInteger,[2,2]),1)
+    else:
+        count=129
+        s=np.linspace(0.,1.,count)
+        uv_seam=np.column_stack((u0+s*(u1-u0),v0+s*(v1-v0)))
+        pts=patch.evaluate(uv_seam)
+        pts[0]=[pa.X(),pa.Y(),pa.Z()];pts[-1]=[pb.X(),pb.Y(),pb.Z()]
+        geom=Geom_BSplineCurve(array1(TColgp_Array1OfPnt,[gp_Pnt(*p) for p in pts]),
+            array1(TColStd_Array1OfReal,s.tolist()),array1(TColStd_Array1OfInteger,[2]+[1]*(count-2)+[2]),1)
+        def line(du):
+            return Geom2d_BSplineCurve(array1(TColgp_Array1OfPnt2d,[gp_Pnt2d(u+du,v) for u,v in uv_seam]),
+                array1(TColStd_Array1OfReal,s.tolist()),array1(TColStd_Array1OfInteger,[2]+[1]*(count-2)+[2]),1)
+    make=BRepBuilderAPI_MakeEdge(geom,a,b,0.,1.)
     require(make.IsDone(),'seam_creation_failed','Cannot create band seam',face=patch.id,kind=patch.kind,error=int(make.Error()))
     seam=make.Edge()
-    def line(u):
-        return Geom2d_BSplineCurve(array1(TColgp_Array1OfPnt2d,[gp_Pnt2d(u,v0),gp_Pnt2d(u,v1)]),
-            array1(TColStd_Array1OfReal,[v0,v1]),array1(TColStd_Array1OfInteger,[2,2]),1)
-    builder.UpdateEdge(seam,line(u_a+2*np.pi),line(u_a),face,cfg.boundary_tolerance);builder.Range(seam,face,v0,v1)
+    builder.UpdateEdge(seam,line(2*np.pi),line(0.),face,cfg.boundary_tolerance);builder.Range(seam,face,0.,1.)
     builder.UpdateVertex(a,cfg.boundary_tolerance);builder.UpdateVertex(b,cfg.boundary_tolerance)
     def uses(item,increasing):
         cycle=item['cycle'];forward=item['turn']>0
@@ -164,7 +196,7 @@ def make_periodic_band(patch,surface,plan,graph,edges,occ_vertices,cfg,builder,f
         else:seq=[(u.edge,not u.forward) for u in reversed(cycle)]
         return [edges[e] if f else topods.Edge(edges[e].Reversed()) for e,f in seq]
     wire=TopoDS_Wire();builder.MakeWire(wire)
-    # Counter-clockwise in UV: lower loop +u, seam up at u_a+2pi, upper loop -u, seam down at u_a.
+    # Counter-clockwise in UV: lower loop +u, seam up at +2pi, upper loop -u, seam down at 0.
     for edge in uses(lower,True)+[seam]+uses(upper,False)+[topods.Edge(seam.Reversed())]:builder.Add(wire,edge)
     wire.Closed(True);builder.Add(face,wire)
     for cycle in plan['holes']:
@@ -402,7 +434,7 @@ def assemble_brep(graph,curves,patches,cfg,out):
                 mid=np.mean([(patch.uv(curves[u.edge].evaluate(np.linspace(0,1,65)),ordered=True)[:,0]+offsets[u.edge][0]).mean() for u in cycle])
                 shift=2*np.pi*np.round((target-mid)/(2*np.pi))
                 for u in cycle:offsets[u.edge]=offsets[u.edge]+np.array([shift,0.])
-        plan=plan_periodic_band(patch,graph.cycles.get(fid,[]),curves,graph,offsets,anchor) if patch.kind in ('cylinder','cone') and anchor is not None else None
+        plan=plan_periodic_band(patch,graph.cycles.get(fid,[]),curves,graph,offsets,anchor) if patch.kind in PERIODIC_KINDS and anchor is not None else None
         if plan is not None:band[fid]=plan;offsets=plan['offsets']
         chained[fid]=offsets
         mapping.setdefault('seam_vertex_planning',[]).append({'face':fid,'kind':patch.kind,'aligned_rings':aligned,'chained_edges':len(offsets)})
@@ -477,7 +509,12 @@ def assemble_brep(graph,curves,patches,cfg,out):
             additions=[x for x in present if not any(x.IsSame(y) for y in edges.values())]
             mapping['postprocess_edges'].extend({'face':fid,'kind':'periodic_seam'} for x in additions)
             faces[fid]=candidate;mapping['repairs'].append({'face':fid,'operation':'FixMissingSeam','added_edges':len(additions)})
-        for x in unique(faces[fid],TopAbs_EDGE):breplib.SameParameter(topods.Edge(x),cfg.boundary_tolerance,True)
+        sfe=ShapeFix_Edge()
+        for x in unique(faces[fid],TopAbs_EDGE):
+            te=topods.Edge(x)
+            breplib.SameParameter(te,cfg.boundary_tolerance,True)
+            if not BRep_Tool.SameParameter(te):
+                sfe.FixSameParameter(te,faces[fid],cfg.cad_tolerance)
         analyzer=BRepCheck_Analyzer(faces[fid])
         if not analyzer.IsValid():
             breptools.Write(faces[fid],str(out/f'rejected_face_{fid}.brep'))
@@ -498,8 +535,10 @@ def assemble_brep(graph,curves,patches,cfg,out):
     # Orient shell membership without an unrestricted ShapeFix pass that copies
     # edges / increases tolerances. Direct assembly keeps shared identities.
     require(breplib.OrientClosedSolid(solid),'solid_orientation_failed','Cannot orient closed solid')
+    sfe=ShapeFix_Edge()
     for eid,edge in edges.items():
-        breplib.SameParameter(edge,cfg.boundary_tolerance,True)
+        if not BRep_Tool.SameParameter(edge):
+            breplib.SameParameter(edge,cfg.boundary_tolerance,True)
         uses=[]
         for fid,face in faces.items():
             explorer=TopExp_Explorer(face,TopAbs_EDGE)
@@ -507,12 +546,15 @@ def assemble_brep(graph,curves,patches,cfg,out):
                 x=explorer.Current()
                 if x.IsSame(edge):uses.append((fid,int(x.Orientation())))
                 explorer.Next()
+        if not BRep_Tool.SameParameter(edge):
+            for fid,_ in uses:
+                sfe.FixSameParameter(edge,faces[fid],cfg.cad_tolerance)
         require(len(uses)==2 and uses[0][0]!=uses[1][0] and uses[0][1]!=uses[1][1],
                 'cad_incidence_invalid','Logical edge must have two opposite face uses',edge=eid,uses=uses)
         mapping['logical_edges'][eid]={'cad_edge_index':next(i for i,x in enumerate(unique(solid,TopAbs_EDGE)) if x.IsSame(edge)),
                                        'face_uses':uses,'parameter_range':ranges[eid]}
     require(tolerance_max(solid)<=cfg.cad_tolerance*1.01,'cad_tolerance_exceeded','Repair exceeded tolerance budget')
-    require(BRepCheck_Analyzer(solid).IsValid(),'cad_solid_invalid','OCC solid invalid')
+    require(BRepCheck_Analyzer(solid).IsValid(),'cad_solid_invalid','OCC solid invalid',checks=check_statuses(solid))
     breptools.Write(solid,str(out/'curves_and_faces.brep'))
     return solid,mapping
 

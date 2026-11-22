@@ -1,23 +1,41 @@
-# 非精确扫描件条件下的配对 VAE / Flow 训练、退化边处理与后处理协同方案
+# 粗糙网格与欠采样点云的近表面锐边补全与线框优先 B-Rep 重建方案
 
-设计稿，2026-11-21。本文档针对“非精确扫描件 / 粗网格重建 B-Rep（重建结果不强贴输入表面，在近表面三维空间恢复干净 CAD）”这一核心目标，系统分析“仅在 Flow 训练阶段对条件点云加噪”的架构与几何局限，论证为什么不能直接用近表面点池 `N` 替换输入点云，给出**严格 NaTex 对齐 + 离线预处理多档退化变体 + `Q00Zero` 零集补全 + 配对 VAE / Flow + 后处理协同**的完整实施方案，并统一明确 **退化边（Degenerate Edge）** 的 V-UDF 采样策略及预处理/后处理代码级改造清单。
+设计稿，2026-11-22。本文档确立项目的核心定位：**面向粗糙网格与欠采样点云（如体素 Marching Cubes、稀疏点云泊松重建、QEM 粗网格及 AI 3D 生成大模型产出的圆钝网格）的离面线框优先 B-Rep 重建**。针对初始几何因分辨率不足而丢失尖锐棱角、单纯依赖面分割拟合易漏面/失真的痛点，提出在**近表面三维空间**借助生成式 Flow 补足尖锐三维线框（连续 `E-UDF + V-UDF`），同时完整保留现有 `EdgeVertexShapeVAE` 几何先验与 `band_brep_reconstruction` 后处理主干；并统一给出离线预处理、甜点档阈值、同域合并、退化边改造与实验对照协议。
 
 关联文档：
 - 边优先扫描件重建方案：[Post1121.md](Post1121.md)
 - 边优先优化方案：[MCShellCenterline.md](MCShellCenterline.md)
 - Pipeline 层优化分析（结合前沿工作）：[Opt.md](Opt.md)
 - 数据生产规范：[Pre.md](Pre.md)
-- 上游 ShapeVAE 与零集编码：[Hunyuan3D VAE.md](../../Hunyuan3D/docs/VAE.md)
+- 上游 ShapeVAE 与零集编码：[Hunyuan3D VAE.md](../../Hunyuan3D/docs/VAE.md) · [VAEOptimizationPlan.md](../../Hunyuan3D/docs/VAEOptimizationPlan.md)
 
 ---
 
-## 1. 背景与问题定义
+## 1. 核心 Idea、问题定位与前沿差异化
 
-当前两套仓库的分工如下：
-- **上游生成网络（`Hunyuan3D/hy3dshape`）**：基于 `EdgeVertexShapeVAE`（Q00 / Q00Zero）与 `FieldDiT` 条件 Flow，从输入几何条件编码 $z_g$，生成并解码近表面带内的连续 E/V UDF（$\hat d_E, \hat d_V$）。
-- **下游后处理（`DualBrep/band_brep_reconstruction`）**：采用边优先流水线（`scout → wireframe → split_mesh / fast_faces → solid`），在近表面三维带内提取边骨架、顶点球壳与参数曲线，再投影到输入网格划分面域、拟合曲面并装配为 STEP。
+### 1.1 物理痛点与核心思路
+低分辨率点云重建、体素 Marching Cubes（`48³–128³`）、QEM 粗网格以及 3D 生成大模型（如 Hunyuan3D / Trellis 等）产出的网格存在高度一致的几何退化特征：
+- **面内部相对准确**：大片平面、圆柱面及光滑曲面核心区的几何位置与法向偏差很小（通常 `< 0.001 ~ 0.003`）；
+- **尖锐特征严重丢失**：受采样分辨率限制，尖锐棱角、薄倒角、细槽被削平、圆化或向内收缩 `0.003 ~ 0.015`——**真正的 CAD 锐边和顶点在三维空间中悬空于粗糙网格表面外侧，根本不在输入表面上**。
 
-为了让生成网络学会从**含噪、偏移或圆钝的扫描件 / 粗网格** $C_{\text{noisy}}$ 恢复出**干净、锐利、易装配为有效 B-Rep 的 CAD E/V 场** $B^*$，需要打通从条件退化、VAE 编解码、Flow 生成到下游面拟合的全链路一致性。
+由此确立**“近表面三维空间生成式线框补全 + 边优先 B-Rep 重建”**的完整闭环：
+1. **为什么先建线框，而不只靠面分割？** 传统 Face-first 面分割方法（DualBrep / Point2CAD / Point2Brep）在粗糙网格上极易把被磨平的窄倒角、细槽误吞进大面；且相切面边界（平面接圆柱圆角）求交数值病态、自由曲面无法外推求交。先恢复三维线框可直接锁定窄面、相切边与自由面边界。
+2. **为什么重建域放在近表面三维空间，而非输入表面？** 真实锐边与角点悬空在被削圆的粗糙网格外侧，贴着输入表面追边永远只能追出圆钝/锯齿假边；在近表面三维带（$w_{\text{infer}} = 0.026$）内预测连续 `E-UDF + V-UDF`，才能把缺失的尖锐线框从粗糙网格外侧直接“长”出来。
+3. **为什么用生成模型（Flow）？** 一条被低分辨率抹平的圆钝棱角背后可能是锐角、小倒角或小圆角，属于典型的信息缺失病态补全问题；确定性回归会产生均值模糊导致管壳粘连，而条件 Flow 能采样出锐利、拓扑自洽的单一 CAD 线框模式。
+4. **为什么能完整保留现有架构与几何先验？** 因为粗糙网格的大片面内部是准的，**Hunyuan3D 2.1 的预训练几何先验（`geo_encoder` + `memory_g`）**恰好能可靠编码两侧大面的朝向与全局结构，协助外推悬空锐边；下游 `band_brep_reconstruction` 中 [surface_fitting.py](../band_brep_reconstruction/bandbrep/surface_fitting.py#L257-L266) 的 **`_core_samples` 边界腐蚀**天生丢弃圆钝边带、只保留准确的面核心内点，与补全后的悬空锐边自然严丝合缝！
+
+### 1.2 与最接近前沿工作的清晰边界
+| 代表工作 | 核心范式与中间表示 | 与本工作的本质区别 |
+|---|---|---|
+| **Point2Brep** *(中科大)* | **Face-first**：点云区域生长先拟合解析面 → 以面为条件预测 E/V 距离场 → 显式求交 | 顺序相反：粗糙网格抹平窄倒角/细槽时 Face-first 第一阶段即漏面，且相切面/自由面难靠求交恢复；本工作为 **Off-surface Wireframe-first + 生成式补全** |
+| **DualBrep** *(SIGGRAPH 2026)* / **BR-DF** / **UniBRep** | 全局 SDF + GVD-UDF / 逐面 UDF / 表面 Feature Mesh，均为 **Face-first** 表面分割路线 | 依赖输入表面可清晰分面，缺少离面三维锐边补全；BR-DF 仅导出 faceted B-Rep |
+| **DEF** *(SIGGRAPH 2022)* / **NerVE** / **EMAP** | 表面点 Edge 距离场 / 体素边占据 / 多视图 Edge UDF | 仅做到 **3D 线框提取**（不构面、不装配 watertight STEP）；DEF 贴在输入表面回归且无 `Vertex UDF` |
+| **BrepForge** *(SIGGRAPH 2026)* / **Stitch-A-Shape** | 离散自回归 / 顺序缝合生成线框再构面 | 离散序列受面数/token 长度约束，非连续三维距离场条件几何纠偏 |
+| **PRS** *(CVPR 2024)* / **SharpNet** | 粗糙/MC 网格锐边先验修复 | 输出为锐化三角网格（Remeshing），不恢复 B-Rep 拓扑与解析/NURBS 参数化 STEP |
+
+当前两套仓库分工：
+- **上游（`Hunyuan3D/hy3dshape`）**：保留 `EdgeVertexShapeVAE`（`Q00Zero` + 预训练几何先验 + 坐标残差）与 `FieldDiT` 条件 Flow，在近表面三维带内预测连续 E/V UDF（$\hat d_E, \hat d_V$）。
+- **下游（`DualBrep/band_brep_reconstruction`）**：保留边优先流水线（`scout → wireframe → split_mesh / fast_faces → solid`），补齐退化边支持与窄面拟合保护，输出通过 OCC 读回校验的 watertight STEP。
 
 ---
 
@@ -83,7 +101,7 @@ field = self.field_query_decoder(query_embeddings=q, latents=memory_f)
 flowchart TB
     subgraph PRE["离线数据预处理（全量重建 v4 资产，mmap 落盘）"]
         STEP["源 STEP 读取与归一化 [-0.9, 0.9]^3<br/>ShapeUpgrade_UnifySameDomain 同域合并<br/>放行合法退化边（排除出 E-UDF）"]
-        DEG["连续参数随机组合生成 K 个二维退化表面变体<br/>v00 .. v0(K-1)（低频位移 + 平滑 + 简化/MC + 微配准偏置）"]
+        DEG["连续参数随机组合生成 K 个粗糙/欠采样二维表面变体<br/>v00 .. v0(K-1)（多分辨率 MC / 稀疏点云泊松 / QEM 简化 / 棱角圆化）"]
         SAMP["每变体在退化表面采样 M=163,840 点<br/>(pos_noisy, normal_noisy) + FeatureUDFOracle 精确 [s_clean, dE*, dV*]"]
         POOL["共享三维监督池（精简 3 池，零表面细分）<br/>near_surface_band (<=0.04) + 3D edge_tube/vertex_ball + edge/vertex_zero"]
         STEP --> DEG --> SAMP
@@ -164,24 +182,23 @@ assets/<asset_id>/
   3. **`edge_zero` / `vertex_zero`（精确零集）**：沿用现行配额（`edge_zero = 65,536`，`vertex_zero = 全部必要顶点`）。
   4. **少量 `s=0` 表面监督**：不另开重型表面特征池，直接把训练期未进入 Encoder 的 `clean/surface` 或当前变体 `v_k` 剩余点按约 `10%` 配额混入 Decoder 查询即可。
 
-#### (3) 组合式表面级退化与防单一性设计
-为避免离线变体过于单一，每个变体**不是从 4 种固定退化里单选其一，而是从连续参数区间随机采样、组合叠加以下退化算子**，并将总偏移严格控制在 $\delta_{\max} \le 0.015$（局部极端尾部 $\le 0.018$）：
+#### (3) 面向“分辨率不足 / 锐边丢失”的组合式粗糙网格退化设计
+退化构造紧扣**面内部相对准确、尖锐棱角被削平/圆化/欠采样**这一核心物理现象。每个离线变体从连续参数区间随机组合采样，并将棱角最大削平偏移控制在 $\delta_{\max} \le 0.015$（局部极端尾部 $\le 0.018$，面核心内点误差保持 `< 0.003`）：
 
-| 退化算子模块 | 参数连续采样范围 | 物理对应误差 |
+| 退化算子模块（主次权重） | 参数连续采样范围 | 物理对应场景 |
 |---|---|---|
-| **低频光滑 3D 位移场** | 随机 3–8 个 RBF / 低频正弦基，幅值 `U(0.001, 0.012)` | 扫描标定漂移、热/结构形变 |
-| **法向系统性偏置** | 局部低频调制法向膨胀/收缩 `U(-0.006, +0.006)` | 薄壁壁厚测量误差、表面反射偏置 |
-| **Taubin / Laplacian 平滑** | 随机迭代 `0 ~ 8` 步（或按曲率加权平滑） | 扫描仪 PSF 与泊松重建导致的**锐边圆化** |
-| **网格简化 / 多分辨率 MC** | 随机二选一或组合：QEM 简化保留 `10% ~ 60%` 面片，或体素化 + MC（分辨率连续抽 `72³ ~ 144³`） | 粗网格三角化、3D 生成大模型（Hunyuan3D 等）体素阶梯与收缩 |
-| **微小刚体/缩放配准残差** | 极小旋转 `U(0°, 0.4°)` + 各向异性微缩放 `U(0.992, 1.008)`（受总偏移 `<= 0.015` 约束） | 扫描件配准残差与标尺微误差 |
-| **曲率相关高频微扰** | 沿法向微抖动 `σ ∈ [0.0003, 0.0015]`（高曲率/锐边附近略大） | 真实扫描仪掠射角与棱边高噪声特性 |
+| **多分辨率体素化 + Marching Cubes（核心，~35%）** | 体素分辨率连续随机采样 `48³ ~ 128³`（或轻度 SDF 模糊后再 MC） | 神经隐式重建（NeuS / DeepSDF / DualBrep）及 **Hunyuan3D 等 AI 3D 生成模型**的圆钝阶梯粗糙网格 |
+| **稀疏点云重建网格（核心，~30%）** | 从干净面欠采样 `2,048 ~ 16,384` 点（可加微扰 `σ ≤ 0.001`）→ Screened Poisson / Alpha-Wrap 重建闭合网格 | 采样分辨率不足的激光/结构光/消费级扫描点云 |
+| **QEM 网格简化（核心，~20%）** | 激进减面至 `300 ~ 3,000` 三角形（保拓扑闭合，可叠轻度重网格） | 低分辨率粗糙三角网格、窄面/小倒角塌陷 |
+| **曲率加权棱角圆化（核心，~15%）** | 仅在高二面角/高曲率棱角邻域施加 Taubin/Laplacian 平滑 `2 ~ 10` 步（保平坦面核心不动） | 精准模拟“面内准、唯独锐边被削圆”的退化形态 |
+| **可选轻量复合项** | 叠加微幅低频位移 `U(0, 0.003)` 或曲率相关微抖动 `σ ∈ [0.0002, 0.001]` | 兼顾真实扫描配准残差与掠射角噪声 |
 
 * **变体数 $K$ 与防单一的“零 OCC 重标”在线多样性放大**：
-  * **离线数量**：万级大数据集 `train` 每资产 **`K = 6 ~ 8`**（小数据集 `< 2,000` 资产可提至 `K = 10 ~ 12`），`val` 每资产固定 **`K = 3`** 档确定性变体（`low: <=0.005` / `mid: 0.005~0.010` / `high: 0.010~0.015`）+ `clean`。
+  * **离线数量**：万级大数据集 `train` 每资产 **`K = 6 ~ 8`**（小数据集 `< 2,000` 资产可提至 `K = 10 ~ 12`），`val` 每资产固定 **`K = 3`** 档确定性粗糙网格（`low: MC 128³ / 16k Poisson`、`mid: MC 96³ / 8k Poisson`、`high: MC 64³ / 4k Poisson / 激进 QEM`）+ `clean`。
   * **每变体点数**：`M = 163,840`（`2 × 81,920`），单变体约 `6.5 MB`，6 个变体合计约 `~40 MB / 资产`。
   * **训练期 4 重零重标在线多样性放大**（不改变点坐标，因此**完全不需要重算 OCC UDF**）：
     1. **随机子集与随机 FPS**：每轮从 `163,840` 点中无放回抽不同 `81,920` 子集，FPS 产生不同 4,096 anchor 集合；
-    2. **在线非均匀密度 / 局部视角遮挡抽样**：按随机空间权重（或随机剔除 1–2 个小锥角/凹槽区域）加权抽取 `81,920` 点，模拟真实扫描密度不均与局部遮挡缺测；
+    2. **在线非均匀密度 / 局部视角遮挡抽样**：按随机空间权重（或随机剔除 1–2 个小锥角/凹槽区域）加权抽取 `81,920` 点，模拟点云密度不均与局部遮挡；
     3. **在线法向微扰 + 15% Normal Dropout**：对已加载的 `normal_noisy` 施加 `1° ~ 5°` 随机锥角偏转或 15% 概率置零（法向不影响标量 UDF 真值）；
     4. **全局随机刚体旋转增强（可选）**：对输入点、法向、零集与所有查询点同步施加同一随机 SO(3) 旋转（欧氏距离完全旋转不变）。
 
@@ -189,7 +206,7 @@ assets/<asset_id>/
 * 全部直接复用 [veudf/src/veudf/preprocess/distance.py](../../Hunyuan3D/veudf/src/veudf/preprocess/distance.py#L32-L117) 的 **`FeatureUDFOracle`**（`udf_truncation = 0.05`）：仅在边覆盖球与顶点 `0.05` 球内调用 OCC 精确求解，远场直接赋值 `0.05` 并标 `saturated=True`；`s_clean` 由干净网格 `MeshSDFOracle` 精确求解。
 * 整个预处理链路 100% 精确一致，无近似误差。
 
-### 4.3 模型侧与训练抽样改动
+### 4.3 模型侧与训练抽样改动（完整保留现有主干）
 
 #### (1) `SurfacePoolDataset` 抽样策略（零在线退化开销）
 - **编码器输入抽取**：
@@ -199,31 +216,21 @@ assets/<asset_id>/
 - **Decoder 监督点抽取**：
   - 从精简后的 3 类共享三维监督池抽取（`supervision_band_width = 0.040`，覆盖 `|s_clean| <= 0.040`），并按约 `10%` 配额混入当前抽中表面池（`clean` 或 `v_k`）中**未进 Encoder 的剩余点**。
 
-#### (2) VAE 解码器坐标残差与几何主干微调
-- **坐标直连残差**：在 [shapevae.py](../../Hunyuan3D/hy3dshape/hy3dshape/models/autoencoders/edge_vertex/shapevae.py#L199-L200) 中，将
-  ```python
-  q = self.geo_feature_to_field_query(h)
-  ```
-  升级为
-  ```python
-  q = self.geo_feature_to_field_query(h) + self.field_coord_proj(self.pe(x.float()))
-  ```
-  新投影层 `field_coord_proj` 采用**零初始化**，可无缝从现有 Q00 / Q00Zero checkpoint 热启，防止查询坐标定位过度受限于含噪 `memory_g`。
-- **几何编码器轻量微调**：对 `geo_input_proj` 与浅层 `geo_cross` 开放 LoRA 或低学习率微调（例如主学习率的 `0.1×`），使预训练 ShapeVAE 几何编码器适应退化表面与圆化法向。
+#### (2) VAE 保留几何先验 + 关键精度升级（衔接 [VAEOptimizationPlan.md](../../Hunyuan3D/docs/VAEOptimizationPlan.md)）
+- **完整保留 `memory_g` 几何先验**：粗糙/MC 网格面内部几何准确，保留预训练 Hunyuan3D 2.1 的 `geo_encoder` 与 `memory_g` 有助于稳定推断两侧大面延伸交汇出的悬空锐边；对 `geo_input_proj` 与浅层 `geo_cross` 开放 LoRA 或 `0.1×` 低学习率微调以适配圆钝棱角。
+- **解码器新增零初始化坐标残差**：在 [shapevae.py](../../Hunyuan3D/hy3dshape/hy3dshape/models/autoencoders/edge_vertex/shapevae.py#L199-L200) 中改为 `q = self.geo_feature_to_field_query(h) + self.field_coord_proj(self.pe(x.float()))`，增强悬空于粗糙网格外侧的尖角定位精度。
+- **同步合入 VAE P0/P1 核心止血项**：`logvar_clamp ∈ [-10, 0]` + `mean_recon_prob = 0.15`（根治后验方差爆炸与 `mean/sample` 割裂）、多尺度 `SmoothL1` + 零点项 + 远场硬负样本惩罚（`GT >= 0.015` 误报压制）、以及 `field_latent` / `field_latent_decoder` 3D RoPE（详见 [VAEOptimizationPlan.md](../../Hunyuan3D/docs/VAEOptimizationPlan.md) M1–M4）。
 
 ### 4.4 Latent 缓存、Flow 训练与下游后处理协同
 
 1. **多变体 Latent 缓存**：扩展 [latent_cache.py](../../Hunyuan3D/hy3dshape/hy3dshape/data/latent_cache.py#L59-L125)，遍历每个资产的 `[clean, v00, ..., v0(K-1)]` 分别缓存 `(z_g_raw, anchor_xyz, z_f_mu, z_f_logvar, variant_id, offset_tier)`。`stats_f` / `stats_g` 仍仅在 `train` split 上拟合。
-2. **拓扑敏感加权 Flow Loss**：按每个 `anchor` 处对应输入点的最小 `dE*` / `dV*` 分桶加权 Flow Matching 损失，把生成容量集中在决定拓扑成败的管壳与交汇区。
-3. **重建导向选优与微调（Best-of-N / DPO）**：推理期对同一扫描输入采样 $K = 4\text{--}8$ 组 $z_f$，以 `band_brep_reconstruction` 的快速 `wireframe` 指标（`unresolved` 数量、闭环完整度、骨架连通性）选优；进一步可将后处理验收通过/失败构造为偏好对，对 Flow 做轻量 DPO / RFT 微调。
-4. **下游 `band_brep_reconstruction` 协同适配**：
+2. **拓扑敏感加权 Flow Loss**：按每个 `anchor` 处对应输入点的最小 `dE*` / `dV*` 分桶加权 Flow Matching 损失，把生成容量集中在被削平/圆化的棱角与交汇区。
+3. **重建导向选优与微调（Best-of-N / DPO）**：推理期对同一粗糙网格采样 $K = 4\text{--}8$ 组 $z_f$，以 `band_brep_reconstruction` 的快速 `wireframe` 指标（`unresolved` 数量、闭环完整度、骨架连通性）选优；进一步可按后处理验收结果做轻量 DPO / RFT 微调。
+4. **下游 `band_brep_reconstruction` 轻量协同适配（无需大改主流程）**：
    - 将默认查询带调至 `band_width = 0.026`、`scan_offset_tolerance = 0.018`；
-   - 在 [surface_fitting.py](../band_brep_reconstruction/bandbrep/surface_fitting.py#L493-L561) 中，将硬编码的 `2 * surface_tolerance = 0.006` 内点 90%/95% 分位阈值与 `scan_offset_tolerance` 联动，避免偏移 `0.006 ~ 0.018` 的有效干净面被误拒；
-   - 对偏移较大的扫描面，提高干净三维边界曲线对平面/柱面/锥面参数的约束优先级，扫描内点主要用于法向定向与离群过滤；
-   - 在 `scout` 阶段结合三维体素格点最小值辅助判定 E/V `presence`，避免偏移下在输入表面 `S0` 误判顶点缺失；
-   - 中长期可结合 [Opt.md](Opt.md) 同步引入解析面求交反哺线框、边界驱动曲面实例化以及双场干净 SDF 输出。
-
-> **备选消融（方案 A2：解耦 `encode_field` K/V）**：若仅做概念验证、不想为退化变体标注 UDF，可在 `shapevae.py` 中临时放开 `encode_field` 坐标一致断言，让 `encode_field` 的 K/V 直接读干净 `S` 池、Query 仍用 `geo.z_g`。正式重处理数据集仍以本节的**离线组合退化 + `FeatureUDFOracle` 精确标注 + 严格 NaTex 对齐**为主方案。
+   - **窄面/补全倒角拟合保护**：粗糙网格原本的大面核心经 `_core_samples` 腐蚀后本就很准，仅需在 [surface_fitting.py](../band_brep_reconstruction/bandbrep/surface_fitting.py#L493-L561) 中对**被粗糙网格抹平、由生成线框补全切出的窄面/小倒角**，提高两侧精确三维边界曲线对平面/柱面/直纹面参数的约束优先级，并将分位内点门限按面宽度/偏移放宽；
+   - **非相切解析面求交精修（推荐增项，见 [Opt.md](Opt.md#21-借鉴-point2brep解析面求交反哺线框--全局-cad-几何正则)）**：对两侧均为高置信大解析面且非相切的共享边，用精确面面交线与三面交点反哺精修线框，兼得 Edge-first 的拓扑完整度与解析求交的 `1e-6` 级精度；
+   - 在 `scout` 阶段结合三维体素格点最小值辅助判定 E/V `presence`，避免角点削平处误判顶点缺失。
 
 ---
 
@@ -295,7 +302,7 @@ assets/<asset_id>/
 | **1.2 同域规范化合并** | [veudf/preprocess/cad.py](../../Hunyuan3D/veudf/src/veudf/preprocess/cad.py#L139-L166)（`read_normalized` 后） | 引入 `ShapeUpgrade_UnifySameDomain(normalized, True, True, False)`（`SetLinearTolerance(cfg.geometry_tolerance)`、`SetAngularTolerance(1e-4)`），合并后检查 `BRepCheck_Analyzer` 有效且相对体积变化 `< 1e-5` 才采纳，并在 `metadata` 记录合并前后 face/edge 数量 |
 | **1.3 放行合法退化边** | [veudf/preprocess/cad.py:231-274](../../Hunyuan3D/veudf/src/veudf/preprocess/cad.py#L231-L274) & [filtering.py:71-81](../../Hunyuan3D/veudf/src/veudf/preprocess/filtering.py#L71-L81) | `cad.py` 在 `BRepAdaptor_Curve` 之前拦截 `BRep_Tool.Degenerated(edge)`：校验 `len(use_list)==1, len(fids)==1, vids[0]==vids[1]`；检查所属面为 `Cone`/`Sphere` 或该顶点连有 $\ge 2$ 条普通边后记入 `dropped(reason="degenerate_excluded")`（其余孤立非解析退化尖点报 `unsupported_isolated_degenerate_freeform`）；`filtering.py` 的 `audit_shape` 遇到退化边直接跳过弧长积分 |
 | **1.4 精简三维 Decoder 监督池** | [veudf/preprocess/sampling.py:310-447](../../Hunyuan3D/veudf/src/veudf/preprocess/sampling.py#L310-L447) | ① `near_surface` 法向扰动改为 4 层 `[0, 0.002, 0.01, 0.025, 0.04]`（权重 `[0.25, 0.35, 0.25, 0.15]`）+ 20% 各向同性；② 新增 `sample_feature_3d_pool()` 直接绕 `edge_zero`/`vertex_zero` 在三维近表面带内按 `feature_radii` 分层采样（接受 `|s_clean| <= 0.04`），替代耗时的表面 `proposal_fragments` 细分；③ `edge_zero` / `vertex_zero` 逻辑保持不变 |
-| **1.5 组合式退化二维表面变体构建** | 新增 `veudf/preprocess/degradation.py`，接入 [veudf/preprocess/pipeline.py](../../Hunyuan3D/veudf/src/veudf/preprocess/pipeline.py) | 实现组合式表面退化管线（低频 RBF/正弦位移 + 法向微偏置 + Taubin 平滑 + QEM/MC + 微配准残差 + 曲率加权微扰），实测距干净面最大偏移控制在 `<= 0.015`（`val` 固定 `low/mid/high` 三档并保留 `mesh/`）；在退化网格上采样 `M = 163,840` 点 `(pos_noisy, normal_noisy)` 并**统一调用 `FeatureUDFOracle` + `MeshSDFOracle`** 写入 `encoder_surfaces/v00..v0(K-1)/` |
+| **1.5 粗糙/欠采样二维表面变体构建** | 新增 `veudf/preprocess/degradation.py`，接入 [veudf/preprocess/pipeline.py](../../Hunyuan3D/veudf/src/veudf/preprocess/pipeline.py) | 实现面向锐边丢失的组合式表面退化（多分辨率 MC `48³~128³`、稀疏点云 `2k~16k` Screened Poisson 重建、QEM 简化 `300~3,000` 面、曲率加权棱角圆化），实测距干净面最大偏移控制在 `<= 0.015`（`val` 固定 `low/mid/high` 三档并保留 `mesh/`）；在退化网格上采样 `M = 163,840` 点 `(pos_noisy, normal_noisy)` 并**统一调用 `FeatureUDFOracle` + `MeshSDFOracle`** 写入 `encoder_surfaces/v00..v0(K-1)/` |
 | **1.6 同步与回归测试** | `DualBrep/sync_veudf.py` & `veudf/tests/` | 补充 3 个合成 STEP 单测（全圆锥、倾斜半圆锥、两半圆锥合并），跑通 `veudf` 单测后运行 `python sync_veudf.py --apply` 同步到 `DualBrep/veudf` |
 
 ### Phase 2：配对 VAE 重训与多变体 Latent 缓存（`Hunyuan3D/hy3dshape`）
@@ -303,21 +310,50 @@ assets/<asset_id>/
 | 任务 | 目标文件与位置 | 具体改动内容 |
 |---|---|---|
 | **2.1 数据集读取与零重标在线增强** | [hy3dshape/data/surface_pools.py](../../Hunyuan3D/hy3dshape/hy3dshape/data/surface_pools.py) | ① 支持读取 `encoder_surfaces/{clean, v00..}`；`train` 按 20% `clean` + 80% 随机 `v_k` 抽取 `81,920` 点同时喂 `geo_*` 与 `field_*`（严格 NaTex 对齐）；② 新增在线零重标增强：非均匀密度/局部遮挡加权抽点 + 法向 `1°~5°` 锥角微扰 + 15% Normal Dropout + 可选全局随机 SO(3) 旋转；③ 将 Decoder 监督过滤解耦为 `supervision_band_width = 0.040`，并按 10% 混入当前表面池未进 Encoder 的剩余点 |
-| **2.2 VAE 坐标残差与浅层几何微调** | [hy3dshape/models/autoencoders/edge_vertex/shapevae.py](../../Hunyuan3D/hy3dshape/hy3dshape/models/autoencoders/edge_vertex/shapevae.py#L66-L79,L193-L200) | ① 解码器新增零初始化 `self.field_coord_proj`，将 `q = self.geo_feature_to_field_query(h) + self.field_coord_proj(self.pe(x.float()))`；② `pretrained_geometry` 模式下增加配置项开放 `geo_input_proj` 与浅层 `geo_cross` 的 LoRA 或 `0.1×` 低学习率微调；③ 保持 `Q00Zero` 零集支路启用 |
-| **2.3 分档评估与多变体缓存** | [hy3dshape/data/latent_cache.py](../../Hunyuan3D/hy3dshape/hy3dshape/data/latent_cache.py) & `evaluation/` | `build_cache` 遍历每资产的 `[clean, v00..v0(K-1)]` 分别缓存 `(z_g_raw, anchor_xyz, z_f_mu, z_f_logvar, variant_id, offset_tier)`；验证脚本按 `clean / low / mid / high` 四档分桶报告近边/近顶点 MAE |
+| **2.2 VAE 保留几何先验 + 精度升级** | [hy3dshape/models/autoencoders/edge_vertex/shapevae.py](../../Hunyuan3D/hy3dshape/hy3dshape/models/autoencoders/edge_vertex/shapevae.py) & `losses.py` | ① 保留 `memory_g` 几何先验，解码器新增零初始化 `self.field_coord_proj(self.pe(x))` 残差；② 开放 `geo_input_proj` 与浅层 `geo_cross` 的 LoRA / `0.1×` 低 LR 微调；③ 合入 `VAEOptimizationPlan.md` 的 M1（`logvar ∈ [-10,0]`、`mean_recon_prob=0.15`）+ M2（`SmoothL1` + 零点项 + 远场硬负样本）+ M3（`field` 3D RoPE），保持 `Q00Zero` 启用 |
+| **2.3 分档评估与多变体缓存** | [hy3dshape/data/latent_cache.py](../../Hunyuan3D/hy3dshape/hy3dshape/data/latent_cache.py) & `evaluation/` | `build_cache` 遍历每资产的 `[clean, v00..v0(K-1)]` 分别缓存 `(z_g_raw, anchor_xyz, z_f_mu, z_f_logvar, variant_id, offset_tier)`；验证脚本按 `clean / low / mid / high` 四档分桶报告近边/近顶点 MAE 与 `r=0.005` 壳层 Precision/Recall |
 
 ### Phase 3：配对 Flow 训练与推理适配（`Hunyuan3D/hy3dshape`）
 
 | 任务 | 目标文件与位置 | 具体改动内容 |
 |---|---|---|
-| **3.1 特征区加权 Flow Loss** | [hy3dshape/models/diffusion/flow_matching.py](../../Hunyuan3D/hy3dshape/hy3dshape/models/diffusion/flow_matching.py) & `training/losses.py` | 缓存每个 anchor 的近边/近顶点距离 `anchor_udf`，在 `flow_objective` 中对近边/近顶点 token 按距离分桶加权，聚焦拓扑关键区 |
-| **3.2 推理带宽与 `presence` 适配** | [hy3dshape/inference/pipeline.py](../../Hunyuan3D/hy3dshape/hy3dshape/inference/pipeline.py#L71-L78) | 推理默认 `band_width = 0.026`；放宽/改进 `infer_presence`（避免偏移扫描面在 `S0` 上误判小顶点缺失，支持交由下游 `scout` 三维体素复核）；支持多 seed 批量采样供 Best-of-N 选优 |
+| **3.1 特征区加权 Flow Loss** | [hy3dshape/models/diffusion/flow_matching.py](../../Hunyuan3D/hy3dshape/hy3dshape/models/diffusion/flow_matching.py) & `training/losses.py` | 缓存每个 anchor 的近边/近顶点距离 `anchor_udf`，在 `flow_objective` 中对近边/近顶点 token 按距离分桶加权，聚焦被削圆棱角与交汇区 |
+| **3.2 推理带宽与 `presence` 适配** | [hy3dshape/inference/pipeline.py](../../Hunyuan3D/hy3dshape/hy3dshape/inference/pipeline.py#L71-L78) | 推理默认 `band_width = 0.026`；改进 `infer_presence`（避免削平角点在 `S0` 上误判顶点缺失，支持交由下游 `scout` 复核）；支持多 seed 批量采样供 Best-of-N 选优 |
 
-### Phase 4：后处理退化边支持与扫描容差协同（`DualBrep/band_brep_reconstruction`）
+### Phase 4：后处理退化边支持与粗糙网格拟合保护（`DualBrep/band_brep_reconstruction`）
 
 | 任务 | 目标文件与位置 | 具体改动内容 |
 |---|---|---|
 | **4.1 默认配置更新** | [configs/default.json](../band_brep_reconstruction/configs/default.json) | 设 `band_width = 0.026`、`scan_offset_tolerance = 0.018` |
-| **4.2 `surface_fitting.py` 4 处改造** | [bandbrep/surface_fitting.py](../band_brep_reconstruction/bandbrep/surface_fitting.py) | ① 第 73-87 行：`FacePatch.uv(..., ordered=True)` 在 `cone`/`sphere` 极点（$\rho < 10^{-7}$）沿有序曲线继承相邻 `u` 修复方位角跳变；② 第 290-292 行：单/双圆环边界球面将 `axis` 对齐到圆环法向；③ 第 493, 525, 559-560 行：内点 90%/95% 分位门限与 `scan_offset_tolerance` 联动，大偏移面提高干净边界对解析面参数的约束优先级；④ 第 562-566 行：`cone`/`sphere` 折叠检查排除极点 `< 1e-4` 邻域 |
+| **4.2 `surface_fitting.py` 4 处改造** | [bandbrep/surface_fitting.py](../band_brep_reconstruction/bandbrep/surface_fitting.py) | ① 第 73-87 行：`FacePatch.uv(..., ordered=True)` 在 `cone`/`sphere` 极点（$\rho < 10^{-7}$）沿有序曲线继承相邻 `u` 修复方位角跳变；② 第 290-292 行：单/双圆环边界球面将 `axis` 对齐到圆环法向；③ 第 493, 525, 559-560 行：对被粗糙网格抹平后由线框补出的**窄面/小倒角**，提高两侧精确边界对平面/柱面/直纹面参数的约束优先级，并将分位内点门限按面宽/偏移放宽；④ 第 562-566 行：`cone`/`sphere` 折叠检查排除极点 `< 1e-4` 邻域 |
 | **4.3 `occ_assembly.py` 3 处改造** | [bandbrep/occ_assembly.py](../band_brep_reconstruction/bandbrep/occ_assembly.py) | ① 第 267-301, 338, 471-475 行：扩展单环周期面支持到 `cone`（含斜切闭合底环通用 pcurve），对称新增 `make_conical_cap()`；② 第 480-485 行：非单环 `cone`/`sphere` wire 增加极点 UV 跳变检测并自动插入绑定到共享顶点的退化边；③ 第 513-517 行：`SameParameter` 循环跳过 `BRep_Tool.Degenerated(te)` |
-| **4.4 端到端闭环验收** | `band_brep_reconstruction/tests/` & `benchmarks/evaluate_step.py` | ① 先跑 3 个合成退化边 STEP 单测（全圆锥、倾斜半圆锥、倾斜半球冠）；② 在 `val` 集 4 档退化网格（`clean / low / mid / high`）上联调 `Mesh → Flow → band-brep-reconstruct → STEP`，验收各档 STEP 通过率、V–E–F 拓扑 F1 与相对输入网格的几何纠偏改善量 |
+| **4.4 可选解析求交精修与验收** | `band_brep_reconstruction/tests/` & `benchmarks/evaluate_step.py` | ① 先跑 3 个合成退化边 STEP 单测（全圆锥、倾斜半圆锥、倾斜半球冠）；② 可选在解析面拟合后对非相切解析面共享边叠加精确面面求交精修；③ 按第 7 节实验协议完成全套对比与消融验收 |
+
+---
+
+## 7. 实验对照协议与核心评估指标
+
+### 7.1 测试基准与对比基线
+* **四类核心测试集**（严格按 ABC `family_id` 隔离 train/val/test）：
+  1. **多分辨率 Marching Cubes 网格**：`48³ / 64³ / 96³`（量化不同体素分辨率丢失锐边时的恢复能力）；
+  2. **欠采样点云重建网格**：`2k / 4k / 8k` 稀疏点云经 Screened Poisson 重建得到的粗糙网格；
+  3. **QEM 简化粗糙网格**：`500 / 1,000 / 2,000` 三角形低多边形粗网格；
+  4. **真实 AI 3D 生成粗糙网格（Visual Teaser 杀手锏）**：直接由 Hunyuan3D 2.1 等上游 3D 生成模型产出的工业零件圆钝 Mesh（+ 真实扫描零件），验证端到端 *Mesh-to-CADification* 泛化能力并在 CAD 软件中展示二次参数化编辑。
+* **必比基线（直面最接近前作）**：
+  * **Point2Brep**（Face-first + E/V 距离场，最核心正面竞品）；
+  * **DualBrep**（Face-first + SDF/GVD-UDF）；
+  * **Point2CAD**（经典点云面分割 + 解析/神经曲面拟合求交）；
+  * **DEF / NerVE + 面拟合**（贴面线框提取代表，证明离面近表面补全的必要性）。
+
+### 7.2 核心指标体系（突出“离面锐边补全”与“纠偏收益”）
+1. **端到端 B-Rep 有效性**：OCC `BRepCheck` 与 STEP 读回通过率（**Valid Rate**，含退化边与周期面）。
+2. **几何纠偏金标准（Rectification Gain）**：分别计算输入粗糙网格与输出重建 B-Rep 到真值 CAD 的 **Chamfer Distance（CD）、Hausdorff Distance（HD）、角点/棱线局部误差与法向误差**，重点验证 **`Error(Output B-Rep, GT CAD) < Error(Input Coarse Mesh, GT CAD)`**（尤其是棱角 HD 显著下降，证明实现了主动纠偏而非被动贴面拟合）。
+3. **拓扑与分桶细粒度指标（拉开与 Face-first 差距的关键）**：
+   * 整体与分层 V / E / F 精确率、召回率与 F1，以及 V–E / E–F 关联准确率；
+   * **专项子集分桶汇报**：① **窄面与小倒角（width `< 0.015`）**、② **相切边（Tangent Edges）**、③ **自由曲面（B-spline）**、④ **含退化边圆锥/球冠**——正面展示相比 Point2Brep / DualBrep / Point2CAD 的不可替代优势。
+4. **必做消融矩阵**：
+   * 确定性前馈回归 vs. 条件 Flow（+ Best-of-N）——证明生成式模型解决病态圆角补全与管壳粘连的必要性；
+   * 贴输入表面重建（`w = 0`） vs. 近表面三维带离面重建（`w = 0.026`）；
+   * 配对重训 VAE + Flow vs. 冻结干净 VAE 仅改 Flow 条件；
+   * `ShapeUpgrade_UnifySameDomain` 规范化前后对比；
+   * 单向 Edge-first vs. 非相切解析面求交精修。

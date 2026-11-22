@@ -6,7 +6,7 @@
 | 当前网格到 STEP 入口 | [边优先重建 README](../band_brep_reconstruction/README.md) |
 | 历史面优先流程 | [Post1109.md](Post1109.md) |
 | 粗网格与扫描件条件下的边优先方案 | [Post1121.md](Post1121.md) |
-| 非精确扫描件条件下的配对 VAE / Flow 训练与退化边处理方案 | [ScanPairedTraining.md](ScanPairedTraining.md) |
+| 粗糙网格与欠采样点云的近表面锐边补全、配对训练与退化边方案 | [ScanPairedTraining.md](ScanPairedTraining.md) |
 | Pipeline 层优化分析（结合前沿工作） | [Opt.md](Opt.md) |
 | 边优先流程优化：分层查询、MC 中心线、分面及 patch | [MCShellCenterline.md](MCShellCenterline.md) |
 | 目录归属与可清理项 | [Cleanup.md](Cleanup.md) |

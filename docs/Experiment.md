@@ -16,7 +16,11 @@
 | [11-01 原生 L5](#native-mesh-l5) | 同源原生网格四轮均未达细分目标；0/20 准备通过 | 已完成20例，未进入拓扑 |
 | [11-01 两级实施验证](#coarse-fine-validation) | 纯几何粗加密、超长边剪枝、字段复用与缓存 | 回归／几何探针，不是批量成功率 |
 | [11-02 粗目标对照](#coarse-fine-comparison) | 同20 dev×0.02/0.03，两组细目标0.005 | 状态及成绩读取链接的批次产物，本文不推断已完成 |
-| [11-06 单阶段0.003](#single-pass-003) | 同20 dev×0.02/0.03；仅E场选区、细目标0.003、单阶段阈值0.003、采样差分梯度 | 独立新批次，状态及成绩读取批次产物 |
+| [11-06 单阶段0.003](#single-pass-003) | 同20 dev×0.02/0.03；仅E场选区、细目标0.003、单阶段阈值0.003、采样差分梯度 | 40/40 完成；粗0.03达 12/20 图+STEP |
+| [11-09 曲线回放](#curve-distance-003) | 同20 dev 粗0.03固定网格/拓扑；`direct_distance` 曲线恢复重跑 | 20/20 完成；12/20 图+STEP |
+| [11-16 面区域修复](#region-repair-003) | 同20 dev 粗0.03固定网格；5组100任务（小核心/单面边带合并消融） | 100/100 完成；各组均 12/20 图+STEP |
+| [11-19 边优先初版](#edge-first-1119) | 同20 dev；`trace` vs 局部 `mc` 配对及 1600 万预算重试 | 原批 mc 8/20 STEP；重试 mc 10/20 STEP（图+STEP 1/20） |
+| [11-20—11-21 边优先细化 v1–v6](#edge-first-thinning) | 同20 dev；`hybrid` vs `global_exact` 6轮迭代（自适应 scout、thinning 骨架、周期 seam、OCC SameParameter、可控合并与分叉提升） | **双组均达 17/20 (85.0%) STEP**、12/20 严格图+STEP，scout 查询降至 0.97M |
 
 以上 oracle E/V、内部确认及历史独立集合各有范围；不能将它们合计为独立模型数或真实学习场表现。下列 F30 与旧 MC 结论保留原批次语义。
 
@@ -541,6 +545,7 @@ L5剩余13例为准备5（预算3、原输入退化2）、图错误6（面错4�
 
 新两组中位耗时为旧同粗目标的2.54／3.38倍，细网格面数中位为1.79／2.04倍，查询点数中位为2.86／3.66倍。粗0.03比粗0.02中位耗时低约4.2%且多成功2例，但最大观测RSS为4.91 GiB，高于粗0.02的3.89 GiB。后续诊断优先以粗0.03为基线，先检查直线支撑投影与曲线候选选择、共享边／pcurve装配和残余关联问题，再做控制变量消融；本轮不直接替换默认配置。
 
+<a id="curve-distance-003"></a>
 ### 5.12 11-09：固定粗目标0.03网格重跑曲线与STEP
 
 本节及§5.13两次实验的处理顺序、全部配置、历史源码回放命令与结果核对，统一见[归档流程与冻结命令](Post1116.md)。
@@ -551,6 +556,7 @@ L5剩余13例为准备5（预算3、原输入退化2）、图错误6（面错4�
 
 两CPU worker、每例从worker启动起总超时10800秒；冻结输入、代码和旧逐例记录，在独立目录运行。面正确17/20、图正确15/20是复用输入的旧评分；新曲线方案比较STEP、图与STEP联合成功、几何误差及曲线恢复／覆盖耗时，不宣称重新评估了分割。失败与超时保留在20例分母，pending另列；单例验证不计入本批。最终成绩与完成状态以批次资产为准，不能把启动当作完成。
 
+<a id="region-repair-003"></a>
 ### 5.13 11-16：固定网格的面区域修复对照
 
 [实时报告](../band_brep_reconstruction/outputs/region_repair_coarse003_20261116_v1/REPORT.md)、[状态](../band_brep_reconstruction/outputs/region_repair_coarse003_20261116_v1/state.json)。沿用§5.11粗0.03组20个dev的输入网格、细网格和中心场，E-only细目标0.003、单阶段阈值0.003；10个check不运行。baseline保留过滤，no_mean仅取消均值过滤，small修复小核心，single_face修复单面边带，joint组合两者。五组100任务，源码和输入独立冻结，8个单线程CPU worker，每例每组总时限10800秒。
@@ -575,13 +581,86 @@ L5剩余13例为准备5（预算3、原输入退化2）、图错误6（面错4�
 
 105项测试及8个子测试通过；315份冻结身份文件哈希核验通过，60份成功STEP独立读回有效。终版另补prepared前缀缓存键和失败STEP草稿归档检查，未改变冻结批次的几何算法；差异及证据保存在该批次post_freeze_cache_validation.json和final_metadata.patch。
 
+<a id="edge-first-1119"></a>
 ### 5.14 11-19：双向追踪与局部 MC 配对
 
-批次见[阶段耗时及历史对比](../band_brep_reconstruction/outputs/edge_first_paired_20261119_v1/REPORT.md)、[逐例 CSV](../band_brep_reconstruction/outputs/edge_first_paired_20261119_v1/metrics.csv)和[运行状态](../band_brep_reconstruction/outputs/edge_first_paired_20261119_v1/state.json)。沿用 11-06／11-09／11-16 同源同哈希的 20 个 dev，20 个单线程 CPU worker，每例双路总预算 10800 秒。源 STEP 重新生成生产 v3 网格和精确 E/V。两路共用同一份 `0.012 → 0.003` 的稀疏查询，独立执行线框拟合、切网格、曲面和 STEP 读回。MC 等值半径为 0.005，查询域受距输入表面 0.02 的有效带限制。
+批次见[阶段耗时及历史对比](../band_brep_reconstruction/outputs/edge_first_paired_20261119_v1/REPORT.md)、[预算重试报告](../band_brep_reconstruction/outputs/edge_first_budget_retry_20261119_v1/REPORT.md)、[逐例 CSV](../band_brep_reconstruction/outputs/edge_first_paired_20261119_v1/metrics.csv)和[运行状态](../band_brep_reconstruction/outputs/edge_first_paired_20261119_v1/state.json)。沿用 11-06／11-09／11-16 同源同哈希的 20 个 dev，20 个单线程 CPU worker，每例双路总预算 10800 秒。源 STEP 重新生成生产 v3 网格和精确 E/V。两路共用同一份 `0.012 → 0.003` 的稀疏查询，独立执行线框拟合、切网格、曲面和 STEP 读回。MC 等值半径为 0.005，查询域受距输入表面 0.02 的有效带限制。
 
 按 20 例固定分母比较 STEP 和图+STEP，待结算样本另列。记录共享的准备、粗查与细查时间，并对两路分别统计线框、切面、曲面、CAD 和离线评分。阶段中位只统计完成该阶段者，报告给出样本数。两路阶段差只取同一例均完成该阶段的配对样本。11-06 完整流程、11-09 固定顶点回放和 11-16 固定网格／中心场 baseline 的比较按各自计时边界披露，不能把历史 worker 总耗时直接当作同工作量的加速比。本轮为精确场实验。
 
 默认角点分配预算为 400 万，计数发生在细格去重前。原批预算失败保留在原结果中。单独的 `edge_first_budget_retry_20261119_v1` 等待原批结算，只重跑触及粗块或角点预算的样本，将预算提高至 1600 万。几何和有效域参数采用同一源码与设置，其余样本的记录沿用并标记 `carried_from`。评估算法失败与默认资源失败时须区分两份报告。
+
+**2026-11-19 结算结果。** 两批均完成 20/20：
+
+| 批次 / 方法 | 结算 | scout 完成 | STEP | 图+STEP | scout 中位秒 | wireframe 中位秒 |
+|---|---:|---:|---:|---:|---:|---:|
+| 原批 `trace`（400万预算） | 20/20 | 13/20 | 2/20 | 1/20 | 398.72 (13) | 299.21 (13) |
+| 原批 `mc`（400万预算） | 20/20 | 13/20 | 8/20 | 1/20 | 398.72 (13) | 389.27 (13) |
+| 重试 `trace`（1600万预算） | 20/20 | 20/20 | 2/20 | 1/20 | 543.55 (20) | 321.51 (20) |
+| 重试 `mc`（1600万预算） | 20/20 | 20/20 | 10/20 | 1/20 | 543.55 (20) | 451.29 (20) |
+
+该轮确认了边优先路线相对于 `trace` 的局部 `mc` 优势，但暴露出两项核心瓶颈：(1) 400 万角点预算下有 7 例在 `scout` 阶段被截断；(2) 旧版 MC 投影切面提取的线框存在大量分叉/重叠，导致严格图+STEP 仅 1/20。
+
+<a id="edge-first-thinning"></a>
+### 5.15 11-20—11-21：边优先体素细化配对迭代（`v1`–`v6`）
+
+围绕上述瓶颈，重建主线切换至[边优先体素细化方案](Post1121.md)（3D 体素 `thinning` 中心线 + 多级稀疏 `scout` + 网格嵌入切分 + 解析/B 样条曲面与 OCC 装配），在同源同哈希的 20 dev 上连续开展 6 轮配对实验（`projection_thinning_paired_20261120_v1` 至 `projection_thinning_paired_20261121_v6`）。
+
+#### 统一协议与评估口径
+
+- **样本与分组**：沿用与 §5.11–§5.14 完全一致的 20 dev STEP（逐例校验 `source_sha256`）。每轮固定运行 `hybrid`（`hybrid_projection=true`）与 `global_exact`（`hybrid_projection=false`）两组，共 40 任务。
+- **公共配置**：`fast_faces=false`、`allow_partial_wireframe=true`、`centerline_method=thinning`、`scout_point_budget` 放开（不因角点配额截断）；12 并发 worker、单线程数值库（`OPENBLAS/OMP/MKL/NUMEXPR_NUM_THREADS=1`）、单任务总墙钟上限 3600 秒（含 STEP 准备、重建、MC 薄壳 `.obj` 导出与离线评分）。
+- **统一评估脚本**：所有批次均通过 [`band_brep_reconstruction/scripts/evaluate_experiment.py`](../band_brep_reconstruction/scripts/evaluate_experiment.py)（`--with-truth`）产出各目录的 `eval_summary.json`，统计固定分母下的 STEP 成功率、严格图+STEP（`graph_good`）、各阶段通过率、线框零未解数、V/E/F 微平均 F1、对称 Chamfer、体积相对误差、耗时与 `scout` 唯一查询点数。本系列仍为精确 CAD 场实验。
+
+#### 逐轮改动摘要
+
+| 版本 | 日期 | 核心改动 |
+|---|---|---|
+| `v1` | 11-20 | 切换 3D 体素骨架 `thinning` + 局部细化初版基线；`scout` 为旧两级网格（均值 2.81M 查询点）。 |
+| `v2` | 11-20 | ① 四层自适应 `scout` 剪枝（唯一查询点由 `2.81M` 降至 `0.97M`，降幅 2.9×，耗时降约 33%）；② 嵌入器 `SNAP=1e-5` 与共线简化修复 `curve_embedding_overlap`；③ 全周期面（含 torus）UV 线性螺旋 seam 规划修复 `repair_changed_shared_edge`。 |
+| `v3` | 11-20 | 优化薄壳/骨架连通性与残余小分量处理，打通 `00007970`。 |
+| `v4` | 11-20 | OCC 装配以 `ShapeFix_Edge().FixSameParameter` 替代强制 `SameParameter` 破坏度-1 pcurve 的逻辑，修复球/环面 `cad_solid_invalid`（`00000602`、`00008222`、`00004627`）。 |
+| `v5` | 11-21 | 清理过时逻辑（删除 `edge_geometry.py`、`sections` 中心线等），引入可控特征合并（`allow_feature_collapse=true, collapse_tolerance=0.005`）并默认导出 MC 薄壳 `.obj`；成绩与 `v4` 一致、零回退。 |
+| `v6` | 11-21 | ① 嵌入器 Steiner 点避让 + 共享顶点近端采样跳过（修复 `00008804`）；② Bezier 拟合后贴面性校验 + 稀疏弦段加密重试（修复 `00000688`）；③ 残余 `deg > 2` 骨架分叉节点自动提升/吸收（`00008133` 线框 `unresolved` 归零并跨过 `split_mesh`）。 |
+
+#### 固定分母演进总表（N=20，全部无超时）
+
+| 版本 | 组别 | STEP | 图+STEP | 各阶段通过 (`scout/wf/split/surf/cad`) | wf 零未解 | Chamfer 中位 | VolErr 中位 / 最大 | 耗时中位 / 均值 | scout 查询点均值 | 相对上轮增减 |
+|---|---|---:|---:|---|---:|---:|---|---:|---:|---|
+| `v1` | `hybrid` | 9/20 (45%) | 9/20 | 20/20/12/11/9 | 13/20 | 0.00001 | 0.00002 / 0.00068 | 528.2s / 546.4s | 2.81M | 基线 |
+| `v1` | `global_exact` | 6/20 (30%) | 6/20 | 20/20/7/6/6 | 13/20 | 0.00001 | 0.00001 / 0.00068 | 507.4s / 542.0s | 2.81M | 基线 |
+| `v2` | `hybrid` | 12/20 (60%) | 11/20 | 20/20/15/14/12 | 16/20 | 0.00001 | 0.00002 / 0.00069 | 329.7s / 359.9s | 0.97M | +`0168, 2978, 5094` |
+| `v2` | `global_exact` | 12/20 (60%) | 11/20 | 20/20/15/15/12 | 16/20 | 0.00001 | 0.00002 / 0.00069 | 344.1s / 367.0s | 0.97M | +`0168, 2331, 2748, 2978, 5094, 9340` |
+| `v3` | `hybrid` | 13/20 (65%) | 12/20 | 20/20/16/15/13 | 17/20 | 0.00001 | 0.00002 / 0.00069 | 344.9s / 370.8s | 0.97M | +`7970` |
+| `v3` | `global_exact` | 13/20 (65%) | 12/20 | 20/20/16/16/13 | 17/20 | 0.00001 | 0.00002 / 0.00069 | 367.8s / 381.2s | 0.97M | +`7970` |
+| `v4` | `hybrid` | 15/20 (75%) | 12/20 | 20/20/16/15/15 | 17/20 | 0.00001 | 0.00002 / 0.04630 | 359.9s / 418.0s | 0.97M | +`0602, 8222` |
+| `v4` | `global_exact` | 16/20 (80%) | 13/20 | 20/20/16/16/16 | 17/20 | 0.00001 | 0.00003 / 0.02060 | 370.2s / 417.6s | 0.97M | +`0602, 4627, 8222` |
+| `v5` | `hybrid` | 15/20 (75%) | 12/20 | 20/20/16/15/15 | 17/20 | 0.00001 | 0.00002 / 0.04630 | 365.2s / 417.6s | 0.97M | 持平（零回退） |
+| `v5` | `global_exact` | 16/20 (80%) | 13/20 | 20/20/16/16/16 | 17/20 | 0.00001 | 0.00003 / 0.02060 | 383.6s / 430.6s | 0.97M | 持平（零回退） |
+| `v6` | `hybrid` | **17/20 (85%)** | 12/20 | 20/20/19/17/17 | **18/20** | 0.00002 | 0.00004 / 0.04630 | 369.4s / 423.5s | 0.97M | +`0688, 8804` |
+| `v6` | `global_exact` | **17/20 (85%)** | 12/20 | 20/20/19/18/17 | **18/20** | 0.00002 | 0.00004 / **0.00090** | 391.2s / 425.8s | 0.97M | +`0688, 8804` / −`4627` |
+
+#### `v6` 拓扑与几何详细指标（17 例 STEP-valid 上）
+
+- **拓扑微平均 P / R / F1**（`hybrid` 与 `global_exact` 一致）：
+  - 顶点：**P=100.0%, R=100.0%, F1=100.0%**（799/799 精确匹配，0 缺失、0 重复、0 未匹配）；17/17 模型顶点数完全精确。
+  - 边：**P=99.4%, R=96.9%, F1=98.2%**（1385 匹配，44 缺失，3 重复，5 未匹配）；E–V 关联准确率 **98.1%**。
+  - 面：**P=93.0%, R=87.6%, F1=90.2%**（567 匹配，80 缺失，3 重复，40 未匹配）；E–F 关联准确率 **93.7%**；13/17 模型 V/E/F 数量全部精确。
+- **几何精度**：
+  - 顶点最大误差：中位 `0.00000`，最大 `0.00006`。
+  - 对称 Chamfer 均值：中位 `0.00002`，均值 `0.00006`，最大 `0.00038`；双向 p95 中位 `0.00008`。
+  - 体积相对误差：`global_exact` 中位 `0.00004`、最大 `0.00090`（<0.1%）；`hybrid` 中位 `0.00004`、最大 `0.04630`（出现在 `00000602`）。
+
+#### `v6` 剩余 3 例失败与已知回退
+
+1. **`00004627`（`v6` 引入的唯一回退，`global_exact`: `cad:pcurve_fit_failed`，`hybrid`: `surfaces:surface_boundary_incompatible`）**：`v6` 对所有开边无条件跳过距共享顶点 `1.5 * spacing` 以内的采样点，使切分约束从 `6838` 减至 `6778`，改变了 `logical_face 0` 附近的 patch seam（`[35]` → `[35, 36]`），导致 `face 16` pcurve 误差 `0.0026`。后续应仅在共享顶点存在小夹角相邻边或冲突时启用近端跳过。
+2. **`00008133`（双组 `surfaces:surface_boundary_incompatible`，误差 `0.0031`）**：分叉提升已使该例 `unresolved` 归零并顺利通过 `split_mesh`，仅差曲面阶段对 `collapsed=true` 边的解析交线重拟合放行。
+3. **`00004610`（`split_mesh:edge_neighbors_unresolved` / `face_sector_ambiguous`）**：仍残余 1 处 `skeleton_junction_unresolved`（`vertices=[5, 53, 54, 76]`，394 点），切分边两侧邻面未闭合。
+
+#### 批次产物入口
+
+- `v1`–`v4`：`band_brep_reconstruction/outputs/projection_thinning_paired_20261120_v{1,2,3,4}/`（含 `manifest.json`、`policy.json`、`results.json`、`eval_summary.json`、`source_snapshot/`）。
+- `v5`–`v6`：[v5 目录](../band_brep_reconstruction/outputs/projection_thinning_paired_20261121_v5/)、[v6 目录](../band_brep_reconstruction/outputs/projection_thinning_paired_20261121_v6/)（另含每例 `mc_vis/` MC 薄壳 `.obj` 导出与 [v6 eval_summary.json](../band_brep_reconstruction/outputs/projection_thinning_paired_20261121_v6/eval_summary.json)）。
 
 <a id="alignment-contract"></a>
 ## 6. 历史 F30 对齐约定与候选配置

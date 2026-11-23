@@ -211,7 +211,8 @@ def label_pool(directory, pool, oracle, targets, cfg, feature, reference=None):
             else None
         ),
         band_counts={
-            str(h): int((np.abs(values[:, 0]) <= h).sum()) for h in [0.01, 0.02, 0.03]
+            str(h): int((np.abs(values[:, 0]) <= h).sum())
+            for h in sorted({0.01, 0.02, 0.03, float(cfg.band_max)})
         },
     )
 
@@ -321,8 +322,8 @@ def build_asset(record, output, cfg):
         t = time.monotonic()
         # Independent positions, not held-out rows of the training pools.
         k = cfg.evaluation_points_per_pool
-        es, vs = max(k, len(targets.edges)), max(k, len(targets.vertices))
-        en, vn = round(k * 0.3), round(k * 0.2)
+        en = max(k, len(targets.edges))
+        vn = max(k, len(targets.vertices))
         eval_pools, eval_reach = sample_pools(
             targets,
             mesh,
@@ -331,10 +332,10 @@ def build_asset(record, output, cfg):
                 cfg,
                 seed=seed_for(cfg.seed, "evaluation"),
                 feature_min_samples=1,
-                feature_surface_ratios=(es / (es + en), vs / (vs + vn)),
+                feature_surface_ratios=(0.0, 0.0),
             ),
             seed_for(seed, "evaluation"),
-            counts=[k, k // 2, es + en, vs + vn],
+            counts=[k, k // 2, en, vn],
             geometry_count=k,
         )
         eval_pools.update(zero_pools(targets, cfg, evaluation=True))

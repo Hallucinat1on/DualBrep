@@ -197,7 +197,7 @@ def test_frozen_build_runs_and_resumes_without_repository(tmp_path):
     cfg = replace(
         Config(),
         geometry_surface_pool_count=1024,
-        pool_count=4096,
+        pool_count=4608,
         feature_min_samples=2,
         evaluation_points_per_pool=64,
         reference_checks=12,

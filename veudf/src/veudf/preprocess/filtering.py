@@ -71,9 +71,10 @@ def audit_shape(solid, targets, cfg):
     _, edges = unique_shapes(solid, TopAbs_EDGE)
     lengths = []
     for sid, edge in enumerate(edges):
-        if BRep_Tool.Degenerated(topods.Edge(edge)):
-            raise PreprocessError("degenerate_edge", f"Source edge {sid} is degenerate")
-        curve = BRepAdaptor_Curve(topods.Edge(edge))
+        e = topods.Edge(edge)
+        if BRep_Tool.Degenerated(e):
+            continue
+        curve = BRepAdaptor_Curve(e)
         value = GCPnts_AbscissaPoint.Length(curve, cfg.solver_tolerance)
         if abs(value - cfg.min_edge_length) <= 10 * cfg.solver_tolerance:
             value = GCPnts_AbscissaPoint.Length(curve, min(cfg.solver_tolerance, 1e-10))

@@ -1,20 +1,36 @@
 {
-  "geometry_surface_pool_count": 393216,
-  "pool_count": 1572864,
+  "geometry_surface_pool_count": 262144,
+  "pool_count": 1179648,
   "pool_weights": [
-    0.25,
-    0.175,
-    0.355,
-    0.22
+    0.2222222222222222,
+    0.3333333333333333,
+    0.2777777777777778,
+    0.16666666666666666
   ],
   "volume_pool_count": 0,
   "evaluation_volume_count": 4096,
   "feature_curve_spacing": 0.002,
+  "band_max": 0.04,
+  "feature_radii": [
+    0.002,
+    0.005,
+    0.01,
+    0.02,
+    0.04
+  ],
+  "feature_weights": [
+    0.2,
+    0.28,
+    0.27,
+    0.17,
+    0.08
+  ],
   "udf_truncation": 0.05,
+  "unify_same_domain": true,
   "label_batch_size": 32768,
   "feature_surface_ratios": [
-    0.7042249989702114,
-    0.6818194954194723
+    0.0,
+    0.0
   ],
   "zero_edge_count": 65536,
   "zero_edge_min_samples": 8,

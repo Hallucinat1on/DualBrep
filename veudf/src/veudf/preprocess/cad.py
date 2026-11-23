@@ -12,16 +12,22 @@ import tempfile
 
 import numpy as np
 from OCC.Core.BRep import BRep_Builder, BRep_Tool
-from OCC.Core.BRepAdaptor import BRepAdaptor_Curve
+from OCC.Core.BRepAdaptor import BRepAdaptor_Curve, BRepAdaptor_Surface
 from OCC.Core.BRepBndLib import brepbndlib
-from OCC.Core.BRepBuilderAPI import BRepBuilderAPI_Transform
+from OCC.Core.BRepBuilderAPI import BRepBuilderAPI_Copy, BRepBuilderAPI_Transform
 from OCC.Core.BRepCheck import BRepCheck_Analyzer
 from OCC.Core.BRepGProp import brepgprop
 from OCC.Core.GProp import GProp_GProps
 from OCC.Core.BRepMesh import BRepMesh_IncrementalMesh
 from OCC.Core.BRepTools import BRepTools_WireExplorer
 from OCC.Core.Bnd import Bnd_Box
-from OCC.Core.GeomAbs import GeomAbs_Circle, GeomAbs_Ellipse
+from OCC.Core.GeomAbs import (
+    GeomAbs_Circle,
+    GeomAbs_Cone,
+    GeomAbs_Ellipse,
+    GeomAbs_Sphere,
+)
+from OCC.Core.ShapeUpgrade import ShapeUpgrade_UnifySameDomain
 from OCC.Core.TopAbs import (
     TopAbs_EDGE,
     TopAbs_FACE,
@@ -91,6 +97,152 @@ def step_input(path):
         yield path
 
 
+def _max_cad_tolerance(shape):
+    max_tol = 0.0
+    for kind, cast in (
+        (TopAbs_FACE, topods.Face),
+        (TopAbs_EDGE, topods.Edge),
+        (TopAbs_VERTEX, topods.Vertex),
+    ):
+        _, items = unique_shapes(shape, kind)
+        for item in items:
+            max_tol = max(max_tol, float(BRep_Tool.Tolerance(cast(item))))
+    return max_tol
+
+
+def _has_same_domain_cone_or_sphere_seam(solid, cfg):
+    """Detect unmerged artificial seam edges between identical coaxial cones or concentric spheres."""
+    _, faces = unique_shapes(solid, TopAbs_FACE)
+    ei, raw_edges = unique_shapes(solid, TopAbs_EDGE)
+    faces = [topods.Face(f) for f in faces]
+    edges = [topods.Edge(e) for e in raw_edges]
+    edge_faces = [set() for _ in edges]
+    for fid, face in enumerate(faces):
+        exp = TopExp_Explorer(face, TopAbs_EDGE)
+        while exp.More():
+            sid = ei.FindIndex(exp.Current()) - 1
+            if sid >= 0:
+                edge_faces[sid].add(fid)
+            exp.Next()
+    pos_tol = 10.0 * cfg.geometry_tolerance
+    for sid, edge in enumerate(edges):
+        if BRep_Tool.Degenerated(edge):
+            continue
+        fids = sorted(edge_faces[sid])
+        if len(fids) != 2:
+            continue
+        s0 = BRepAdaptor_Surface(faces[fids[0]])
+        s1 = BRepAdaptor_Surface(faces[fids[1]])
+        t0, t1 = s0.GetType(), s1.GetType()
+        if t0 != t1:
+            continue
+        if t0 == GeomAbs_Cone:
+            c0, c1 = s0.Cone(), s1.Cone()
+            if (
+                np.linalg.norm(xyz(c0.Apex()) - xyz(c1.Apex())) <= pos_tol
+                and abs(abs(float(np.dot(xyz(c0.Axis().Direction()), xyz(c1.Axis().Direction())))) - 1.0)
+                <= 1e-5
+                and abs(abs(float(c0.SemiAngle())) - abs(float(c1.SemiAngle()))) <= 1e-4
+            ):
+                return True
+        elif t0 == GeomAbs_Sphere:
+            sp0, sp1 = s0.Sphere(), s1.Sphere()
+            if (
+                np.linalg.norm(xyz(sp0.Location()) - xyz(sp1.Location())) <= pos_tol
+                and abs(float(sp0.Radius()) - float(sp1.Radius())) <= pos_tol
+            ):
+                return True
+    return False
+
+
+def _unify_same_domain(solid, normalized_volume, cfg):
+    faces_before = len(unique_shapes(solid, TopAbs_FACE)[1])
+    edges_before = len(unique_shapes(solid, TopAbs_EDGE)[1])
+    meta = dict(
+        enabled=bool(cfg.unify_same_domain),
+        applied=False,
+        faces_before=faces_before,
+        edges_before=edges_before,
+        faces_after=faces_before,
+        edges_after=edges_before,
+        relative_volume_change=0.0,
+        reason="disabled" if not cfg.unify_same_domain else "pending",
+    )
+    if not cfg.unify_same_domain:
+        return solid, normalized_volume, meta
+    try:
+        # Copy first: OCC's ShapeUpgrade_UnifySameDomain can mutate input topology
+        # in-place before raising an error on degenerate-apex faces.
+        working = BRepBuilderAPI_Copy(solid, True).Shape()
+        unifier = ShapeUpgrade_UnifySameDomain(working, True, True, False)
+        unifier.SetLinearTolerance(cfg.geometry_tolerance)
+        unifier.SetAngularTolerance(1e-4)
+        unifier.Build()
+        unified = unifier.Shape()
+    except Exception as exc:
+        meta["reason"] = f"build_failed:{type(exc).__name__}"
+        if _has_same_domain_cone_or_sphere_seam(solid, cfg):
+            raise PreprocessError(
+                "unmerged_same_domain_seam",
+                f"ShapeUpgrade_UnifySameDomain failed on split coaxial cone/sphere faces ({type(exc).__name__})",
+            ) from exc
+        return solid, normalized_volume, meta
+    if unified is None or unified.IsNull():
+        meta["reason"] = "null_shape"
+        return solid, normalized_volume, meta
+    _, usolids = unique_shapes(unified, TopAbs_SOLID)
+    if len(usolids) != 1:
+        meta["reason"] = f"solid_count:{len(usolids)}"
+        return solid, normalized_volume, meta
+    candidate = topods.Solid(usolids[0])
+    for kind in (TopAbs_FACE, TopAbs_EDGE, TopAbs_VERTEX):
+        solid_index, _ = unique_shapes(candidate, kind)
+        _, all_items = unique_shapes(unified, kind)
+        if any(solid_index.FindIndex(item) == 0 for item in all_items):
+            meta["reason"] = "loose_topology"
+            return solid, normalized_volume, meta
+    if not BRepCheck_Analyzer(candidate).IsValid():
+        meta["reason"] = "invalid_solid"
+        return solid, normalized_volume, meta
+    props = GProp_GProps()
+    brepgprop.VolumeProperties(candidate, props)
+    unified_volume = float(props.Mass())
+    if not np.isfinite(unified_volume) or unified_volume <= 0:
+        meta["reason"] = "invalid_volume"
+        return solid, normalized_volume, meta
+    rel_change = abs(unified_volume - normalized_volume) / max(
+        abs(normalized_volume), 1e-12
+    )
+    meta["relative_volume_change"] = float(rel_change)
+    if rel_change >= 1e-5:
+        meta["reason"] = "volume_drift"
+        return solid, normalized_volume, meta
+    if _max_cad_tolerance(candidate) > cfg.geometry_tolerance:
+        meta["reason"] = "tolerance_exceeded"
+        return solid, normalized_volume, meta
+    try:
+        ulo, uhi = bounds(candidate)
+    except PreprocessError:
+        meta["reason"] = "invalid_bbox"
+        return solid, normalized_volume, meta
+    if np.max(np.abs(np.r_[ulo, uhi])) >= 1:
+        meta["reason"] = "bbox_out_of_domain"
+        return solid, normalized_volume, meta
+    faces_after = len(unique_shapes(candidate, TopAbs_FACE)[1])
+    edges_after = len(unique_shapes(candidate, TopAbs_EDGE)[1])
+    meta.update(
+        applied=True,
+        faces_after=faces_after,
+        edges_after=edges_after,
+        reason=(
+            "unified"
+            if (faces_after != faces_before or edges_after != edges_before)
+            else "unchanged"
+        ),
+    )
+    return candidate, unified_volume, meta
+
+
 def read_normalized(path, cfg):
     with step_input(path) as input_path:
         try:
@@ -141,6 +293,10 @@ def read_normalized(path, cfg):
         raise PreprocessError(
             "invalid_solid", "Normalization produced an invalid solid"
         )
+    normalized_volume = volume * scale**3
+    normalized, normalized_volume, unify_meta = _unify_same_domain(
+        normalized, normalized_volume, cfg
+    )
     lo, hi = bounds(normalized)
     if np.max(np.abs(np.r_[lo, hi])) >= 1:
         raise PreprocessError(
@@ -156,12 +312,13 @@ def read_normalized(path, cfg):
         center=center.tolist(),
         scale=scale,
         source_volume=volume,
-        normalized_volume=volume * scale**3,
+        normalized_volume=normalized_volume,
         world_to_normalized=matrix.tolist(),
         normalized_to_world=np.linalg.inv(matrix).tolist(),
         source_bounds=[lower.tolist(), upper.tolist()],
         normalized_bounds=[lo.tolist(), hi.tolist()],
         source_units="as converted by STEP reader; distances follow saved transform",
+        unify_same_domain=unify_meta,
     )
     return normalized, metadata
 
@@ -227,10 +384,42 @@ def collect_targets(solid, cfg):
             wires.append(dict(source_wire_id=wid, source_face_id=fid, uses=local))
             wire_exp.Next()
 
-    source_edges, kept, dropped, endpoints = [], [], [], []
+    source_edges, kept, dropped, endpoints, degenerate_candidates = [], [], [], [], []
     for sid, edge in enumerate(edges):
+        use_list = uses[sid]
+        fids = sorted({u["source_face_id"] for u in use_list})
         if BRep_Tool.Degenerated(edge):
-            raise PreprocessError("degenerate_edge", f"Source edge {sid} is degenerate")
+            a, b = topexp.FirstVertex(edge), topexp.LastVertex(edge)
+            if a.IsNull() or b.IsNull():
+                raise PreprocessError(
+                    "degenerate_edge",
+                    f"Degenerate edge {sid} has no topological endpoints",
+                )
+            vids = [vi.FindIndex(a) - 1, vi.FindIndex(b) - 1]
+            if min(vids) < 0:
+                raise PreprocessError("invalid_solid", "Endpoint missing from vertex map")
+            if len(use_list) != 1 or len(fids) != 1 or vids[0] != vids[1]:
+                raise PreprocessError(
+                    "degenerate_edge",
+                    f"Degenerate edge {sid} has unexpected uses ({len(use_list)}), "
+                    f"faces ({len(fids)}) or endpoints {vids}",
+                )
+            surf_type = BRepAdaptor_Surface(faces[fids[0]]).GetType()
+            source_edges.append(
+                dict(
+                    source_edge_id=sid,
+                    uses=use_list,
+                    face_ids=fids,
+                    source_vertex_ids=vids,
+                    parameter_range=None,
+                    curve_type=-1,
+                    seam_faces=[],
+                    degenerated=True,
+                    surface_type=int(surf_type),
+                )
+            )
+            degenerate_candidates.append((sid, vids[0], surf_type))
+            continue
         try:
             curve = BRepAdaptor_Curve(edge)
             first, last = curve.FirstParameter(), curve.LastParameter()
@@ -242,8 +431,6 @@ def collect_targets(solid, cfg):
                 raise ValueError("Nonfinite curve")
         except Exception as exc:
             raise PreprocessError("missing_curve", f"Edge {sid}: {exc}") from exc
-        use_list = uses[sid]
-        fids = sorted({u["source_face_id"] for u in use_list})
         seams = [fid for fid in fids if BRep_Tool.IsClosed(edge, faces[fid])]
         a, b = topexp.FirstVertex(edge), topexp.LastVertex(edge)
         if a.IsNull() or b.IsNull():
@@ -270,6 +457,7 @@ def collect_targets(solid, cfg):
                 parameter_range=[first, last],
                 curve_type=int(curve.GetType()),
                 seam_faces=seams,
+                degenerated=False,
             )
         )
         if seams:
@@ -298,6 +486,15 @@ def collect_targets(solid, cfg):
     for target_id, pair in enumerate(endpoints):
         for v in pair:
             incident[v].add(target_id)
+    for sid, vid, surf_type in degenerate_candidates:
+        if surf_type not in (GeomAbs_Cone, GeomAbs_Sphere) and len(incident[vid]) < 2:
+            raise PreprocessError(
+                "unsupported_isolated_degenerate_freeform",
+                f"Degenerate edge {sid} on non-analytic surface has "
+                f"{len(incident[vid])} incident ordinary edges",
+            )
+        dropped.append(dict(source_edge_id=sid, reason="degenerate_excluded"))
+    dropped.sort(key=lambda item: item["source_edge_id"])
     removed, keep_vertices = [], []
     for vid, vertex in enumerate(vertices):
         connected = incident[vid]
@@ -407,6 +604,18 @@ def triangulate(targets, cfg):
         )
         if face.Orientation() == TopAbs_REVERSED:
             triangles = triangles[:, ::-1]
+        # Drop degenerate triangles created along collapsed pole/apex edges
+        # before welding so triangle_cad_face_ids stays aligned with welded faces.
+        rounded = np.round(points, 7)
+        a, b, c = rounded[triangles[:, 0]], rounded[triangles[:, 1]], rounded[triangles[:, 2]]
+        valid_tri = (
+            np.any(a != b, axis=1) & np.any(b != c, axis=1) & np.any(a != c, axis=1)
+        )
+        triangles = triangles[valid_tri]
+        if not len(triangles):
+            raise PreprocessError(
+                "meshing_failed", f"Face {fid} has only degenerate triangles"
+            )
         result_v.append(points)
         result_f.append(triangles + offset)
         result_ids.append(np.full(len(triangles), fid, dtype=np.int32))

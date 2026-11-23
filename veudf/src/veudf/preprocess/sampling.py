@@ -1,7 +1,6 @@
-"""Continuous CAD mesh surface/feature pools with independent random streams."""
+"""Continuous CAD mesh surface and 3D near-surface/feature pools with independent random streams."""
 
 import numpy as np
-from scipy.spatial import cKDTree
 from OCC.Core.BRepAdaptor import BRepAdaptor_Curve
 from OCC.Core.GCPnts import GCPnts_AbscissaPoint, GCPnts_UniformAbscissa
 from veudf.schema import POOLS, SURFACE, SPATIAL, ZERO
@@ -9,6 +8,8 @@ from veudf.utils import allocate, seed_for
 from veudf.geometry.sampling import base_surface, triangle_samples, face_normals
 from veudf.preprocess.cad import PreprocessError, xyz
 from veudf.geometry.mesh import QUERY_BATCH_SIZE
+
+FEATURE_3D_PERTURBATION_MODE = 2
 
 
 def curve_points(edge, count, tolerance, closed=False):
@@ -91,231 +92,82 @@ def zero_pools(targets, cfg, evaluation=False):
     )
 
 
-def proposal_fragments(mesh, max_edge, distance, radius):
-    """Longest-edge bisection preserves each plane without overrefining thin CAD triangles."""
-    pending = mesh[0][mesh[1]]
-    parents = np.arange(len(pending))
-    triangles, indices = [], []
-    for _ in range(32):
-        edges = pending[:, [1, 2, 0]] - pending
-        # CAD may retain subnormal roundoff components at exact axes. Ignore
-        # these only in the refinement metric, never in stored mesh geometry.
-        edges[np.abs(edges) < 1e-15] = 0
-        lengths = np.sqrt(np.einsum("ijk,ijk->ij", edges, edges))
-        # A 1-Lipschitz distance and the centroid radius bound safely discard
-        # whole fragments outside the target neighborhood before subdividing.
-        keep = distance(pending.mean(1)) <= radius + lengths.max(1) * (2 / 3) + 1e-12
-        pending, parents, lengths = pending[keep], parents[keep], lengths[keep]
-        longest = lengths.argmax(1)
-        split = lengths.max(1) > max_edge
-        triangles.append(pending[~split])
-        indices.append(parents[~split])
-        if not split.any():
-            t = np.concatenate(triangles)
-            return (
-                t.reshape(-1, 3),
-                np.arange(len(t) * 3).reshape(-1, 3),
-                np.concatenate(indices),
-            )
-        tri = pending[split]
-        order = (longest[split, None] + np.arange(3)) % 3
-        tri = np.take_along_axis(tri, order[..., None], axis=1)
-        a, b, c = tri[:, 0], tri[:, 1], tri[:, 2]
-        mid = (a + b) / 2
-        pending = np.concatenate((np.stack((a, mid, c), 1), np.stack((mid, b, c), 1)))
-        parents = np.tile(parents[split], 2)
-    raise PreprocessError("sampling_failed", "Proposal refinement exceeded its budget")
+def _query_sdf_batched(oracle, points):
+    if not len(points):
+        return np.empty(0, np.float64)
+    if len(points) <= QUERY_BATCH_SIZE:
+        return oracle.query(points)
+    return np.concatenate(
+        [
+            oracle.query(points[start : start + QUERY_BATCH_SIZE])
+            for start in range(0, len(points), QUERY_BATCH_SIZE)
+        ]
+    )
 
 
-class FeatureSurfaceSampler:
-    def __init__(self, mesh, cfg):
-        import igl
+def _empty_neighborhood():
+    return dict(
+        points=np.empty((0, 3), np.float32),
+        normals=np.empty((0, 3), np.float32),
+        triangle_ids=np.empty(0, np.int32),
+        source_instance=np.empty(0, np.int32),
+        sample_type=np.empty(0, np.uint8),
+        perturbation_mode=np.empty(0, np.uint8),
+        perturbation_layer=np.empty(0, np.uint8),
+        _sdf=np.empty(0, np.float64),
+    )
 
-        self.cfg = cfg
-        original_v, original_f = mesh
-        self.original_mesh = mesh
-        self.normals = face_normals(*mesh)
-        self.v, self.f = mesh
-        tri = self.v[self.f]
-        self.centers = tri.mean(1)
-        self.radii = np.linalg.norm(tri - self.centers[:, None], axis=-1).max(1)
-        self.bvh = igl.AABB()
-        self.bvh.init(original_v, original_f)
 
-    def pool(self, targets, count, kind, seed):
-        cfg = self.cfg
-        entities = targets.edges if kind == "edge" else targets.vertices
-        if not len(entities) or not count:
-            return self.empty(), dict(unresolved=[], transfers=[], coverage=[])
-        rng = np.random.default_rng(seed)
-        proposals, weights, unresolved = [], [], []
-        spacing = cfg.feature_curve_spacing
-        for i, entity in enumerate(entities):
-            if kind == "edge":
-                length = GCPnts_AbscissaPoint.Length(
-                    BRepAdaptor_Curve(entity), cfg.solver_tolerance
-                )
-                seeds = curve_points(
-                    entity,
-                    max(3, int(np.ceil(length / spacing)) + 1),
-                    cfg.solver_tolerance,
-                    targets.topology["edges"][i]["closed"],
-                )
-                seed_tree = cKDTree(seeds)
-                distance = lambda x, t=seed_tree: t.query(x)[0]
-                error_bound = (
-                    length
-                    / (
-                        len(seeds)
-                        if targets.topology["edges"][i]["closed"]
-                        else len(seeds) - 1
-                    )
-                    / 2
-                )
-                error_bound += cfg.solver_tolerance
-                weight = np.sqrt(length)
-            else:
-                seeds = np.asarray(entity)[None]
-                distance = lambda x, p=seeds: np.linalg.norm(x - p, axis=1)
-                error_bound = 0.0
-                weight = 1.0
-            minimum = float(
-                np.sqrt(
-                    min(
-                        self.bvh.squared_distance(
-                            *self.original_mesh, seeds[start : start + QUERY_BATCH_SIZE]
-                        )[0].min()
-                        for start in range(0, len(seeds), QUERY_BATCH_SIZE)
-                    )
-                )
-            )
-            # Query each triangle once against the target seed tree. Expanding
-            # a triangle-center radius for every edge seed materializes a huge
-            # Cartesian neighborhood on CAD meshes with a few large planes.
-            ids = np.flatnonzero(
-                distance(self.centers)
-                <= cfg.feature_radii[-1] + self.radii + cfg.solver_tolerance
-            )
-            available = np.flatnonzero(np.asarray(cfg.feature_radii) > minimum + 1e-8)
-            if not len(ids) or not len(available):
-                unresolved.append(i)
-                continue
-            proposals.append(
-                (i, ids, distance, int(available[0]), minimum, error_bound)
-            )
-            weights.append(weight)
-        if not proposals:
-            return self.empty(), dict(unresolved=unresolved, transfers=[], coverage=[])
-        if count < len(proposals) * cfg.feature_min_samples:
-            raise PreprocessError(
-                "sampling_budget", f"{kind}: budget below per-instance minimum"
-            )
-        quotas = (
-            allocate(count - len(proposals) * cfg.feature_min_samples, weights)
-            + cfg.feature_min_samples
-        )
-        points, normals, triangle_ids, instances, transfers, coverage = (
-            [],
-            [],
-            [],
-            [],
-            [],
-            [],
-        )
-        for quota, (i, ids, distance, first, minimum, error_bound) in zip(
-            quotas, proposals
-        ):
-            # Refine only this target neighborhood, keeping the original face
-            # IDs. The final condition mesh and triangle normals never change.
-            pv, pf, parents = proposal_fragments(
-                (self.v, self.f[ids]),
-                cfg.feature_radii[-1],
-                distance,
-                cfg.feature_radii[-1],
-            )
-            parents = ids[parents]
-            centers = pv.reshape(-1, 3, 3).mean(1)
-            fragment_radius = cfg.feature_radii[-1] * (2 / 3)
-            layer = allocate(int(quota), cfg.feature_weights)
-            if first:
-                layer[first] += layer[:first].sum()
-                layer[:first] = 0
-                transfers.append(
-                    dict(instance=i, minimum_estimate=minimum, first_layer=first)
-                )
-            collected, collected_ids = [], []
-            for b, need in enumerate(layer):
-                need = int(need)
-                low = cfg.feature_radii[b - 1] if b else 0.0
-                layer_ids = np.flatnonzero(
-                    distance(centers)
-                    <= cfg.feature_radii[b] + fragment_radius + error_bound
-                )
-                acceptance = 0.125
-                for _ in range(cfg.sampling_rounds):
-                    if not need:
-                        break
-                    candidate, candidate_ids = triangle_samples(
-                        pv,
-                        pf,
-                        min(max(int(np.ceil(need / acceptance * 1.2)), 256), 65536),
-                        rng,
-                        layer_ids,
-                        return_ids=True,
-                    )
-                    d = distance(candidate.astype(np.float64))
-                    good = (d <= cfg.feature_radii[b]) & (
-                        (d - error_bound > low) if b else (d >= 0)
-                    )
-                    acceptance = max(float(good.mean()), 1 / len(candidate))
-                    take = candidate[good][:need]
-                    collected.append(take)
-                    collected_ids.append(parents[candidate_ids[good][:need]])
-                    need -= len(take)
-                if need and b + 1 < len(layer):
-                    layer[b + 1] += need
-                    transfers.append(
-                        dict(instance=i, from_layer=b, to_layer=b + 1, count=need)
-                    )
-                elif need:
-                    raise PreprocessError(
-                        "sampling_failed",
-                        f"{kind} {i}: unable to fill reachable surface pool",
-                    )
-            p = np.concatenate(collected).astype(np.float32)
-            points.append(p)
-            ti = np.concatenate(collected_ids)
-            triangle_ids.append(ti)
-            normals.append(self.normals[ti])
-            instances.extend([i] * len(p))
-            coverage.append(dict(instance=i, count=len(p)))
-        p = np.concatenate(points)
-        return dict(
-            points=p,
-            normals=np.concatenate(normals),
-            triangle_ids=np.concatenate(triangle_ids).astype(np.int32),
-            source_instance=np.asarray(instances, np.int32),
-        ), dict(unresolved=unresolved, transfers=transfers, coverage=coverage)
+def _orthonormal_frame(vectors):
+    norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+    valid = norms[:, 0] > 1e-12
+    tangents = np.zeros_like(vectors)
+    tangents[valid] = vectors[valid] / norms[valid]
+    tangents[~valid] = np.array([0.0, 0.0, 1.0])
+    ref = np.zeros_like(tangents)
+    use_z = np.abs(tangents[:, 2]) < 0.9
+    ref[use_z, 2] = 1.0
+    ref[~use_z, 0] = 1.0
+    e1 = np.cross(tangents, ref)
+    e1 /= np.maximum(np.linalg.norm(e1, axis=1, keepdims=True), 1e-12)
+    e2 = np.cross(tangents, e1)
+    return e1, e2, valid
 
-    @staticmethod
-    def empty():
-        return dict(
-            points=np.empty((0, 3), np.float32),
-            normals=np.empty((0, 3), np.float32),
-            source_instance=np.empty(0, np.int32),
-            triangle_ids=np.empty(0, np.int32),
-        )
+
+def _unit_directions(rng, count):
+    d = rng.normal(size=(count, 3))
+    norms = np.linalg.norm(d, axis=1, keepdims=True)
+    zero = norms[:, 0] < 1e-12
+    if zero.any():
+        d[zero] = np.array([1.0, 0.0, 0.0])
+        norms[zero] = 1.0
+    return d / norms
+
+
+def _near_surface_normal_strata(band_max):
+    if band_max > 0.025:
+        return [0.0, 0.002, 0.01, 0.025, float(band_max)], [0.25, 0.35, 0.25, 0.15]
+    return [0.0, 0.002, 0.01, float(band_max)], [0.3, 0.4, 0.3]
 
 
 def spatial_pool(base, count, oracle, cfg, seed):
-    """Perturb one surface source, preserving accepted mode/layer quotas and owner."""
+    """Perturb surface points with 4-layer normal offsets (80%) and 4-scale isotropic noise (20%)."""
+    if not count:
+        return dict(
+            points=np.empty((0, 3), np.float32),
+            _sdf=np.empty(0, np.float64),
+            source_instance=np.empty(0, np.int32),
+            sample_type=np.empty(0, np.uint8),
+            perturbation_mode=np.empty(0, np.uint8),
+            perturbation_layer=np.empty(0, np.uint8),
+        )
     rng = np.random.default_rng(seed)
     chunks, values, instances, modes, layers = [], [], [], [], []
-    bounds = [0, 0.002, 0.01, cfg.band_max]
+    bounds, normal_weights = _near_surface_normal_strata(cfg.band_max)
     normal_count, isotropic_count = allocate(count, [0.8, 0.2])
     for mode, quotas in enumerate(
         (
-            allocate(int(normal_count), [0.3, 0.4, 0.3]),
+            allocate(int(normal_count), normal_weights),
             allocate(int(isotropic_count), [1, 1, 1, 1]),
         )
     ):
@@ -338,7 +190,7 @@ def spatial_pool(base, count, oracle, cfg, seed):
                 q = q.astype(np.float32)
                 inside = (np.abs(q) <= 1).all(1)
                 q, idx = q[inside], idx[inside]
-                sdf = oracle.query(q)
+                sdf = _query_sdf_batched(oracle, q)
                 good = np.abs(sdf) <= cfg.band_max
                 accepted = q[good][:remaining]
                 chunks.append(accepted)
@@ -354,7 +206,7 @@ def spatial_pool(base, count, oracle, cfg, seed):
                 )
     return dict(
         points=np.concatenate(chunks) if chunks else np.empty((0, 3), np.float32),
-        _sdf=np.concatenate(values) if values else np.empty(0),
+        _sdf=np.concatenate(values) if values else np.empty(0, np.float64),
         source_instance=np.asarray(instances, np.int32),
         sample_type=np.full(count, SPATIAL, np.uint8),
         perturbation_mode=np.asarray(modes, np.uint8),
@@ -362,28 +214,147 @@ def spatial_pool(base, count, oracle, cfg, seed):
     )
 
 
-def merge_neighborhood(surface, spatial):
-    """Surface normals/triangle IDs are meaningful only on sample_type=SURFACE."""
-    n, m = len(surface["points"]), len(spatial["points"])
+def sample_feature_3d_pool(targets, count, kind, oracle, cfg, seed):
+    """Pure 3D radial tube/ball sampling around CAD edges/vertices within |s_mesh| <= band_max."""
+    entities = targets.edges if kind == "edge" else targets.vertices
+    if not len(entities) or not count:
+        return _empty_neighborhood(), dict(
+            mode="feature_3d_radial", unresolved=[], transfers=[], coverage=[]
+        )
+    if count < len(entities) * cfg.feature_min_samples:
+        raise PreprocessError(
+            "sampling_budget", f"{kind}: budget below per-instance minimum"
+        )
+    rng = np.random.default_rng(seed)
+    if kind == "edge":
+        weights = []
+        edge_segments = []
+        spacing = cfg.feature_curve_spacing
+        for i, edge in enumerate(entities):
+            length = GCPnts_AbscissaPoint.Length(
+                BRepAdaptor_Curve(edge), cfg.solver_tolerance
+            )
+            closed = bool(targets.topology["edges"][i]["closed"])
+            n_seeds = max(4, int(np.ceil(length / spacing)) + 1)
+            seeds = curve_points(edge, n_seeds, cfg.solver_tolerance, closed=closed)
+            if closed:
+                starts = seeds
+                ends = np.roll(seeds, -1, axis=0)
+            else:
+                starts = seeds[:-1]
+                ends = seeds[1:]
+            deltas = ends - starts
+            e1, e2, valid = _orthonormal_frame(deltas)
+            edge_segments.append((starts, deltas, e1, e2, valid))
+            weights.append(np.sqrt(length))
+    else:
+        weights = np.ones(len(entities), np.float64)
+        edge_segments = None
+
+    quotas = (
+        allocate(count - len(entities) * cfg.feature_min_samples, weights)
+        + cfg.feature_min_samples
+    )
+    slots = []
+    for i, quota in enumerate(quotas):
+        layer_quotas = allocate(int(quota), cfg.feature_weights)
+        for layer, need in enumerate(layer_quotas):
+            if int(need) > 0:
+                slots.append([i, layer, int(need)])
+
+    collected_pts = []
+    collected_sdf = []
+    collected_inst = []
+    collected_layer = []
+    coverage_counts = np.zeros(len(entities), np.int64)
+    radii = cfg.feature_radii
+
+    for round_idx in range(cfg.sampling_rounds):
+        active = [slot for slot in slots if slot[2] > 0]
+        if not active:
+            break
+        oversample = 1.15 if round_idx == 0 else 2.0
+        candidate_chunks = []
+        spans = []
+        offset = 0
+        for slot in active:
+            inst, layer, need = slot
+            draw_n = max(int(np.ceil(need * oversample)), need + 8)
+            low = float(radii[layer - 1]) if layer > 0 else 0.0
+            high = float(radii[layer])
+            r = rng.uniform(low, high, draw_n)
+            if kind == "edge":
+                starts, deltas, e1, e2, valid = edge_segments[inst]
+                seg_idx = rng.integers(len(starts), size=draw_n)
+                u = rng.random(draw_n)
+                origins = starts[seg_idx] + u[:, None] * deltas[seg_idx]
+                theta = rng.uniform(0.0, 2.0 * np.pi, draw_n)
+                dirs = (
+                    np.cos(theta)[:, None] * e1[seg_idx]
+                    + np.sin(theta)[:, None] * e2[seg_idx]
+                )
+                bad_dir = ~valid[seg_idx]
+                if bad_dir.any():
+                    dirs[bad_dir] = _unit_directions(rng, int(bad_dir.sum()))
+                q = (origins + r[:, None] * dirs).astype(np.float32)
+            else:
+                origin = np.asarray(entities[inst], np.float64)
+                dirs = _unit_directions(rng, draw_n)
+                q = (origin[None, :] + r[:, None] * dirs).astype(np.float32)
+            candidate_chunks.append(q)
+            spans.append((slot, offset, offset + draw_n))
+            offset += draw_n
+
+        all_q = np.concatenate(candidate_chunks, axis=0)
+        inside = (np.abs(all_q) <= 1).all(1)
+        good = np.zeros(len(all_q), dtype=bool)
+        all_sdf = np.full(len(all_q), np.nan, dtype=np.float64)
+        if inside.any():
+            sdf_in = _query_sdf_batched(oracle, all_q[inside])
+            all_sdf[inside] = sdf_in
+            good[inside] = np.abs(sdf_in) <= cfg.band_max
+
+        for slot, start, end in spans:
+            inst, layer, need = slot
+            local_good = np.flatnonzero(good[start:end])
+            if not len(local_good):
+                continue
+            pick = start + local_good[:need]
+            taken = len(pick)
+            collected_pts.append(all_q[pick])
+            collected_sdf.append(all_sdf[pick])
+            collected_inst.append(np.full(taken, inst, np.int32))
+            collected_layer.append(np.full(taken, layer, np.uint8))
+            coverage_counts[inst] += taken
+            slot[2] -= taken
+
+    unfilled = [slot for slot in slots if slot[2] > 0]
+    if unfilled:
+        inst, layer, missing = unfilled[0]
+        raise PreprocessError(
+            "sampling_failed",
+            f"{kind} {inst}: 3D radial quota unfilled (layer={layer}, missing={missing})",
+        )
+
+    points = np.concatenate(collected_pts, axis=0)
+    total = len(points)
     return dict(
-        points=np.concatenate((surface["points"], spatial["points"])),
-        normals=np.concatenate((surface["normals"], np.zeros((m, 3), np.float32))),
-        triangle_ids=np.concatenate(
-            (surface["triangle_ids"], np.full(m, -1, np.int32))
-        ),
-        source_instance=np.concatenate(
-            (surface["source_instance"], spatial["source_instance"])
-        ),
-        sample_type=np.concatenate(
-            (np.full(n, SURFACE, np.uint8), spatial["sample_type"])
-        ),
-        perturbation_mode=np.concatenate(
-            (np.full(n, 255, np.uint8), spatial["perturbation_mode"])
-        ),
-        perturbation_layer=np.concatenate(
-            (np.full(n, 255, np.uint8), spatial["perturbation_layer"])
-        ),
-        _sdf=np.concatenate((np.full(n, np.nan), spatial["_sdf"])),
+        points=points,
+        normals=np.zeros((total, 3), np.float32),
+        triangle_ids=np.full(total, -1, np.int32),
+        source_instance=np.concatenate(collected_inst, axis=0),
+        sample_type=np.full(total, SPATIAL, np.uint8),
+        perturbation_mode=np.full(total, FEATURE_3D_PERTURBATION_MODE, np.uint8),
+        perturbation_layer=np.concatenate(collected_layer, axis=0),
+        _sdf=np.concatenate(collected_sdf, axis=0),
+    ), dict(
+        mode="feature_3d_radial",
+        unresolved=[],
+        transfers=[],
+        coverage=[
+            dict(instance=i, count=int(coverage_counts[i]))
+            for i in range(len(entities))
+        ],
     )
 
 
@@ -397,27 +368,16 @@ def sample_pools(targets, mesh, oracle, cfg, seed, counts=None, geometry_count=N
         cfg.geometry_surface_pool_count if geometry_count is None else geometry_count
     )
     s, n, e, v = map(int, counts)
-    fs = FeatureSurfaceSampler(mesh, cfg)
-    feature_bases, feature_spatial_counts, reachability = [], [], {}
-    for count, ratio, kind in zip(
-        (e, v), cfg.feature_surface_ratios, ("edge", "vertex")
+    feature_counts = []
+    for count, present in (
+        (e, bool(targets.edges)),
+        (v, bool(len(targets.vertices))),
     ):
-        surface_count, spatial_count = map(int, allocate(count, [ratio, 1 - ratio]))
-        # A feature spatial sample needs a surface seed, even for a space-only quota.
-        present = bool(targets.edges) if kind == "edge" else bool(len(targets.vertices))
-        base, reach = fs.pool(
-            targets,
-            max(surface_count, int(spatial_count > 0)) if present else 0,
-            kind,
-            seed_for(seed, kind),
-        )
-        reachability[kind] = reach
-        if not len(base["points"]):
-            s += surface_count
-            n += spatial_count
-            spatial_count = 0
-        feature_bases.append((base, surface_count))
-        feature_spatial_counts.append(spatial_count)
+        if present:
+            feature_counts.append(count)
+        else:
+            n += count
+            feature_counts.append(0)
     if s < geometry_count:
         raise ValueError("Surface pool smaller than geometry prefix")
     p, normal, base_ids = base_surface(mesh, geometry_count, cfg.seed, return_ids=True)
@@ -436,12 +396,11 @@ def sample_pools(targets, mesh, oracle, cfg, seed, counts=None, geometry_count=N
     )
     npool = spatial_pool(sp, n, oracle, cfg, seed_for(seed, "near"))
     features = []
-    for (base, surface_count), count, kind in zip(
-        feature_bases, feature_spatial_counts, ("edge", "vertex")
-    ):
-        spatial = spatial_pool(
-            base, count, oracle, cfg, seed_for(seed, kind, "spatial")
+    reachability = {}
+    for count, kind in zip(feature_counts, ("edge", "vertex")):
+        pool, reach = sample_feature_3d_pool(
+            targets, count, kind, oracle, cfg, seed_for(seed, kind, "spatial3d")
         )
-        surface = {key: value[:surface_count] for key, value in base.items()}
-        features.append(merge_neighborhood(surface, spatial))
+        features.append(pool)
+        reachability[kind] = reach
     return dict(zip(POOLS, [sp, npool, *features])), reachability

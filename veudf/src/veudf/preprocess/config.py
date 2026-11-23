@@ -16,6 +16,7 @@ class Config:
     geometry_tolerance: float = 2e-5
     label_tolerance: float = 1e-4
     tie_tolerance: float = 1e-7
+    unify_same_domain: bool = True
     # Dataset eligibility (whole model rejected on any violation)
     min_faces: int = 2
     max_faces: int = 100
@@ -25,13 +26,13 @@ class Config:
     volume_pool_count: int = 0
     evaluation_volume_count: int = 4096
     feature_curve_spacing: float = 0.002
-    geometry_surface_pool_count: int = 393216
-    pool_count: int = 1572864
-    pool_weights: tuple = (0.25, 0.175, 0.355, 0.22)
-    feature_surface_ratios: tuple = (393216 / 558367, 235930 / 346030)
-    band_max: float = 0.03
-    feature_radii: tuple = (0.002, 0.005, 0.01, 0.02, 0.03)
-    feature_weights: tuple = (0.2, 0.3, 0.3, 0.2, 0.0)
+    geometry_surface_pool_count: int = 262144
+    pool_count: int = 1179648
+    pool_weights: tuple = (2 / 9, 1 / 3, 5 / 18, 1 / 6)
+    feature_surface_ratios: tuple = (0.0, 0.0)
+    band_max: float = 0.04
+    feature_radii: tuple = (0.002, 0.005, 0.01, 0.02, 0.04)
+    feature_weights: tuple = (0.20, 0.28, 0.27, 0.17, 0.08)
     feature_min_samples: int = 32
     sampling_rounds: int = 32
     evaluation_points_per_pool: int = 4096
@@ -64,10 +65,14 @@ class Config:
             elif f.type is float or f.type == "float":
                 if (
                     not isinstance(value, (int, float))
+                    or isinstance(value, bool)
                     or not math.isfinite(value)
                     or value <= 0
                 ):
                     raise ValueError(f"{f.name} must be finite and positive")
+            elif f.type is bool or f.type == "bool":
+                if type(value) is not bool:
+                    raise ValueError(f"{f.name} must be a boolean")
         if self.bounding >= 1:
             raise ValueError("bounding must leave padding inside [-1,1]^3")
         if self.bounding + self.band_max >= 1:
@@ -81,9 +86,11 @@ class Config:
         if self.udf_truncation <= max(self.feature_radii) + self.label_tolerance:
             raise ValueError("UDF truncation must cover all feature sampling layers")
         if len(self.feature_surface_ratios) != 2 or any(
-            not math.isfinite(r) or not 0 <= r <= 1 for r in self.feature_surface_ratios
+            not math.isfinite(r) or r != 0 for r in self.feature_surface_ratios
         ):
-            raise ValueError("feature_surface_ratios must contain two ratios in [0,1]")
+            raise ValueError(
+                "feature_surface_ratios must be (0.0, 0.0) for pure 3D feature pools"
+            )
         from veudf.utils import allocate
 
         if (

@@ -2,7 +2,7 @@
 
 import numpy as np
 
-SCHEMA = "edge_vertex_neighborhood_pools_v3"
+SCHEMA = "edge_vertex_neighborhood_pools_v4"
 CHANNELS = ("s_mesh", "dE", "dV")
 POOLS = ("surface", "near_surface", "edge_neighborhood", "vertex_neighborhood")
 ZERO_POOLS = ("edge_zero", "vertex_zero")

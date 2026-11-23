@@ -14,10 +14,11 @@ import unittest
 
 import networkx as nx
 import numpy as np
-from OCC.Core.BRepAlgoAPI import BRepAlgoAPI_Cut
+from OCC.Core.BRepAlgoAPI import BRepAlgoAPI_Cut, BRepAlgoAPI_Fuse
 from OCC.Core.BRepBuilderAPI import BRepBuilderAPI_MakeEdge
 from OCC.Core.BRepPrimAPI import (
     BRepPrimAPI_MakeBox,
+    BRepPrimAPI_MakeCone,
     BRepPrimAPI_MakeCylinder,
     BRepPrimAPI_MakeTorus,
 )
@@ -58,7 +59,12 @@ from veudf.preprocess.distance import FeatureUDFOracle
 from veudf.preprocess.filtering import audit_shape, check_metrics, face_edge_counts
 from veudf.preprocess.manifest import load_manifest, scan_directory
 from veudf.preprocess.pipeline import build_asset, verify_asset
-from veudf.preprocess.sampling import sample_edges, sample_pools, zero_pools
+from veudf.preprocess.sampling import (
+    FEATURE_3D_PERTURBATION_MODE,
+    sample_edges,
+    sample_pools,
+    zero_pools,
+)
 from veudf.utils import allocate, array_hash
 from veudf.geometry.sampling import base_surface
 from veudf.geometry.mesh import MeshSDFOracle
@@ -68,7 +74,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SMALL = replace(
     Config(),
     geometry_surface_pool_count=1024,
-    pool_count=4096,
+    pool_count=4608,
     feature_min_samples=2,
     evaluation_points_per_pool=64,
     reference_checks=12,
@@ -359,11 +365,19 @@ class SamplingTests(unittest.TestCase):
     def test_profile_counts_and_strict_old_keys(self):
         cfg = load_config(ROOT / "configs/surface_pools.json")
         np.testing.assert_array_equal(
-            allocate(cfg.pool_count, cfg.pool_weights), [393216, 275251, 558367, 346030]
+            allocate(cfg.pool_count, cfg.pool_weights), [262144, 393216, 327680, 196608]
         )
-        self.assertEqual(cfg.geometry_surface_pool_count, 393216)
+        self.assertEqual(cfg.geometry_surface_pool_count, 262144)
+        self.assertEqual(cfg.band_max, 0.04)
+        self.assertEqual(cfg.udf_truncation, 0.05)
+        self.assertEqual(cfg.feature_radii, (0.002, 0.005, 0.01, 0.02, 0.04))
+        self.assertEqual(cfg.feature_weights, (0.2, 0.28, 0.27, 0.17, 0.08))
+        self.assertEqual(cfg.feature_surface_ratios, (0.0, 0.0))
+        self.assertTrue(cfg.unify_same_domain)
         with self.assertRaises(ValueError):
             load_config(overrides={"query_count": 100})
+        with self.assertRaises(ValueError):
+            load_config(overrides={"feature_surface_ratios": [0.5, 0.5]})
 
     def test_default_edge_zero_budget_and_all_vertices(self):
         targets = collect_targets(BRepPrimAPI_MakeBox(1, 1, 1).Shape(), SMALL)
@@ -419,7 +433,7 @@ class PipelineTests(unittest.TestCase):
                 ),
                 atol=1e-6,
             )
-            if name == "near_surface":
+            if name in ("near_surface", "edge_neighborhood", "vertex_neighborhood"):
                 self.assertLessEqual(np.abs(f[:, 0]).max(), SMALL.band_max + 1e-7)
         train = np.load(out / "pools/surface/points.npy")
         evaluation = np.load(out / "evaluation/surface/points.npy")
@@ -432,25 +446,29 @@ class PipelineTests(unittest.TestCase):
         )
         self.assertEqual(meta["channel_names"], ["s_mesh", "dE", "dV"])
         counts = allocate(SMALL.pool_count, SMALL.pool_weights)
-        for name, total, ratio in zip(
-            POOLS[1:], counts[1:], [0, *SMALL.feature_surface_ratios]
-        ):
+        for name, total in zip(POOLS[1:], counts[1:]):
             bank = out / "pools" / name
             types = np.load(bank / "sample_type.npy")
-            spatial_count = (
-                int(total)
-                if name == "near_surface"
-                else int(allocate(int(total), [ratio, 1 - ratio])[1])
-            )
-            self.assertEqual(int((types == SPATIAL).sum()), spatial_count)
-            mode = np.load(bank / "perturbation_mode.npy")[types == SPATIAL]
-            layer = np.load(bank / "perturbation_layer.npy")[types == SPATIAL]
-            nc, ic = allocate(spatial_count, [0.8, 0.2])
-            for m, quotas in enumerate(
-                (allocate(int(nc), [0.3, 0.4, 0.3]), allocate(int(ic), [1, 1, 1, 1]))
-            ):
-                for k, need in enumerate(quotas):
-                    self.assertEqual(int(((mode == m) & (layer == k)).sum()), int(need))
+            self.assertEqual(int((types == SPATIAL).sum()), int(total))
+            mode = np.load(bank / "perturbation_mode.npy")
+            layer = np.load(bank / "perturbation_layer.npy")
+            if name == "near_surface":
+                nc, ic = allocate(int(total), [0.8, 0.2])
+                for m, quotas in enumerate(
+                    (
+                        allocate(int(nc), [0.25, 0.35, 0.25, 0.15]),
+                        allocate(int(ic), [1, 1, 1, 1]),
+                    )
+                ):
+                    for k, need in enumerate(quotas):
+                        self.assertEqual(
+                            int(((mode == m) & (layer == k)).sum()), int(need)
+                        )
+            else:
+                self.assertTrue(np.all(mode == FEATURE_3D_PERTURBATION_MODE))
+                self.assertTrue(
+                    np.all((layer >= 0) & (layer < len(SMALL.feature_radii)))
+                )
             owners = np.load(bank / "source_instance.npy")
             self.assertTrue(
                 np.all(owners == -1) if name == "near_surface" else np.all(owners >= 0)
@@ -512,6 +530,102 @@ class PipelineTests(unittest.TestCase):
             build_asset(record(step, "torus"), self.root / "torus", SMALL)
         self.assertEqual(caught.exception.code, "face_count_below_min")
         self.assertEqual(list(self.root.glob("*torus*")), [step])
+
+    def test_full_cone_degenerate_apex_excluded(self):
+        step = write_step(self.root, "full_cone", BRepPrimAPI_MakeCone(1.0, 0.0, 2.0).Shape())
+        out = self.root / "full_cone_asset"
+        result = build_asset(record(step, "full_cone"), out, SMALL)
+        verify_asset(out, result["hashes"])
+        meta = json.loads((out / "meta.json").read_text())
+        topo = json.loads((out / "topology.json").read_text())
+        self.assertEqual(meta["target_counts"], {"faces": 2, "edges": 1, "vertices": 0})
+        self.assertTrue(
+            any(e["reason"] == "degenerate_excluded" for e in topo["excluded_edges"])
+        )
+        self.assertTrue(
+            any(v["reason"] == "no_retained_edge" for v in topo["excluded_vertices"])
+        )
+        self.assertEqual(len(np.load(out / "pools/vertex_neighborhood/fields.npy")), 0)
+        self.assertEqual(len(np.load(out / "pools/vertex_zero/points.npy")), 0)
+        self.assertEqual(
+            sum(v["count"] for k, v in meta["statistics"].items() if k in POOLS),
+            SMALL.pool_count,
+        )
+
+    def test_tilted_half_cone_retains_apex_vertex(self):
+        axis = gp_Ax2(gp_Pnt(0, 0, 0), gp_Dir(1, 1, 2), gp_Dir(1, -1, 0))
+        half_cone = BRepPrimAPI_MakeCone(axis, 1.0, 0.0, 2.0, np.pi).Shape()
+        step = write_step(self.root, "tilted_half_cone", half_cone)
+        out = self.root / "tilted_half_cone_asset"
+        result = build_asset(record(step, "tilted_half_cone"), out, SMALL)
+        verify_asset(out, result["hashes"])
+        meta = json.loads((out / "meta.json").read_text())
+        topo = json.loads((out / "topology.json").read_text())
+        self.assertEqual(meta["target_counts"], {"faces": 3, "edges": 4, "vertices": 3})
+        self.assertTrue(
+            any(e["reason"] == "degenerate_excluded" for e in topo["excluded_edges"])
+        )
+        self.assertEqual(len(np.load(out / "pools/vertex_zero/points.npy")), 3)
+        self.assertGreater(len(np.load(out / "pools/vertex_neighborhood/fields.npy")), 0)
+
+    def test_unify_same_domain_merges_two_half_cones(self):
+        # Two fused half-frustums (truncated cones): UnifySameDomain merges 6 -> 3 faces.
+        f1 = BRepPrimAPI_MakeCone(
+            gp_Ax2(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1), gp_Dir(1, 0, 0)),
+            1.0,
+            0.25,
+            2.0,
+            np.pi,
+        ).Shape()
+        f2 = BRepPrimAPI_MakeCone(
+            gp_Ax2(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1), gp_Dir(-1, 0, 0)),
+            1.0,
+            0.25,
+            2.0,
+            np.pi,
+        ).Shape()
+        step = write_step(self.root, "two_half_frustums", BRepAlgoAPI_Fuse(f1, f2).Shape())
+        out_unified = self.root / "unified_frustum"
+        result = build_asset(record(step, "unified_frustum"), out_unified, SMALL)
+        verify_asset(out_unified, result["hashes"])
+        meta = json.loads((out_unified / "meta.json").read_text())
+        unify = meta["normalization"]["unify_same_domain"]
+        self.assertTrue(unify["applied"])
+        self.assertEqual(unify["reason"], "unified")
+        self.assertEqual(unify["faces_before"], 6)
+        self.assertEqual(unify["faces_after"], 3)
+        self.assertEqual(meta["target_counts"], {"faces": 3, "edges": 2, "vertices": 0})
+        # Disabled flag preserves the unmerged faces.
+        solid_raw, norm_raw = read_normalized(step, replace(SMALL, unify_same_domain=False))
+        self.assertFalse(norm_raw["unify_same_domain"]["applied"])
+        self.assertEqual(len(collect_targets(solid_raw, SMALL).faces), 6)
+        # Two fused sharp half-cones (with degenerate apex edges): when OCC's
+        # UnifySameDomain fails on split coaxial cones, reject strictly rather
+        # than leaking artificial meridian seams into E/V supervision.
+        c1 = BRepPrimAPI_MakeCone(
+            gp_Ax2(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1), gp_Dir(1, 0, 0)),
+            1.0,
+            0.0,
+            2.0,
+            np.pi,
+        ).Shape()
+        c2 = BRepPrimAPI_MakeCone(
+            gp_Ax2(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1), gp_Dir(-1, 0, 0)),
+            1.0,
+            0.0,
+            2.0,
+            np.pi,
+        ).Shape()
+        sharp_step = write_step(
+            self.root, "two_sharp_half_cones", BRepAlgoAPI_Fuse(c1, c2).Shape()
+        )
+        with self.assertRaises(PreprocessError) as caught:
+            build_asset(
+                record(sharp_step, "sharp_half_cones"),
+                self.root / "sharp_half_cones_asset",
+                SMALL,
+            )
+        self.assertEqual(caught.exception.code, "unmerged_same_domain_seam")
 
     def test_driver_builds_dedups_publishes_and_resumes(self):
         steps = dict(

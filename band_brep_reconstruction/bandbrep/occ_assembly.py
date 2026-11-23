@@ -300,6 +300,82 @@ def make_spherical_cap(patch,surface,instance,curves,edges,ranges,cfg,builder):
     if n@patch.normal<0:face=topods.Face(face.Reversed())
     return face
 
+def make_conical_cap(patch,surface,instance,curves,edges,ranges,cfg,builder):
+    """Single closed base loop (circular or oblique-cut) + generator seam + degenerate apex."""
+    from OCC.Core.TopoDS import TopoDS_Edge
+    from OCC.Core.TopAbs import TopAbs_FORWARD,TopAbs_REVERSED
+    face=TopoDS_Face();builder.MakeFace(face,surface,cfg.cad_tolerance*.1)
+    d=patch.data
+    v_apex=float(-d['radius']/np.sin(d['angle']))
+    record=curves[instance.id];first,last=ranges[instance.id]
+    uv0=patch.uv(record.evaluate(np.linspace(0,1,129)),ordered=True)
+    positive=bool(uv0[-1,0]>uv0[0,0])
+    u_anchor_raw=float(uv0[0,0] if positive else uv0[-1,0])
+    period_shift=2*np.pi*np.floor(u_anchor_raw/(2*np.pi))
+    u0=u_anchor_raw-period_shift
+    def align_base(uv):
+        uv=uv.copy()
+        uv[:,0]-=period_shift
+        # Anchor endpoints onto the exact [u0, u0+2*pi] period seam.
+        if positive:
+            uv[0,0]=u0;uv[-1,0]=u0+2*np.pi
+        else:
+            uv[-1,0]=u0;uv[0,0]=u0+2*np.pi
+        v_end=0.5*(uv[0,1]+uv[-1,1])
+        uv[0,1]=v_end;uv[-1,1]=v_end
+        return uv
+    pc_base,uv_base,_=make_pcurve(patch,record,first,last,cfg.boundary_tolerance,align_base)
+    ring=edges[instance.id]
+    builder.UpdateEdge(ring,pc_base,face,cfg.boundary_tolerance);builder.Range(ring,face,first,last)
+    v_anchor=float(uv_base[0,1])
+    apex_above=v_apex>v_anchor
+    low,high=(v_anchor,v_apex) if apex_above else (v_apex,v_anchor)
+    anchor=topexp.FirstVertex(ring);builder.UpdateVertex(anchor,cfg.boundary_tolerance)
+    pole=BRepBuilderAPI_MakeVertex(surface.Value(u0,v_apex)).Vertex()
+    geom=Geom_BSplineCurve(
+        array1(TColgp_Array1OfPnt,[surface.Value(u0,low),surface.Value(u0,high)]),
+        array1(TColStd_Array1OfReal,[low,high]),
+        array1(TColStd_Array1OfInteger,[2,2]),1)
+    make=BRepBuilderAPI_MakeEdge(geom,anchor if apex_above else pole,pole if apex_above else anchor,low,high)
+    require(make.IsDone(),'seam_creation_failed','Cannot construct conical-cap seam',face=patch.id,error=int(make.Error()))
+    seam=make.Edge()
+    def line(u):
+        return Geom2d_BSplineCurve(
+            array1(TColgp_Array1OfPnt2d,[gp_Pnt2d(u,low),gp_Pnt2d(u,high)]),
+            array1(TColStd_Array1OfReal,[low,high]),
+            array1(TColStd_Array1OfInteger,[2,2]),1)
+    builder.UpdateEdge(seam,line(u0+2*np.pi),line(u0),face,cfg.boundary_tolerance)
+    builder.Range(seam,face,low,high)
+    degen=TopoDS_Edge();builder.MakeEdge(degen);builder.Degenerated(degen,True)
+    builder.Add(degen,pole.Oriented(TopAbs_FORWARD));builder.Add(degen,pole.Oriented(TopAbs_REVERSED))
+    pc_degen=Geom2d_BSplineCurve(
+        array1(TColgp_Array1OfPnt2d,[gp_Pnt2d(u0,v_apex),gp_Pnt2d(u0+2*np.pi,v_apex)]),
+        array1(TColStd_Array1OfReal,[0.,2*np.pi]),
+        array1(TColStd_Array1OfInteger,[2,2]),1)
+    builder.UpdateEdge(degen,pc_degen,face,cfg.boundary_tolerance);builder.Range(degen,face,0.,2*np.pi)
+    plus=ring if positive else ring.Reversed();minus=plus.Reversed()
+    wire=TopoDS_Wire();builder.MakeWire(wire)
+    uses=(plus,seam,degen.Reversed(),seam.Reversed()) if apex_above else (degen,seam,minus,seam.Reversed())
+    for use in uses:builder.Add(wire,use)
+    wire.Closed(True);builder.Add(face,wire)
+    q=patch.data['orientation_point'][None];uv=patch.uv(q);base=patch.evaluate(uv);h=1e-5
+    n=np.cross((patch.evaluate(uv+[h,0])-base)[0],(patch.evaluate(uv+[0,h])-base)[0])
+    if n@patch.normal<0:face=topods.Face(face.Reversed())
+    return face
+
+def _pole_v_level(patch,uv_point,tol):
+    if patch.kind=='cone':
+        v_apex=float(-patch.data['radius']/np.sin(patch.data['angle']))
+        return v_apex if abs(float(uv_point[1])-v_apex)<=max(1e-3,tol*2) else None
+    if patch.kind=='sphere':
+        for vp in (np.pi/2,-np.pi/2):
+            if abs(float(uv_point[1])-vp)<=1e-2:return float(vp)
+    return None
+
+def _wraps_u_once(patch,curve):
+    uv=patch.uv(curve.evaluate(np.linspace(0.,1.,129)),ordered=True)
+    return abs(abs(float(uv[-1,0]-uv[0,0]))-2*np.pi)<.15
+
 def unique(shape,kind):
     index=TopTools_IndexedMapOfShape();topexp.MapShapes(shape,kind,index)
     return [index.FindKey(i) for i in range(1,index.Size()+1)]
@@ -335,8 +411,8 @@ def assemble_brep(graph,curves,patches,cfg,out):
     ring_kinds=PERIODIC_KINDS
     def ring_face(fid,patch):
         incident=[e for e in graph.edges if fid in e.faces]
-        ok=patch.kind in ring_kinds and (len(incident)==2 or (patch.kind=='sphere' and len(incident)==1))
-        return ok and all(e.closed and curves[e.id].kind=='circle' for e in incident)
+        ok=patch.kind in ring_kinds and (len(incident)==2 or (patch.kind in ('sphere','cone') and len(incident)==1))
+        return ok and all(e.closed and curves[e.id].kind=='circle' and _wraps_u_once(patch,curves[e.id]) for e in incident)
     def wrap_anchor(fid):
         # A loop of open edges is cut in UV at its first use's start vertex.
         for cycle in graph.cycles.get(fid,[]):
@@ -385,11 +461,11 @@ def assemble_brep(graph,curves,patches,cfg,out):
     for fid,patch in patches.items():
         if patch.kind not in PERIODIC_KINDS:continue
         incident=[e for e in graph.edges if fid in e.faces]
-        if not incident or any(e.closed for e in incident):continue
-        pts=np.vstack([curves[e.id].evaluate(np.linspace(0,1,257)) for e in incident])
+        if not incident or any(e.closed and _wraps_u_once(patch,curves[e.id]) for e in incident):continue
+        uv_all=np.vstack([patch.uv(curves[e.id].evaluate(np.linspace(0,1,257)),ordered=True) for e in incident])
         gaps=[]
         for dim in periodic_dims(patch.kind):
-            angle=np.sort(np.mod(patch.uv(pts)[:,dim],2*np.pi))
+            angle=np.sort(np.mod(uv_all[:,dim],2*np.pi))
             gap=np.diff(np.r_[angle,angle[0]+2*np.pi]);i=int(gap.argmax());gaps.append((float(gap[i]),float(angle[i]+gap[i]/2)))
         if min(g for g,_ in gaps)<.05:continue
         rotation=gaps[0][1]-np.pi
@@ -448,10 +524,10 @@ def assemble_brep(graph,curves,patches,cfg,out):
         else:make=BRepBuilderAPI_MakeEdge(curve,first,last)
         require(make.IsDone(),'cad_edge_failed','OCC rejected shared edge',edge=eid)
         edges[eid]=make.Edge();ranges[eid]=(first,last)
-    faces={};surfaces={};uv_reports={}
+    faces={};surfaces={};uv_reports={};edge_uvs={}
     for fid,patch in patches.items():
         surface=occ_surface(patch);face=TopoDS_Face();builder.MakeFace(face,surface,cfg.cad_tolerance*.1)
-        faces[fid]=face;surfaces[fid]=surface;uv_reports[fid]=[]
+        faces[fid]=face;surfaces[fid]=surface;uv_reports[fid]=[];edge_uvs[fid]={}
         for instance in graph.edges:
             if fid not in instance.faces:continue
             if fid in seamless:adjust=lambda uv,s=seamless[fid],k=patch.kind:shift_periods(uv,s,k)
@@ -460,6 +536,7 @@ def assemble_brep(graph,curves,patches,cfg,out):
             pcurve,uv,error=make_pcurve(patch,curves[instance.id],*ranges[instance.id],cfg.boundary_tolerance,adjust)
             builder.UpdateEdge(edges[instance.id],pcurve,face,cfg.boundary_tolerance)
             builder.Range(edges[instance.id],face,*ranges[instance.id]);uv_reports[fid].append({'edge':instance.id,'error':error})
+            edge_uvs[fid][instance.id]=uv
         incident=[e for e in graph.edges if fid in e.faces]
         if not incident:
             require(patch.kind in ('sphere','torus'),'unbounded_face','Boundary-free face requires a closed support surface',face=fid)
@@ -468,9 +545,20 @@ def assemble_brep(graph,curves,patches,cfg,out):
             q=np.asarray(patch.data['orientation_point'])[None];uv=patch.uv(q);h=1e-5;base=patch.evaluate(uv)
             n=np.cross((patch.evaluate(uv+[h,0])-base)[0],(patch.evaluate(uv+[0,h])-base)[0])
             if n@patch.normal<0:face=topods.Face(face.Reversed());faces[fid]=face
-        explicit_periodic=patch.kind in ring_kinds and (len(incident)==2 or (patch.kind=='sphere' and len(incident)==1)) and all(e.closed and curves[e.id].kind=='circle' for e in incident)
+        single_cone_cap=patch.kind=='cone' and len(incident)==1 and incident[0].closed and _wraps_u_once(patch,curves[incident[0].id])
+        single_sphere_cap=patch.kind=='sphere' and len(incident)==1 and incident[0].closed and curves[incident[0].id].kind=='circle' and _wraps_u_once(patch,curves[incident[0].id])
+        explicit_periodic=(
+            single_cone_cap
+            or single_sphere_cap
+            or (patch.kind in ring_kinds and len(incident)==2 and all(e.closed and curves[e.id].kind=='circle' and _wraps_u_once(patch,curves[e.id]) for e in incident))
+        )
         if explicit_periodic:
-            face=make_spherical_cap(patch,surface,incident[0],curves,edges,ranges,cfg,builder) if len(incident)==1 else make_periodic_annulus(patch,surface,incident,curves,edges,ranges,cfg,builder)
+            if single_cone_cap:
+                face=make_conical_cap(patch,surface,incident[0],curves,edges,ranges,cfg,builder)
+            elif single_sphere_cap:
+                face=make_spherical_cap(patch,surface,incident[0],curves,edges,ranges,cfg,builder)
+            else:
+                face=make_periodic_annulus(patch,surface,incident,curves,edges,ranges,cfg,builder)
             faces[fid]=face
             mapping['postprocess_edges'].append({'face':fid,'kind':'explicit_periodic_seam'})
         elif fid in band:
@@ -478,10 +566,35 @@ def assemble_brep(graph,curves,patches,cfg,out):
             faces[fid]=face;explicit_periodic=True
             mapping['postprocess_edges'].append({'face':fid,'kind':'explicit_band_seam'})
         for cycle in ([] if explicit_periodic else graph.cycles[fid]):
+            from OCC.Core.TopoDS import TopoDS_Edge
+            from OCC.Core.TopAbs import TopAbs_FORWARD,TopAbs_REVERSED
             wire=TopoDS_Wire();builder.MakeWire(wire)
-            for use in cycle:
+            for idx_u,use in enumerate(cycle):
                 edge=edges[use.edge] if use.forward else topods.Edge(edges[use.edge].Reversed())
                 builder.Add(wire,edge)
+                if patch.kind in ('cone','sphere') and len(cycle)>=2:
+                    nxt=cycle[(idx_u+1)%len(cycle)]
+                    uv_cur=edge_uvs[fid][use.edge]
+                    uv_nxt=edge_uvs[fid][nxt.edge]
+                    uv_end=uv_cur[-1] if use.forward else uv_cur[0]
+                    uv_start=uv_nxt[0] if nxt.forward else uv_nxt[-1]
+                    vp_end=_pole_v_level(patch,uv_end,cfg.boundary_tolerance)
+                    vp_start=_pole_v_level(patch,uv_start,cfg.boundary_tolerance)
+                    if vp_end is not None and vp_start==vp_end and abs(float(uv_end[0])-float(uv_start[0]))>1e-5:
+                        e_cur=graph.edges[use.edge]
+                        if e_cur.vertices:
+                            pole_v=occ_vertices[e_cur.vertices[1 if use.forward else 0]]
+                            degen=TopoDS_Edge();builder.MakeEdge(degen);builder.Degenerated(degen,True)
+                            builder.Add(degen,pole_v.Oriented(TopAbs_FORWARD));builder.Add(degen,pole_v.Oriented(TopAbs_REVERSED))
+                            u_a,u_b=float(uv_end[0]),float(uv_start[0])
+                            du=abs(u_b-u_a)
+                            pc=Geom2d_BSplineCurve(
+                                array1(TColgp_Array1OfPnt2d,[gp_Pnt2d(u_a,vp_end),gp_Pnt2d(u_b,vp_end)]),
+                                array1(TColStd_Array1OfReal,[0.,du]),
+                                array1(TColStd_Array1OfInteger,[2,2]),1)
+                            builder.UpdateEdge(degen,pc,face,cfg.boundary_tolerance);builder.Range(degen,face,0.,du)
+                            builder.Add(wire,degen)
+                            mapping['postprocess_edges'].append({'face':fid,'kind':'degenerate_pole_edge'})
             wire.Closed(True);builder.Add(face,wire)
         # Numeric patch may have parameter normal opposite to oriented mesh normal.
         # The cycles already use orientation of the physical face; invert face plus
@@ -512,6 +625,7 @@ def assemble_brep(graph,curves,patches,cfg,out):
         sfe=ShapeFix_Edge()
         for x in unique(faces[fid],TopAbs_EDGE):
             te=topods.Edge(x)
+            if BRep_Tool.Degenerated(te):continue
             breplib.SameParameter(te,cfg.boundary_tolerance,True)
             if not BRep_Tool.SameParameter(te):
                 sfe.FixSameParameter(te,faces[fid],cfg.cad_tolerance)

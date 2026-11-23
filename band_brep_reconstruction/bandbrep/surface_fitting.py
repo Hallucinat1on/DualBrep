@@ -74,16 +74,30 @@ class FacePatch:
         z = q @ d['axis']
         x = q @ d['x']
         y = q @ d['y']
+        rho = np.hypot(x, y)
         u = np.arctan2(y, x)
         if ordered:
+            if self.kind in ('cone', 'sphere'):
+                pole = rho < 1e-7
+                if pole.any() and not pole.all():
+                    valid_idx = np.flatnonzero(~pole)
+                    for idx in np.flatnonzero(pole):
+                        pos = int(np.searchsorted(valid_idx, idx))
+                        if pos == 0:
+                            u[idx] = u[valid_idx[0]]
+                        elif pos >= len(valid_idx):
+                            u[idx] = u[valid_idx[-1]]
+                        else:
+                            left, right = valid_idx[pos - 1], valid_idx[pos]
+                            u[idx] = u[left] if (idx - left) <= (right - idx) else u[right]
             u = np.unwrap(u)
         if self.kind == 'cylinder':
             return np.column_stack((u, z))
         if self.kind == 'sphere':
-            return np.column_stack((u, np.arctan2(z, np.sqrt(x * x + y * y))))
+            return np.column_stack((u, np.arctan2(z, rho)))
         if self.kind == 'cone':
             return np.column_stack((u, z / np.cos(d['angle'])))
-        v = np.arctan2(z, np.sqrt(x * x + y * y) - d['major'])
+        v = np.arctan2(z, rho - d['major'])
         return np.column_stack((u, np.unwrap(v) if ordered else v))
 
     def evaluate(self, uv):
@@ -597,6 +611,32 @@ def initialize_face_surfaces(mesh, face_labels, graph, curves, provider, cfg):
         if accepted:
             patch = next((v for _, v, _ in accepted if v.kind == 'plane'), min(accepted, key=lambda z: z[0])[1])
             patch.id = face
+            # Align sphere axis to circular boundary normal so single/double ring
+            # boundaries sit on constant latitude v = const (supports tilted caps).
+            if patch.kind == 'sphere' and len(related) in (1, 2) and all(c.kind == 'circle' for c in related):
+                if len(related) == 2:
+                    ax = np.asarray(related[1].data['center'], float) - np.asarray(related[0].data['center'], float)
+                    if np.linalg.norm(ax) <= 1e-6:
+                        ax = np.asarray(related[0].data['normal'], float)
+                else:
+                    ax = np.asarray(related[0].data['normal'], float)
+                if np.linalg.norm(ax) > 1e-8:
+                    ax = ax / np.linalg.norm(ax)
+                    sx, sy = frame(ax)
+                    patch.data['axis'] = ax
+                    patch.data['x'] = sx
+                    patch.data['y'] = sy
+            elif patch.kind == 'sphere' and len(related) > 0:
+                # Place non-circular local sphere patches near the equator (v ~ 0)
+                # so neither pole falls inside the patch interior.
+                radial = p_core.mean(axis=0) - np.asarray(patch.data['origin'], float)
+                if np.linalg.norm(radial) > 1e-6:
+                    radial /= np.linalg.norm(radial)
+                    ax, _ = frame(radial)
+                    sx, sy = frame(ax)
+                    patch.data['axis'] = ax
+                    patch.data['x'] = sx
+                    patch.data['y'] = sy
         else:
             require(len(boundary) > 0, 'surface_initialization_failed',
                     'Unbounded nonanalytic face needs explicit UV initialization')

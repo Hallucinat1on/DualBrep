@@ -626,6 +626,31 @@ class PipelineTests(unittest.TestCase):
                 SMALL,
             )
         self.assertEqual(caught.exception.code, "unmerged_same_domain_seam")
+        # Even if OCC's UnifySameDomain returns the split shape unchanged without
+        # throwing, the post-check must still reject residual coaxial cone seams.
+        from unittest.mock import patch
+        import veudf.preprocess.cad as cad_mod
+
+        class _NoOpUnifier:
+            def __init__(self, shape, *args, **kwargs):
+                self._shape = shape
+
+            def SetLinearTolerance(self, tol):
+                pass
+
+            def SetAngularTolerance(self, tol):
+                pass
+
+            def Build(self):
+                pass
+
+            def Shape(self):
+                return self._shape
+
+        with patch.object(cad_mod, "ShapeUpgrade_UnifySameDomain", _NoOpUnifier):
+            with self.assertRaises(PreprocessError) as caught_noop:
+                read_normalized(sharp_step, SMALL)
+            self.assertEqual(caught_noop.exception.code, "unmerged_same_domain_seam")
 
     def test_driver_builds_dedups_publishes_and_resumes(self):
         steps = dict(

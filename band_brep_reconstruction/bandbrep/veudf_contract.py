@@ -2,10 +2,10 @@
 from .schemas import require
 
 
-def require_veudf_v3():
+def require_veudf_v4():
     from veudf.schema import SCHEMA
 
-    expected = "edge_vertex_neighborhood_pools_v3"
+    expected = "edge_vertex_neighborhood_pools_v4"
     require(
         SCHEMA == expected,
         "veudf_schema_mismatch",

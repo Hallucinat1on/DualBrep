@@ -170,6 +170,14 @@ def _unify_same_domain(solid, normalized_volume, cfg):
     )
     if not cfg.unify_same_domain:
         return solid, normalized_volume, meta
+    def _finish(result_solid, result_volume):
+        if _has_same_domain_cone_or_sphere_seam(result_solid, cfg):
+            raise PreprocessError(
+                "unmerged_same_domain_seam",
+                f"Residual split coaxial cone/sphere seam after unify_same_domain ({meta['reason']})",
+            )
+        return result_solid, result_volume, meta
+
     try:
         # Copy first: OCC's ShapeUpgrade_UnifySameDomain can mutate input topology
         # in-place before raising an error on degenerate-apex faces.
@@ -181,53 +189,48 @@ def _unify_same_domain(solid, normalized_volume, cfg):
         unified = unifier.Shape()
     except Exception as exc:
         meta["reason"] = f"build_failed:{type(exc).__name__}"
-        if _has_same_domain_cone_or_sphere_seam(solid, cfg):
-            raise PreprocessError(
-                "unmerged_same_domain_seam",
-                f"ShapeUpgrade_UnifySameDomain failed on split coaxial cone/sphere faces ({type(exc).__name__})",
-            ) from exc
-        return solid, normalized_volume, meta
+        return _finish(solid, normalized_volume)
     if unified is None or unified.IsNull():
         meta["reason"] = "null_shape"
-        return solid, normalized_volume, meta
+        return _finish(solid, normalized_volume)
     _, usolids = unique_shapes(unified, TopAbs_SOLID)
     if len(usolids) != 1:
         meta["reason"] = f"solid_count:{len(usolids)}"
-        return solid, normalized_volume, meta
+        return _finish(solid, normalized_volume)
     candidate = topods.Solid(usolids[0])
     for kind in (TopAbs_FACE, TopAbs_EDGE, TopAbs_VERTEX):
         solid_index, _ = unique_shapes(candidate, kind)
         _, all_items = unique_shapes(unified, kind)
         if any(solid_index.FindIndex(item) == 0 for item in all_items):
             meta["reason"] = "loose_topology"
-            return solid, normalized_volume, meta
+            return _finish(solid, normalized_volume)
     if not BRepCheck_Analyzer(candidate).IsValid():
         meta["reason"] = "invalid_solid"
-        return solid, normalized_volume, meta
+        return _finish(solid, normalized_volume)
     props = GProp_GProps()
     brepgprop.VolumeProperties(candidate, props)
     unified_volume = float(props.Mass())
     if not np.isfinite(unified_volume) or unified_volume <= 0:
         meta["reason"] = "invalid_volume"
-        return solid, normalized_volume, meta
+        return _finish(solid, normalized_volume)
     rel_change = abs(unified_volume - normalized_volume) / max(
         abs(normalized_volume), 1e-12
     )
     meta["relative_volume_change"] = float(rel_change)
     if rel_change >= 1e-5:
         meta["reason"] = "volume_drift"
-        return solid, normalized_volume, meta
+        return _finish(solid, normalized_volume)
     if _max_cad_tolerance(candidate) > cfg.geometry_tolerance:
         meta["reason"] = "tolerance_exceeded"
-        return solid, normalized_volume, meta
+        return _finish(solid, normalized_volume)
     try:
         ulo, uhi = bounds(candidate)
     except PreprocessError:
         meta["reason"] = "invalid_bbox"
-        return solid, normalized_volume, meta
+        return _finish(solid, normalized_volume)
     if np.max(np.abs(np.r_[ulo, uhi])) >= 1:
         meta["reason"] = "bbox_out_of_domain"
-        return solid, normalized_volume, meta
+        return _finish(solid, normalized_volume)
     faces_after = len(unique_shapes(candidate, TopAbs_FACE)[1])
     edges_after = len(unique_shapes(candidate, TopAbs_EDGE)[1])
     meta.update(
@@ -240,7 +243,7 @@ def _unify_same_domain(solid, normalized_volume, cfg):
             else "unchanged"
         ),
     )
-    return candidate, unified_volume, meta
+    return _finish(candidate, unified_volume)
 
 
 def read_normalized(path, cfg):

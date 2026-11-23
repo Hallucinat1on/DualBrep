@@ -2,7 +2,7 @@
 import hashlib
 import json
 from pathlib import Path
-from .veudf_contract import require_veudf_v3
+from .veudf_contract import require_veudf_v4
 
 def file_hash(path):return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
@@ -12,7 +12,7 @@ def code_hash():
     return h.hexdigest()
 
 def cache_key(mesh,udf,cfg):
-    dataset_schema = require_veudf_v3()
+    dataset_schema = require_veudf_v4()
     from veudf.geometry.sampling import mesh_hash
     from veudf.schema import GEOMETRY_VERSION
     import veudf.geometry.mesh as mesh_module

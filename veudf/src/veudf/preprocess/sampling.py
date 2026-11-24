@@ -108,7 +108,6 @@ def _query_sdf_batched(oracle, points):
 def _empty_neighborhood():
     return dict(
         points=np.empty((0, 3), np.float32),
-        normals=np.empty((0, 3), np.float32),
         triangle_ids=np.empty(0, np.int32),
         source_instance=np.empty(0, np.int32),
         sample_type=np.empty(0, np.uint8),
@@ -340,7 +339,6 @@ def sample_feature_3d_pool(targets, count, kind, oracle, cfg, seed):
     total = len(points)
     return dict(
         points=points,
-        normals=np.zeros((total, 3), np.float32),
         triangle_ids=np.full(total, -1, np.int32),
         source_instance=np.concatenate(collected_inst, axis=0),
         sample_type=np.full(total, SPATIAL, np.uint8),

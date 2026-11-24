@@ -139,7 +139,10 @@ $$
 
 #### （1）网络与生成框架兼容性
 - **`EdgeVertexShapeVAE` 编码端与潜空间完全不变**：几何潜码 `z_g` 与场潜码 `z_f`（`[4096, 64]`）维度不变，现有 `FieldDiT` 流匹配模型（`z_g -> z_f`）与 `encode_field` 无需任何结构修改。
-- **仅修改 Decoder 输出头**：将 `EdgeVertexShapeVAE` 解码器最后的线性投影头从 `2` 通道扩展为 `8` 通道（或拆分为标量 `2` 通道头 + 轻量级残差 MLP 输出 `uE(3)` / `uV(3)`，避免标量与向量在最后一层特征竞争）。
+- **仅修改 Decoder 末端输出头（与 M4 无冲突解耦）**：
+  - 标量通道 `[dE, dV]` 保持现有 `field_query_decoder.output_proj(2) + M4 [edge_head(1), vertex_head(1)]` 不变（兼容 Run 9 权重热启动）；
+  - 向量通道 `[uE(3), uV(3)]` 在 M4 `LocalKnnQueryDecoder` 中新增独立 `edge_vec_head(3)` 与 `vertex_vec_head(3)` 直接输出（归一化至 `u / 0.05`），避免全局低频头在无监督远场区产生漂移；
+  - 截断区（`d >= 0.05`）磁盘占位 `(0, 0, 0)` 在训练期严格 Mask 为 0 梯度自由外推，彻底避免 `0.05` 处人工断崖跳变。
 
 #### （2）数据准备成本（几乎零额外 OCC 开销）
 - **`uV` 零预处理重跑**：

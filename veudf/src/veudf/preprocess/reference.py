@@ -81,6 +81,7 @@ def empty_result(count):
     """Empty target set: placeholder distance, no nearest entity."""
     return dict(
         distance=np.full(count, EMPTY_DISTANCE, dtype=np.float64),
+        offset=np.zeros((count, 3), dtype=np.float64),
         nearest_id=np.full(count, -1, dtype=np.int32),
         tie=np.zeros(count, dtype=bool),
     )
@@ -114,6 +115,7 @@ class ReferenceEdgeOracle:
         for row, point in enumerate(points):
             query_vertex = BRepBuilderAPI_MakeVertex(gp_Pnt(*point)).Vertex()
             best, nearest, ambiguous = float("inf"), -1, False
+            best_offset = np.zeros(3, dtype=np.float64)
             candidates, heap = [], []
             if self.exhaustive:
                 candidates = list(range(len(self.edges)))
@@ -155,9 +157,11 @@ class ReferenceEdgeOracle:
                     is_tie = best - distance <= self.cfg.tie_tolerance
                     ambiguous = (ambiguous and is_tie) or is_tie or local_tie
                     best, nearest = distance, index
+                    best_offset = projected - point
                 elif distance - best <= self.cfg.tie_tolerance:
                     ambiguous = True
             result["distance"][row] = best
+            result["offset"][row] = best_offset
             result["nearest_id"][row] = nearest
             result["tie"][row] = ambiguous
         return result
@@ -180,6 +184,7 @@ class ReferenceVertexOracle:
             result["tie"] = distance[:, 1] - distance[:, 0] <= self.cfg.tie_tolerance
             distance, index = distance[:, 0], index[:, 0]
         result["distance"] = distance
+        result["offset"] = self.vertices[index] - points
         result["nearest_id"] = index.astype(np.int32)
         return result
 

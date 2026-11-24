@@ -410,33 +410,53 @@ class PipelineTests(unittest.TestCase):
         result = build_asset(record(p, "cube"), out, cfg)
         verify_asset(out, result["hashes"])
         oracle, _, _, _ = read_geometry(out / "condition")
+        solid, _ = read_normalized(p, SMALL)
+        targets = collect_targets(solid, SMALL)
+        ref_edge = ReferenceEdgeOracle(targets.edges, SMALL)
+        ref_vertex = ReferenceVertexOracle(targets.vertices, SMALL)
         for name in ALL_POOLS:
             bank = out / "pools" / name
             x = np.load(bank / "points.npy")
             f = np.load(bank / "fields.npy")
-            np.testing.assert_allclose(f[:, 0], oracle.query(x), atol=1e-7)
-            solid, _ = read_normalized(p, SMALL)
-            targets = collect_targets(solid, SMALL)
-            np.testing.assert_allclose(
-                f[:, 1],
-                np.minimum(
-                    ReferenceEdgeOracle(targets.edges, SMALL).query(x)["distance"],
-                    SMALL.udf_truncation,
-                ),
-                atol=1e-6,
-            )
-            np.testing.assert_allclose(
-                f[:, 2],
-                np.minimum(
-                    ReferenceVertexOracle(targets.vertices, SMALL).query(x)["distance"],
-                    SMALL.udf_truncation,
-                ),
-                atol=1e-6,
-            )
+            er = ref_edge.query(x)
+            vr = ref_vertex.query(x)
+            if name == "surface":
+                self.assertEqual(f.shape, (len(x), 2))
+                self.assertFalse((bank / "flags.npy").exists())
+                np.testing.assert_allclose(
+                    f[:, 0], np.minimum(er["distance"], SMALL.udf_truncation), atol=1e-6
+                )
+                np.testing.assert_allclose(
+                    f[:, 1], np.minimum(vr["distance"], SMALL.udf_truncation), atol=1e-6
+                )
+            else:
+                self.assertEqual(f.shape, (len(x), 9))
+                self.assertTrue((bank / "flags.npy").exists())
+                np.testing.assert_allclose(f[:, 0], oracle.query(x), atol=1e-7)
+                np.testing.assert_allclose(
+                    f[:, 1], np.minimum(er["distance"], SMALL.udf_truncation), atol=1e-6
+                )
+                np.testing.assert_allclose(
+                    f[:, 2], np.minimum(vr["distance"], SMALL.udf_truncation), atol=1e-6
+                )
+                sat = np.load(bank / "saturated.npy")
+                flags = np.load(bank / "flags.npy")
+                for c, ref in enumerate((er, vr)):
+                    vec = f[:, 3 + 3 * c : 6 + 3 * c]
+                    self.assertTrue(np.all(vec[sat[:, c]] == 0))
+                    valid = ~sat[:, c] & ((flags & (1 << c)) == 0) & (~ref["tie"])
+                    if valid.any():
+                        np.testing.assert_allclose(
+                            np.linalg.norm(vec[valid], axis=1), f[valid, c + 1], atol=1e-4
+                        )
+                        np.testing.assert_allclose(
+                            vec[valid], ref["offset"][valid], atol=1e-4
+                        )
             if name in ("near_surface", "edge_neighborhood", "vertex_neighborhood"):
                 self.assertLessEqual(np.abs(f[:, 0]).max(), SMALL.band_max + 1e-7)
         train = np.load(out / "pools/surface/points.npy")
         evaluation = np.load(out / "evaluation/surface/points.npy")
+        self.assertEqual(np.load(out / "evaluation/surface/fields.npy").shape, (len(evaluation), 9))
         seen = {tuple(x) for x in train}
         self.assertFalse(any(tuple(x) in seen for x in evaluation))
         meta = json.loads((out / "meta.json").read_text())
@@ -444,7 +464,11 @@ class PipelineTests(unittest.TestCase):
             sum(v["count"] for k, v in meta["statistics"].items() if k in POOLS),
             SMALL.pool_count,
         )
-        self.assertEqual(meta["channel_names"], ["s_mesh", "dE", "dV"])
+        self.assertEqual(
+            meta["channel_names"],
+            ["s_mesh", "dE", "dV", "uEx", "uEy", "uEz", "uVx", "uVy", "uVz"],
+        )
+        self.assertEqual(meta["encoder_channel_names"], ["dE", "dV"])
         counts = allocate(SMALL.pool_count, SMALL.pool_weights)
         for name, total in zip(POOLS[1:], counts[1:]):
             bank = out / "pools" / name
@@ -489,15 +513,15 @@ class PipelineTests(unittest.TestCase):
         from veudf.geometry.sampling import face_normals
 
         fn = face_normals(oracle.vertices, oracle.faces)
-        for name in ("surface", "edge_neighborhood", "vertex_neighborhood"):
-            bank = out / "pools" / name
-            ids = np.load(bank / "triangle_ids.npy")
-            types = np.load(bank / "sample_type.npy")
-            normals = np.load(bank / "normals.npy")
-            np.testing.assert_array_equal(
-                normals[types == SURFACE], fn[ids[types == SURFACE]]
-            )
-            self.assertTrue(np.all(normals[types == SPATIAL] == 0))
+        bank = out / "pools" / "surface"
+        ids = np.load(bank / "triangle_ids.npy")
+        types = np.load(bank / "sample_type.npy")
+        normals = np.load(bank / "normals.npy")
+        np.testing.assert_array_equal(
+            normals[types == SURFACE], fn[ids[types == SURFACE]]
+        )
+        for name in ("edge_neighborhood", "vertex_neighborhood"):
+            self.assertFalse((out / "pools" / name / "normals.npy").exists())
 
     def test_cylinder_empty_vertices_and_geometry_stability(self):
         p = write_step(self.root, "cyl", BRepPrimAPI_MakeCylinder(1, 2).Shape())
@@ -508,13 +532,16 @@ class PipelineTests(unittest.TestCase):
             bank = self.root / name / "pools/vertex_neighborhood/fields.npy"
             self.assertEqual(len(np.load(bank)), 0)
             f = np.load(self.root / name / "pools/surface/fields.npy")
-            self.assertTrue(np.all(f[:, 2] == np.float32(cfg.udf_truncation)))
+            self.assertEqual(f.shape[1], 2)
+            self.assertTrue(np.all(f[:, 1] == np.float32(cfg.udf_truncation)))
             ids = np.load(self.root / name / "pools/surface/nearest_ids.npy")
             sat = np.load(self.root / name / "pools/surface/saturated.npy")
             self.assertTrue(np.all(ids[:, 1] == -1))
             self.assertFalse(sat[:, 1].any())
             evaluation = np.load(self.root / name / "evaluation/surface/fields.npy")
+            self.assertEqual(evaluation.shape[1], 9)
             self.assertTrue(np.all(evaluation[:, 2] == np.float32(EMPTY_DISTANCE)))
+            self.assertTrue(np.all(evaluation[:, 6:9] == 0))
         for array in ["points", "normals"]:
             a = np.load(self.root / "base/pools/surface" / f"{array}.npy")[
                 : SMALL.geometry_surface_pool_count

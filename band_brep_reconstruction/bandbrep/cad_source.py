@@ -3,7 +3,7 @@ import numpy as np
 
 from .field_provider import CallableUDFProvider
 from .schemas import SurfaceMesh
-from .veudf_contract import require_veudf_v4
+from .veudf_contract import require_veudf_v5
 
 
 class ExactUDF:
@@ -47,7 +47,7 @@ class ExactUDF:
 
 
 def load_cad_source(path, fingerprint):
-    require_veudf_v4()
+    require_veudf_v5()
 
     from veudf.preprocess.config import Config
     from veudf.preprocess.cad import read_normalized, collect_targets, triangulate

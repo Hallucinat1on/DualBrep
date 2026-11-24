@@ -3,8 +3,9 @@
 设计稿，2026-11-22。本文档确立项目的最终主方案（**路线 1：干净双分支 VAE + 几何条件线框主 Flow + 边优先 B-Rep 后处理**，暂不引入前端几何纠偏模块）。针对 3D 生成模型网格与扫描点云等初始表示**缺乏 B-Rep 顶点与边意识**、传统“先面分割再靠面求交”路线重建成功率低的痛点，借助预训练几何先验与生成式 Flow 在近表面三维空间直接预测连续 `E-UDF + V-UDF`，**先独立于输入网格拓扑恢复完整三维线框，再引导面划分、曲面拟合与严格 OCC 装配**，同时完成数据同域规范化、三维监督池瘦身与退化边全链路支持。
 
 关联文档：
+- **v5 8D 数据集与全链路改造规范（现行）**：[Dataset.md](Dataset.md) · [VectorFieldTarget.md](VectorFieldTarget.md)
 - 边优先重建与优化方案：[Post1121.md](Post1121.md)
-- 数据生产规范：[Pre.md](Pre.md)
+- 历史 STEP 到点池参考：[Pre.md](Pre.md)
 - 上游 ShapeVAE 与零集编码：[Hunyuan3D VAE.md](../../Hunyuan3D/docs/VAE.md) · [VAEOptimizationPlan.md](../../Hunyuan3D/docs/VAEOptimizationPlan.md)
 
 ---

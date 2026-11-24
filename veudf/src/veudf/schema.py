@@ -2,9 +2,11 @@
 
 import numpy as np
 
-SCHEMA = "edge_vertex_neighborhood_pools_v4"
-CHANNELS = ("s_mesh", "dE", "dV")
+SCHEMA = "edge_vertex_neighborhood_pools_v5"
+ENCODER_CHANNELS = ("dE", "dV")
+CHANNELS = ("s_mesh", "dE", "dV", "uEx", "uEy", "uEz", "uVx", "uVy", "uVz")
 POOLS = ("surface", "near_surface", "edge_neighborhood", "vertex_neighborhood")
+DECODER_POOLS = ("near_surface", "edge_neighborhood", "vertex_neighborhood")
 ZERO_POOLS = ("edge_zero", "vertex_zero")
 ALL_POOLS = (*POOLS, *ZERO_POOLS)
 SOURCES = {name: i for i, name in enumerate(ALL_POOLS)}

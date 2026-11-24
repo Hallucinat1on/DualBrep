@@ -47,6 +47,7 @@
 - **饱和与缺失通道**：
   - `saturated[:, 0] == True`（或 `has_edges == False`）时：`dE == 0.05`、`nearest_ids[:, 0] == -1`、`uE == (0, 0, 0)`、`e_tie == False`；
   - `saturated[:, 1] == True`（或 `has_vertices == False`）时：`dV == 0.05`、`nearest_ids[:, 1] == -1`、`uV == (0, 0, 0)`、`v_tie == False`。
+  - **防跳变原则**：磁盘在饱和区存入 `(0, 0, 0)` 仅作为防 `NaN/Inf` 占位符，**绝不参与 Loss 监督**；训练期仅在 `d < d_vec_max`（如 `0.035 < 0.05`）内施加向量监督，`d >= d_vec_max` 保持 0 梯度自由外推，彻底避免边界断崖跳变。
 - **切迹（`tie`）点**：保留 `reduce_min` 胜出特征的位移值（不清零，便于离线质检校验 `||u|| == d`），同时置位 `flags`（bit 0 = `e_tie`，bit 1 = `v_tie`），由训练 Loss 掩码屏蔽。
 - **零集点**：`zero_mask[:, 0]` 处满足 `dE <= label_tolerance` 且 `||uE|| <= label_tolerance`；`zero_mask[:, 1]` 处同理。
 
@@ -132,9 +133,11 @@
 - **YAML 配置（`hy3dshape/configs/*.yaml`）**：
   - `field_query_ratios` 更新为 5 池比例：`[0.35, 0.375, 0.25, 0.02, 0.005]`；
   - 新增向量场损失超参：`vec_truncation: 0.035`、`vec_loss_weight: 1.0`、`vec_consistency_weight: 0.05`、`vec_smooth_l1_beta: 0.003`。
-- **模型架构**：
+- **模型架构（与 M4 无冲突的标量/向量解耦设计）**：
   - `geo_encoder`、`encode_field`、`Q00Zero`、潜空间 `z_g / z_f ([4096, 64])`、`FieldDiT` **零结构修改**；
-  - 仅将 `EdgeVertexShapeVAE` Decoder 输出头从 `2` 通道扩展为 `8` 通道（前 2 通道输出标量 `[dE, dV]`，后 6 通道输出归一化位移 `[uE / 0.05, uV / 0.05]`）。
+  - **标量通道 `[dE, dV]`（2 维）**：完全保留现有 `field_query_decoder.output_proj(2) + M4 [edge_head(1), vertex_head(1)]` 结构不变，支持直接从既有 Run 9 权重热启动；
+  - **向量通道 `[uE(3), uV(3)]`（6 维）**：在 M4 `LocalKnnQueryDecoder` 中新增两个独立轻量 MLP 头（`edge_vec_head(3)`、`vertex_vec_head(3)`），直接基于含 3D 有向相对坐标与 `S0` 局部几何 patch 的局部特征 `feat` 输出归一化位移 `[uE / 0.05, uV / 0.05]`（不走全局低频 `output_proj`，避免远场无监督区噪声污染）；未启用 M4 时回退至 `field_query_decoder.output_proj` 输出 8 维；
+  - 最终拼接输出 `[B, Nq, 8]`（`[dE, dV, uE_norm(3), uV_norm(3)]`），尺度与标量 `[0, 1]` 严格对齐。
 - **掩码损失（`losses.py`）**：
   - 保留原有 M2 标量损失作用于 `pred[:, 0:2]` vs `target[:, 0:2]`；
   - 向量掩码：

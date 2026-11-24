@@ -13,7 +13,7 @@ from veudf.preprocess.reference import make_tool, solve
 from veudf.preprocess.sampling import curve_points
 
 
-def reduce_min(result, rows, distances, instance, local_ties, tolerance):
+def reduce_min(result, rows, distances, instance, local_ties, tolerance, offsets=None):
     """Strict minima, with stable first-ID selection for exactly equal values."""
     previous = result["distance"][rows]
     known = result["nearest_id"][rows] >= 0
@@ -26,6 +26,8 @@ def reduce_min(result, rows, distances, instance, local_ties, tolerance):
     changed = rows[improved]
     result["distance"][changed] = distances[improved]
     result["nearest_id"][changed] = instance
+    if offsets is not None:
+        result["offset"][changed] = offsets[improved]
     result["tie"][rows] = ambiguity
 
 
@@ -59,6 +61,7 @@ class FeatureUDFOracle:
     def _empty(self, count):
         return dict(
             distance=np.full(count, self.radius),
+            offset=np.zeros((count, 3), dtype=np.float64),
             nearest_id=np.full(count, -1, np.int32), tie=np.zeros(count, bool),
             saturated=np.zeros(count, bool),
         )
@@ -68,6 +71,7 @@ class FeatureUDFOracle:
             saturated = result["distance"].astype(np.float32) >= np.float32(self.radius)
             result["saturated"] = saturated
             result["distance"][saturated] = self.radius
+            result["offset"][saturated] = 0.0
             result["nearest_id"][saturated] = -1
             result["tie"][saturated] = False
         return result
@@ -93,7 +97,9 @@ class FeatureUDFOracle:
             delta = np.maximum(np.maximum(lo - q[rows], q[rows] - hi), 0)
             lower = np.einsum("ij,ij->i", delta, delta)
             rows = rows[lower <= (edge["distance"][rows] + slack) ** 2]
-            distances, local_ties = np.empty(len(rows)), np.zeros(len(rows), bool)
+            distances = np.empty(len(rows), dtype=np.float64)
+            offsets = np.empty((len(rows), 3), dtype=np.float64)
+            local_ties = np.zeros(len(rows), bool)
             for j, row in enumerate(rows):
                 if query_vertices[row] is None:
                     query_vertices[row] = BRepBuilderAPI_MakeVertex(gp_Pnt(*q[row])).Vertex()
@@ -101,17 +107,20 @@ class FeatureUDFOracle:
                 self.calls += 1
                 if abs(np.linalg.norm(q[row] - projected) - distance) > self.cfg.label_tolerance:
                     raise PreprocessError("distance_solver_failed", "Closest-point residual")
-                distances[j], local_ties[j] = distance, local_tie
+                distances[j] = distance
+                offsets[j] = projected - q[row]
+                local_ties[j] = local_tie
             if index in self.circles:
                 center, normal = self.circles[index]
                 displacement = q[rows] - center
                 radial = displacement - (displacement @ normal)[:, None] * normal
                 local_ties |= np.linalg.norm(radial, axis=1) <= self.cfg.solver_tolerance
-            reduce_min(edge, rows, distances, index, local_ties, self.cfg.tie_tolerance)
+            reduce_min(edge, rows, distances, index, local_ties, self.cfg.tie_tolerance, offsets)
         for index, point in enumerate(self.targets.vertices):
             rows = np.asarray(tree.query_ball_point(
                 point, self.radius + slack, eps=0, workers=1
             ), np.int64)
-            distances = np.linalg.norm(q[rows] - point, axis=1)
-            reduce_min(vertex, rows, distances, index, False, self.cfg.tie_tolerance)
+            offsets = point - q[rows]
+            distances = np.linalg.norm(offsets, axis=1)
+            reduce_min(vertex, rows, distances, index, False, self.cfg.tie_tolerance, offsets)
         return self._finish(edge, bool(self.targets.edges)), self._finish(vertex, bool(len(self.targets.vertices)))

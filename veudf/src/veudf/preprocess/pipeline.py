@@ -10,7 +10,14 @@ import tempfile
 import time
 import numpy as np
 from scipy.spatial import cKDTree
-from veudf.schema import SCHEMA, CHANNELS, EMPTY_DISTANCE, GEOMETRY_VERSION, SURFACE
+from veudf.schema import (
+    SCHEMA,
+    CHANNELS,
+    ENCODER_CHANNELS,
+    EMPTY_DISTANCE,
+    GEOMETRY_VERSION,
+    SURFACE,
+)
 from veudf.utils import array_hash, file_hash, seed_for
 from veudf.geometry.sampling import mesh_hash
 from veudf import __version__
@@ -76,21 +83,28 @@ def quantiles(values):
     )
 
 
-def label_pool(directory, pool, oracle, targets, cfg, feature, reference=None):
+def label_pool(
+    directory, pool, oracle, targets, cfg, feature, reference=None, encoder_only=False
+):
     directory.mkdir(parents=True)
     cached_sdf = pool.pop("_sdf", None)
     for key, value in pool.items():
         np.save(directory / f"{key}.npy", value, allow_pickle=False)
     x = pool["points"]
     n = len(x)
+    n_channels = len(ENCODER_CHANNELS) if encoder_only else len(CHANNELS)
     values = np.lib.format.open_memmap(
-        directory / "fields.npy", mode="w+", dtype=np.float32, shape=(n, 3)
+        directory / "fields.npy", mode="w+", dtype=np.float32, shape=(n, n_channels)
     )
     nearest = np.lib.format.open_memmap(
         directory / "nearest_ids.npy", mode="w+", dtype=np.int32, shape=(n, 2)
     )
-    flags = np.lib.format.open_memmap(
-        directory / "flags.npy", mode="w+", dtype=np.uint8, shape=(n,)
+    flags = (
+        np.zeros(n, dtype=np.uint8)
+        if encoder_only
+        else np.lib.format.open_memmap(
+            directory / "flags.npy", mode="w+", dtype=np.uint8, shape=(n,)
+        )
     )
     saturated = np.lib.format.open_memmap(
         directory / "saturated.npy", mode="w+", dtype=bool, shape=(n, 2)
@@ -109,16 +123,21 @@ def label_pool(directory, pool, oracle, targets, cfg, feature, reference=None):
             saturated[start : start + len(q)] = False
         elapsed["udf"] += time.monotonic() - t
         t = time.monotonic()
-        if cached_sdf is None:
-            sdf = oracle.query(q)
+        if encoder_only:
+            values[start : start + len(q)] = np.column_stack(
+                (e["distance"], v["distance"])
+            )
         else:
-            sdf = cached_sdf[start : start + len(q)].copy()
-            missing = ~np.isfinite(sdf)
-            if missing.any():
-                sdf[missing] = oracle.query(q[missing])
-        values[start : start + len(q)] = np.column_stack(
-            (sdf, e["distance"], v["distance"])
-        )
+            if cached_sdf is None:
+                sdf = oracle.query(q)
+            else:
+                sdf = cached_sdf[start : start + len(q)].copy()
+                missing = ~np.isfinite(sdf)
+                if missing.any():
+                    sdf[missing] = oracle.query(q[missing])
+            values[start : start + len(q)] = np.column_stack(
+                (sdf, e["distance"], v["distance"], e["offset"], v["offset"])
+            )
         nearest[start : start + len(q)] = np.column_stack(
             (e["nearest_id"], v["nearest_id"])
         )
@@ -126,12 +145,32 @@ def label_pool(directory, pool, oracle, targets, cfg, feature, reference=None):
             v["tie"].astype(np.uint8) << 1
         )
         elapsed["sdf"] += time.monotonic() - t
-    if n and (not np.isfinite(values).all() or np.any(values[:, 1:] < 0)):
+    dist_slice = slice(0, 2) if encoder_only else slice(1, 3)
+    if n and (not np.isfinite(values).all() or np.any(values[:, dist_slice] < 0)):
         raise PreprocessError("quality_failed", "Invalid field labels")
     empty_distance = cfg.udf_truncation if reference is None else EMPTY_DISTANCE
     for c, present in enumerate([bool(targets.edges), bool(len(targets.vertices))]):
-        if not present and np.any(values[:, c + 1] != np.float32(empty_distance)):
+        col = c if encoder_only else c + 1
+        if not present and np.any(values[:, col] != np.float32(empty_distance)):
             raise PreprocessError("quality_failed", "Invalid empty channel")
+        if not encoder_only:
+            vec = values[:, 3 + 3 * c : 6 + 3 * c]
+            if not present:
+                if np.any(vec != 0):
+                    raise PreprocessError("quality_failed", "Invalid empty offset channel")
+            else:
+                sat_c = saturated[:, c]
+                if np.any(vec[sat_c] != 0):
+                    raise PreprocessError("quality_failed", "Saturated offset is nonzero")
+                valid_c = ~sat_c & (nearest[:, c] >= 0)
+                if valid_c.any():
+                    norm_err = np.max(
+                        np.abs(np.linalg.norm(vec[valid_c], axis=1) - values[valid_c, col])
+                    )
+                    if norm_err > cfg.label_tolerance:
+                        raise PreprocessError(
+                            "quality_failed", "Offset norm disagrees with UDF"
+                        )
     if directory.name in ("edge_neighborhood", "vertex_neighborhood") and n:
         c = 1 if directory.name == "edge_neighborhood" else 2
         surface_rows = pool["sample_type"] == SURFACE
@@ -143,30 +182,49 @@ def label_pool(directory, pool, oracle, targets, cfg, feature, reference=None):
             raise PreprocessError(
                 "quality_failed", "Feature surface exceeds its distance bound"
             )
+    d_e_col = 0 if encoder_only else 1
+    d_v_col = 1 if encoder_only else 2
     if len(targets.vertices) and np.any(
-        values[:, 1] > values[:, 2] + cfg.label_tolerance
+        values[:, d_e_col] > values[:, d_v_col] + cfg.label_tolerance
     ):
         raise PreprocessError("quality_failed", "dE > dV")
-    if (
-        "zero_mask" in pool
-        and n
-        and np.any(values[:, 1:][pool["zero_mask"]] > cfg.label_tolerance)
-    ):
-        raise PreprocessError("quality_failed", "CAD zero-set residual")
+    if "zero_mask" in pool and n:
+        if np.any(values[:, dist_slice][pool["zero_mask"]] > cfg.label_tolerance):
+            raise PreprocessError("quality_failed", "CAD zero-set residual")
+        if not encoder_only:
+            for c in (0, 1):
+                zm = pool["zero_mask"][:, c]
+                if zm.any():
+                    vec = values[zm, 3 + 3 * c : 6 + 3 * c]
+                    if np.any(np.linalg.norm(vec, axis=1) > cfg.label_tolerance):
+                        raise PreprocessError(
+                            "quality_failed", "CAD zero-set offset residual"
+                        )
     if "strata" not in pool:
-        channel = 2 if directory.name == "vertex_neighborhood" else 1
+        channel = (
+            d_v_col if directory.name == "vertex_neighborhood" else d_e_col
+        )
         layer = np.searchsorted(
             cfg.feature_radii, values[:, channel], side="left"
         ).astype(np.uint8)
         np.save(directory / "strata.npy", layer[:, None], allow_pickle=False)
     values.flush()
     nearest.flush()
-    flags.flush()
+    if isinstance(flags, np.memmap):
+        flags.flush()
     saturated.flush()
     rng = np.random.default_rng(seed_for(cfg.seed, "label-audit", directory.name))
     rows = rng.choice(n, min(n, cfg.reference_checks), replace=False)
     pool["_audit_xyz"] = x[rows]
-    pool["_audit_values"] = np.asarray(values[rows])
+    pool["_audit_distances"] = np.asarray(values[rows, dist_slice])
+    pool["_audit_sdf"] = (
+        np.zeros(len(rows), dtype=np.float32)
+        if encoder_only
+        else np.asarray(values[rows, 0])
+    )
+    pool["_audit_offsets"] = (
+        None if encoder_only else np.asarray(values[rows, 3:9])
+    )
     pool["_audit_ids"] = np.asarray(nearest[rows])
     pool["_audit_flags"] = np.asarray(flags[rows])
     pool["_audit_saturated"] = np.asarray(saturated[rows])
@@ -180,15 +238,16 @@ def label_pool(directory, pool, oracle, targets, cfg, feature, reference=None):
         nearest_coverage[name] = dict(
             counts=counts.tolist(), missing=np.flatnonzero(counts == 0).tolist()
         )
+    sdf_col = np.zeros(n, dtype=np.float32) if encoder_only else values[:, 0]
     return dict(
         count=n,
         sample_type_counts=np.bincount(pool["sample_type"], minlength=3).tolist(),
         timings_seconds=elapsed,
         saturated_counts=np.count_nonzero(saturated, axis=0).tolist(),
         unique_coordinates=len(np.unique(x, axis=0)),
-        mesh_abs=quantiles(np.abs(values[:, 0])),
-        positive=int((values[:, 0] > 0).sum()),
-        negative=int((values[:, 0] < 0).sum()),
+        mesh_abs=quantiles(np.abs(sdf_col)),
+        positive=int((sdf_col > 0).sum()),
+        negative=int((sdf_col < 0).sum()),
         coverage=nearest_coverage,
         perturbation_counts=(
             {
@@ -211,7 +270,7 @@ def label_pool(directory, pool, oracle, targets, cfg, feature, reference=None):
             else None
         ),
         band_counts={
-            str(h): int((np.abs(values[:, 0]) <= h).sum())
+            str(h): int((np.abs(sdf_col) <= h).sum())
             for h in sorted({0.01, 0.02, 0.03, float(cfg.band_max)})
         },
     )
@@ -219,7 +278,8 @@ def label_pool(directory, pool, oracle, targets, cfg, feature, reference=None):
 
 def audit(pools, solid, targets, cfg, truncated=True):
     q = np.concatenate([p["_audit_xyz"] for p in pools.values()])
-    values = np.concatenate([p["_audit_values"] for p in pools.values()])
+    stored_distances = np.concatenate([p["_audit_distances"] for p in pools.values()])
+    stored_sdf = np.concatenate([p["_audit_sdf"] for p in pools.values()])
     er = ReferenceEdgeOracle(targets.edges, cfg, exhaustive=True).query(q)
     e = er["distance"]
     stored_ids = np.concatenate([p["_audit_ids"] for p in pools.values()])
@@ -227,6 +287,20 @@ def audit(pools, solid, targets, cfg, truncated=True):
     stored_saturated = np.concatenate([p["_audit_saturated"] for p in pools.values()])
     vr = ReferenceVertexOracle(targets.vertices, cfg).query(q)
     v = vr["distance"]
+    has_offsets = np.concatenate(
+        [
+            np.full(len(p["_audit_xyz"]), p["_audit_offsets"] is not None, dtype=bool)
+            for p in pools.values()
+        ]
+    )
+    stored_offsets = np.concatenate(
+        [
+            p["_audit_offsets"]
+            if p["_audit_offsets"] is not None
+            else np.zeros((len(p["_audit_xyz"]), 6), dtype=np.float32)
+            for p in pools.values()
+        ]
+    )
     for c, ref in enumerate((er, vr)):
         unique = (
             ~ref["tie"] & ((stored_flags & (1 << c)) == 0) & (ref["nearest_id"] >= 0)
@@ -241,11 +315,24 @@ def audit(pools, solid, targets, cfg, truncated=True):
             raise PreprocessError(
                 "quality_failed", "Saturated points claim a nearest feature"
             )
+        vec_unique = unique & has_offsets
+        if vec_unique.any():
+            vec_err = np.max(
+                np.linalg.norm(
+                    stored_offsets[vec_unique, 3 * c : 3 * c + 3]
+                    - ref["offset"][vec_unique],
+                    axis=1,
+                )
+            )
+            if vec_err > cfg.label_tolerance + cfg.geometry_tolerance:
+                raise PreprocessError(
+                    "quality_failed", "CAD reference offset mismatch"
+                )
     reference = np.column_stack((e, v))
     expected = reference.copy()
     if truncated:
         expected = np.minimum(expected, cfg.udf_truncation)
-    err = np.max(np.abs(expected - values[:, 1:]), axis=0)
+    err = np.max(np.abs(expected - stored_distances), axis=0)
     if err.max() > cfg.label_tolerance + cfg.geometry_tolerance:
         raise PreprocessError("quality_failed", "CAD reference mismatch")
     cad_sdf = CADSDFOracle(solid, targets.faces, cfg).query(q)
@@ -261,13 +348,13 @@ def audit(pools, solid, targets, cfg, truncated=True):
         for c, present in enumerate([bool(targets.edges), bool(len(targets.vertices))]):
             if (
                 present
-                and np.max(np.abs(np.diff(values[:, c + 1])) - d)
+                and np.max(np.abs(np.diff(stored_distances[:, c])) - d)
                 > 2 * cfg.label_tolerance
             ):
                 raise PreprocessError("quality_failed", "UDF Lipschitz mismatch")
     return dict(
         reference_max_error=err.tolist(),
-        mesh_vs_cad=quantiles(np.abs(values[:, 0] - cad_sdf)),
+        mesh_vs_cad=quantiles(np.abs(stored_sdf - cad_sdf)),
     )
 
 
@@ -312,7 +399,15 @@ def build_asset(record, output, cfg):
         timings["feature_preparation"] = time.monotonic() - t
         t = time.monotonic()
         statistics = {
-            name: label_pool(temp / "pools" / name, pool, oracle, targets, cfg, feature)
+            name: label_pool(
+                temp / "pools" / name,
+                pool,
+                oracle,
+                targets,
+                cfg,
+                feature,
+                encoder_only=(name == "surface"),
+            )
             for name, pool in pools.items()
         }
         timings["training_labels"] = time.monotonic() - t
@@ -397,6 +492,7 @@ def build_asset(record, output, cfg):
         meta = dict(
             schema=SCHEMA,
             channel_names=list(CHANNELS),
+            encoder_channel_names=list(ENCODER_CHANNELS),
             package_version=__version__,
             runtime=runtime_identity(),
             asset_id=record["sample_id"],

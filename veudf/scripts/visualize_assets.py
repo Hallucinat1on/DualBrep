@@ -157,15 +157,24 @@ def export_asset(asset_dir, output, max_points, sdf_max, udf_max, scale, rng):
         points = np.load(points_path, mmap_mode="r", allow_pickle=False)
         fields = np.load(fields_path, mmap_mode="r", allow_pickle=False)
         n = len(points)
-        if fields.shape != (n, 3):
-            raise SystemExit(f"bad fields shape for {pool}: {fields.shape} vs {n}")
+        expected_cols = 2 if pool == "surface" else 9
+        if fields.shape != (n, expected_cols):
+            raise SystemExit(
+                f"bad fields shape for {pool}: {fields.shape} vs ({n}, {expected_cols})"
+            )
         take = sample_indices(n, max_points, rng)
         xyz = np.asarray(points[take], dtype=np.float32)
         values = np.asarray(fields[take], dtype=np.float32)
         summary["pools"][pool] = {"points": int(n), "exported": int(len(take))}
 
         for channel in CHANNELS:
-            raw = values[:, CHANNEL_INDEX[channel]]
+            if pool == "surface":
+                if channel == "abs_s_mesh":
+                    raw = np.zeros(len(take), dtype=np.float32)
+                else:
+                    raw = values[:, CHANNEL_INDEX[channel] - 1]
+            else:
+                raw = values[:, CHANNEL_INDEX[channel]]
             if channel == "abs_s_mesh":
                 shown = np.abs(raw)
                 maximum = sdf_max

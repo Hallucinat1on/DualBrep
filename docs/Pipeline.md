@@ -34,6 +34,7 @@
 | **BrepForge** *(SIGGRAPH 2026)* / **Stitch-A-Shape** | 离散自回归 V–E–F 序列 / 顺序缝合生成线框 → 纯边界先验填面 | ① 离散自回归受面数/序列长度与曝光偏差制约，复杂件易空间漂移；② 纯边界填面丢弃了输入表面内部几何观测；本工作为**空间锚定连续三维 E/V 场（无面数上限）+ 面核心内点联合拟合** |
 | **CLR-Wire** *(SIGGRAPH 2025)* | Attention VAE + Latent Flow Matching，定长潜空间编码 **Neural Parametric Curves** 线框 | ① **仅生成 3D 曲线线框，不构面、不装配 watertight B-Rep / STEP**；② 定长曲线槽位受复杂度上限约束，易与输入几何空间错位；本工作通过 4,096 空间锚点严格对齐并端到端出 STEP |
 | **SepicNet** *(CVPRW 2023)* / **DEF** *(SIGGRAPH 2022)* / **NerVE** / **EMAP** | 贴面主曲率/表面距离场检测 **Sharp-only 棱线**（或体素/多视图边场） | ① **仅输出散落锐边曲线或线框**，不恢复相切边、完整 V–E–F 拓扑与水密实体；② 贴面确定性检测在低曲率/平滑过渡/非拓扑网格上易断边；本工作用条件 Flow 在近表面三维带生成完整拓扑边与顶点 |
+| **SFCNet** *(CAGD 2023)* / **D-FRAME** *(IEEE TVCG)* | 离散输入点云上的**逐点判别式**位移学习 / 方向场提取（针对 Sharp-only 锐边），输出规整点云或 PWL 线框（配合 RPD 仅出多面体分面网格） | ① 局限于输入离散点与 **Sharp-only 锐边**，无法覆盖无几何折痕的 $G^1$ 相切 B-Rep 边；② 无连续三维隐式场（不能在任意 3D 坐标加密重查）与生成式 Flow 先验（不支持多义性与 Best-of-N）；③ 无显式 0D 顶点场与端到端参数化水密 STEP 装配（详见 [VectorFieldTarget.md](VectorFieldTarget.md) 第 7 节） |
 | **PRS** *(CVPR 2024)* / **SharpNet** | 粗糙/MC 网格锐边先验修复 | 输出为锐化三角网格（Remeshing），不恢复 B-Rep 拓扑与解析/NURBS 参数化 STEP |
 
 ### 1.3 与 `BrepForge` 等线框优先工作的深度差异化与必杀实验设计
@@ -48,6 +49,18 @@
 | **4. 推理分辨率与容错机制** | 离散 token 单次输出即锁死，近距边粘连或局部断环后无法在原模型内部做高分辨率局部重查 | 连续隐式场支持按需局部加密（[edge_first_graph.py:69-105](../band_brep_reconstruction/bandbrep/edge_first_graph.py#L69-L105) `_resolve_local_junctions` 按 `(h/2, r/2)` 局部二次查询）+ **Wireframe-Guided Best-of-N** 并行校验选优 | **窄倒角/近距边子集召回率** + 局部加密与 Best-of-N 的增量消融 |
 
 > **一句话学术定位锚点**：`BrepForge` 面向的是 **面向合成的离散自回归 Wireframe-to-BRep（Generative CAD Synthesis）**；本工作面向的是 **任意复杂度、无输入拓扑依赖、内外部几何全保真的空间锚定连续场 Mesh-to-CAD 逆向重建（High-Fidelity Reverse Engineering）**。
+
+### 1.4 关键设计差异：近表面三维窄带（Near-Surface 3D Band） vs. 传统贴面距离场（On-Surface）
+
+现有绝大多数基于距离场或特征场的工作（如 DEF、Point2Brep、DualBrep 表面 GVD-UDF、SFCNet、D-FRAME 等）均将场定义在**输入表面/点云本身（On-Surface 2D 流形）**；而本工作将连续 E/V 场定义在**近表面三维窄带（Near-Surface 3D Band，`band_max = 0.04`）**内。这一设计精准落在 2D 贴面场与全空间 3D 体积场之间的黄金区间，带来五项实质性优势：
+
+1. **对削圆/偏移输入表面的 3D 原位纠偏能力**：3D 生成网格（MC Mesh）或扫描网格的锐边与尖角普遍被削圆内缩，真实棱线往往位于输入表面 $\hat{S}$ 外侧 `0.005 ~ 0.02` 的 3D 空间内。On-Surface 方法只能把线框锁死在错误的圆钝表面上；而 Near-Surface 3D Band 覆盖了真实锐边所在的 3D 邻域，可直接跳出被削圆的输入表面，还原真实的尖锐棱线与顶点位置。
+2. **彻底解耦输入网格拓扑与采样密度（Remeshing / 破洞不变性）**：不依赖输入网格的三角剖分质量、非流形边或点云稀疏度；推理期可在近表面 3D 空间做稀疏分层查询（`scout`），并在窄倒角/复杂交点处脱离输入分辨率按 `(h/2, r/2)` 局部加密重查（`_resolve_local_junctions`）。
+3. **完整 3D 欧氏微分结构与 360° 立体邻域汇聚**：2D 表面在锐边/角点处法向奇异，表面梯度失效；而在 3D 体积带内，距离场满足完整的 3D Eikonal 性质，1D 边可从周围 360° 圆柱邻域汇聚定位，0D 顶点可从完整 3D 球壳汇聚定位，几何约束远比贴面单侧视角稳定。
+4. **训练期 3D 体积正则化（避免“2D 薄片过拟合”与 OOD 崩溃）**：仅在测度为零的 2D 表面监督隐式解码器极易过拟合表面坐标分布，轻微噪声即触发 OOD 崩溃；在近表面 3D 带（4 层 `near_surface` + 3D `edge_tube` + 3D `vertex_ball`）监督强迫模型学会真正的 3D 欧氏空间场，显著提升对噪声/偏移网格的泛化能力。
+5. **相对全空间 3D 场的容量与效率红利**：剔除了全空间 `[-1, 1]^3` 中 >90% 的远离表面无效空气与全局 Voronoi 中轴面，将 `4096 × 64` 潜空间容量与监督算力 100% 集中在表面与线框附近，兼具 3D 体积场的鲁棒性与表面级计算效率。
+
+> **对应验证实验**：① **锐边削圆/平滑退化测试**（对输入网格施加轻度 MC 或拉普拉斯平滑使棱角内缩 `0.005 ~ 0.015`，对比 On-Surface 贴面内缩 vs. Near-Surface 3D 带跳出圆角还原锐边的边/点 CD 与 HD）；② **Remeshing / 局部破洞不变性测试**（随机重网格化或局部挖洞下的线框拓扑一致性）。
 
 当前两套仓库分工：
 - **上游（`Hunyuan3D/hy3dshape`）**：100% 干净数据训练的 `EdgeVertexShapeVAE`（`Q00Zero` + 预训练几何先验 + `VAEOptimizationPlan` M1–M4 精度升级）与 `FieldDiT` 条件 Flow（$z_g \to z_f$）。

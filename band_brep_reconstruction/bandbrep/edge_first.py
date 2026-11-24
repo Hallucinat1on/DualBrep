@@ -1,4 +1,4 @@
-"""Mesh + continuous E/V -> parameterized wireframe -> mesh regions -> STEP."""
+"""Mesh + continuous 8D E/V joint field -> parameterized wireframe -> mesh regions -> STEP."""
 import shutil
 import time
 from pathlib import Path
@@ -7,12 +7,9 @@ import numpy as np
 
 from .cache import cache_key, file_hash
 from .deadline import timed_reconstruction
-from .edge_first_embedding import cut_surface
 from .edge_first_graph import recover_wireframe
 from .edge_first_grid import sample_grid
-from .edge_first_mc import extract_shell
 from .face_patches import fit_with_patch_fallback
-from .fast_faces import coarse_paths, recover_planar_faces
 from .field_provider import MeshFieldProvider
 from .schemas import ReconstructionError, require, write_json
 from .surface_mesh import mesh_edges, validate_mesh
@@ -28,7 +25,7 @@ class Run:
         self.out = out
         self.start = self.tick = time.monotonic()
         self.stage = 'mesh'
-        self.report = dict(status='running', extraction='thinning', config=cfg.to_dict(),
+        self.report = dict(status='running', extraction='vector_pull', config=cfg.to_dict(),
                            input_identity=identity, inputs=inputs, stages={})
         if 'source_step_sha256' in mesh.report:
             self.report['source_step_sha256'] = mesh.report['source_step_sha256']
@@ -67,6 +64,8 @@ def export(graph, curves, patches, cfg, out):
 
 
 def try_fast(mesh, graph, curves, cfg, run):
+    from .fast_faces import recover_planar_faces
+
     out = run.out
     run.stage = 'fast_faces'
     try:
@@ -104,13 +103,7 @@ def try_fast(mesh, graph, curves, cfg, run):
 def run_route(mesh, provider, grid, cfg, run):
     out = run.out
     run.stage = 'wireframe'
-    tick = time.monotonic()
-    v_shell, v_faces, v_report = extract_shell(grid, cfg, channel=2)
-    shell_report = dict(vertex=v_report, seconds=time.monotonic() - tick)
-    np.savez_compressed(out / 'vertex_shell.npz', vertices=v_shell, triangles=v_faces)
-    graph, curves, support, skeleton = recover_wireframe(grid, provider, cfg, v_shell, v_faces)
-    points, links, _ = skeleton
-    np.savez_compressed(out / 'edge_skeleton.npz', points=points, links=links)
+    graph, curves, support = recover_wireframe(grid, provider, cfg)
     write_json(out / 'wireframe.json', graph)
     write_json(out / 'curves.json', curves)
     np.savez_compressed(out / 'edge_support.npz', points=support)
@@ -118,7 +111,7 @@ def run_route(mesh, provider, grid, cfg, run):
     incomplete = provider.presence()[0] == 'present' and bool(
         not curves or wireframe['unresolved'] or wireframe['uncovered_support'] or wireframe['warnings'])
     continue_partial = incomplete and cfg.allow_partial_wireframe and bool(curves)
-    run.record({**wireframe, 'shell': shell_report, 'incomplete': incomplete,
+    run.record({**wireframe, 'incomplete': incomplete,
                 'continued_with_warnings': continue_partial and cfg.stop_after != 'wireframe'})
     if cfg.stop_after == 'wireframe':
         status = 'wireframe_partial' if incomplete else 'wireframe_ready'
@@ -138,6 +131,8 @@ def run_route(mesh, provider, grid, cfg, run):
 
     paths = {}
     if cfg.hybrid_projection:
+        from .fast_faces import coarse_paths
+
         run.stage = 'coarse_projection'
         radius = min(cfg.fine_spacing, cfg.feature_sdf_tolerance)
         paths, _, projection = coarse_paths(mesh, graph, curves, radius, cfg.fine_spacing,
@@ -147,6 +142,8 @@ def run_route(mesh, provider, grid, cfg, run):
                         **projection))
 
     run.stage = 'split_mesh'
+    from .edge_first_embedding import cut_surface
+
     for _attempt in range(5 if cfg.allow_feature_collapse else 1):
         try:
             cut, labels, constraints = cut_surface(mesh, provider.oracle, graph, curves, cfg,
@@ -158,7 +155,6 @@ def run_route(mesh, provider, grid, cfg, run):
             if (not cfg.allow_feature_collapse or exc.code != 'curve_embedding_overlap'
                     or e1 is None or e2 is None or e1 == e2 or _attempt == 4):
                 raise
-            # Drop the shorter overlapping edge and mark the surviving edge as collapsed.
             def _elen(eid):
                 pts = curves[eid].evaluate(np.linspace(0, 1, 33))
                 return float(np.linalg.norm(np.diff(pts, axis=0), axis=1).sum())
@@ -214,7 +210,7 @@ def run_route(mesh, provider, grid, cfg, run):
 
 @timed_reconstruction
 def reconstruct(mesh, udf, cfg, output_dir):
-    """Run edge-first reconstruction with scalar E/V and no truth topology."""
+    """Run edge-first reconstruction with continuous 8D E/V joint field and no truth topology."""
     cfg.validate()
     run = Run(Path(output_dir), mesh, udf, cfg)
     try:
@@ -224,7 +220,7 @@ def reconstruct(mesh, udf, cfg, output_dir):
         run.stage = 'scout'
         grid = sample_grid(mesh, provider, cfg)
         np.savez_compressed(run.out / 'scout.npz', points=grid.points, keys=grid.keys, values=grid.values,
-                            valid=grid.valid, blocks=grid.blocks, block_indices=grid.block_indices)
+                            offsets=grid.offsets, valid=grid.valid, blocks=grid.blocks)
         run.record(grid.report)
         if cfg.stop_after == 'scout':
             return run.finish('scout_ready')

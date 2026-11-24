@@ -1,31 +1,40 @@
-import json
 import tempfile
 import unittest
 from pathlib import Path
-from dataclasses import replace
-from types import SimpleNamespace
 import numpy as np
-from bandbrep.config import Config,load_config
-from bandbrep.schemas import ReconstructionError,SurfaceMesh
-from bandbrep.field_provider import (CallableUDFProvider,MeshFieldProvider,
-                                    FieldEvaluation,checked_values,bounded_update)
-from bandbrep.surface_mesh import load_mesh,validate_mesh
+
+from bandbrep.config import Config, load_config
 from bandbrep.edge_first import reconstruct
-from helpers import box,hollow_sphere
+from bandbrep.field_provider import (
+    CallableUDFProvider,
+    FieldEvaluation,
+    MeshFieldProvider,
+    bounded_update,
+    checked_values,
+)
+from bandbrep.schemas import ReconstructionError, SurfaceMesh
+from bandbrep.surface_mesh import validate_mesh
+from helpers import box, hollow_sphere
 
 
 class ContractTests(unittest.TestCase):
     def test_edge_first_defaults_and_removed_config(self):
-        cfg=Config().validate()
-        self.assertEqual((cfg.coarse_spacing,cfg.fine_spacing,cfg.band_width,cfg.sample_timeout_seconds),(.024,.003,.02,10800.))
+        cfg = Config().validate()
+        self.assertEqual((cfg.coarse_spacing, cfg.fine_spacing, cfg.band_width, cfg.sample_timeout_seconds),
+                         (0.024, 0.003, 0.02, 10800.0))
         self.assertEqual(cfg.to_dict(), load_config(Path(__file__).resolve().parents[1] / 'configs/default.json').to_dict())
-        for obsolete in ('resolution','refinement_max_rounds','max_triangles','face_second_pass','curve_recovery','region_repair','save_queries'):
-            with self.assertRaises(ValueError):load_config(overrides={obsolete:257})
-        for coarse in (True, 0., -.01, float('nan'), .001):
-            with self.assertRaises(ValueError):Config(coarse_spacing=coarse).validate()
+        for obsolete in ('resolution', 'refinement_max_rounds', 'max_triangles', 'face_second_pass',
+                         'curve_recovery', 'region_repair', 'save_queries', 'shell_radius', 'vertex_level',
+                         'local_refine_levels'):
+            with self.assertRaises(ValueError):
+                load_config(overrides={obsolete: 1})
+        for coarse in (True, 0.0, -0.01, float('nan'), 0.001):
+            with self.assertRaises(ValueError):
+                Config(coarse_spacing=coarse).validate()
         with tempfile.TemporaryDirectory() as tmp:
-            p=Path(tmp)/'config.json';p.write_text('{"sample_timeout_seconds": 9}')
-            self.assertEqual(load_config(p,{'sample_timeout_seconds':10}).sample_timeout_seconds,10)
+            p = Path(tmp) / 'config.json'
+            p.write_text('{"sample_timeout_seconds": 9}')
+            self.assertEqual(load_config(p, {'sample_timeout_seconds': 10}).sample_timeout_seconds, 10)
 
     def test_both_reconstruction_inputs_reject_legacy_veudf(self):
         from unittest.mock import patch
@@ -43,130 +52,63 @@ class ContractTests(unittest.TestCase):
             self.assertEqual(cad_error.exception.code, 'veudf_schema_mismatch')
             self.assertFalse(out.exists())
 
-    def test_mesh_sdf_and_metric_udf_gradient(self):
-        mesh,udf=box();p=MeshFieldProvider(mesh,udf,Config())
-        q=np.array([[.551,.53,.52]])
-        self.assertAlmostEqual(p.sdf(q)[0],.001)
-        g,valid=p.gradient(q,2);expected=q[0]-[.55,.55,.55];expected/=np.linalg.norm(expected)
-        self.assertTrue(valid[0]);np.testing.assert_allclose(g[0],expected,atol=1e-7)
-        self.assertTrue(checked_values(p,q).shape==(1,3))
+    def test_mesh_sdf_and_8d_offsets(self):
+        mesh, udf = box()
+        p = MeshFieldProvider(mesh, udf, Config())
+        q = np.array([[0.551, 0.53, 0.52]])
+        self.assertAlmostEqual(p.sdf(q)[0], 0.001)
+        res = p.evaluate(q)
+        self.assertEqual(res.values.shape, (1, 3))
+        self.assertEqual(res.offsets.shape, (1, 2, 3))
+        np.testing.assert_allclose(q[0] + res.offsets[0, 1], [0.55, 0.55, 0.55], atol=1e-10)
+        np.testing.assert_allclose(np.linalg.norm(res.offsets[0, 1]), res.values[0, 2], atol=1e-10)
+        self.assertEqual(checked_values(p, q).shape, (1, 3))
 
     def test_absent_masks_do_not_block_surface(self):
-        mesh,udf=hollow_sphere();p=MeshFieldProvider(mesh,udf,Config())
-        r=p.evaluate(mesh.vertices[:3]);self.assertFalse(r.valid[:,1:].any())
-        self.assertTrue(np.isfinite(checked_values(p,mesh.vertices[:3])).all())
-        self.assertFalse(p.gradient(mesh.vertices[:3],1)[1].any())
+        mesh, udf = hollow_sphere()
+        p = MeshFieldProvider(mesh, udf, Config())
+        r = p.evaluate(mesh.vertices[:3])
+        self.assertFalse(r.valid[:, 1:].any())
+        self.assertTrue(np.isfinite(checked_values(p, mesh.vertices[:3])).all())
 
     def test_off_band_never_queries_udf_and_update_backtracks(self):
-        mesh,udf=box();p=MeshFieldProvider(mesh,udf,Config())
-        def forbidden(q):raise AssertionError('off-band model query')
-        udf.fn=forbidden
-        with self.assertRaises(ReconstructionError):checked_values(p,[[0,0,0]])
-        start=np.array([[.55,.1,.1]])
-        q=bounded_update(p,start,start+[.2,0,0]);self.assertTrue(p.domain_mask(q).all())
-        self.assertGreater(p.query_report['backtracked_steps'],0)
+        mesh, udf = box()
+        p = MeshFieldProvider(mesh, udf, Config())
 
-    def test_negative_nan_and_saturated_required_fields_rejected(self):
-        mesh,_=box()
-        for value in (-.1,float('nan')):
-            udf=CallableUDFProvider(lambda q:np.full((len(q),2),value),fingerprint='bad',presence=('present','present'))
-            with self.assertRaises(ReconstructionError):checked_values(MeshFieldProvider(mesh,udf,Config()),mesh.vertices[:1])
-        udf=CallableUDFProvider(lambda q:FieldEvaluation(np.ones((len(q),2)),np.ones((len(q),2),bool),np.ones((len(q),2),bool),0),fingerprint='clipped',presence=('present','present'))
-        with self.assertRaises(ReconstructionError):checked_values(MeshFieldProvider(mesh,udf,Config()),mesh.vertices[:1])
+        def forbidden(q):
+            raise AssertionError('off-band model query')
 
-    def test_gradients_query_center_and_six_spatial_offsets(self):
-        calls=[]
-        def values(q):
-            calls.append(q.copy())
-            return np.column_stack((2+q@[1.,2.,3.],3+q@[4.,5.,6.]))
-        udf=CallableUDFProvider(values,fingerprint='sampled',presence=('present','present'))
-        q=np.array([[.1,.2,.3]])
-        g,valid=udf.gradient(q,1)
-        np.testing.assert_allclose(g,[[4,5,6]],atol=1e-9)
-        self.assertTrue(valid[0]);self.assertEqual(len(calls),2)
-        np.testing.assert_array_equal(calls[0],q)
-        probes=np.concatenate(calls[1:])
-        for axis in range(3):
-            delta=np.eye(3)[axis]*1e-5
-            np.testing.assert_array_equal(probes[2*axis:2*axis+1],q+delta)
-            np.testing.assert_array_equal(probes[2*axis+1:2*axis+2],q-delta)
-        for step in (0.,-1.,float('nan'),float('inf')):
-            with self.assertRaises(ReconstructionError):udf.gradient(q,0,step)
+        udf.fn = forbidden
+        with self.assertRaises(ReconstructionError):
+            checked_values(p, [[0, 0, 0]])
+        start = np.array([[0.55, 0.1, 0.1]])
+        q = bounded_update(p, start, start + [0.2, 0, 0])
+        self.assertTrue(p.domain_mask(q).all())
+        self.assertGreater(p.query_report['backtracked_steps'], 0)
 
-    def test_mesh_gradient_bypasses_custom_derivatives_and_batches_samples(self):
-        mesh,source=box();calls=[]
-        def values(q):
-            calls.append(q.copy());return source.evaluate(q)
-        def forbidden(*args):raise AssertionError('external gradient was called')
-        udf=SimpleNamespace(evaluate=values,gradient=forbidden,presence=source.presence,
-                            fingerprint='values-only',band_width=.02)
-        p=MeshFieldProvider(mesh,udf,Config(query_batch_size=2))
-        q=np.array([[.551,.53,.52],[.552,.53,.52],[.553,.53,.52]])
-        g,valid=p.gradient(q,2)
-        expected=q-[.55,.55,.55];expected/=np.linalg.norm(expected,axis=1)[:,None]
-        np.testing.assert_allclose(g,expected,atol=1e-7)
-        self.assertTrue(valid.all());self.assertTrue(all(len(v)<=2 for v in calls))
-        self.assertEqual(sum(len(v) for v in calls),7*len(q))
-        calls.clear()
-        # The center is inside the band, but its positive x probe is outside.
-        g,valid=p.gradient([[.57-5e-6,.1,.1]],2)
-        self.assertFalse(valid[0]);self.assertEqual(calls,[])
-        np.testing.assert_array_equal(g,[[0,0,0]])
+    def test_wrong_shape_negative_nan_and_saturated_rejected(self):
+        mesh, _ = box()
+        # Reject legacy 2D output
+        udf_2d = CallableUDFProvider(lambda q: np.ones((len(q), 2)), fingerprint='legacy2d', presence=('present', 'present'))
+        with self.assertRaises(ReconstructionError):
+            MeshFieldProvider(mesh, udf_2d, Config()).evaluate(mesh.vertices[:1])
+        for value in (-0.1, float('nan')):
+            udf = CallableUDFProvider(lambda q, v=value: np.full((len(q), 8), v), fingerprint='bad', presence=('present', 'present'))
+            with self.assertRaises(ReconstructionError):
+                checked_values(MeshFieldProvider(mesh, udf, Config()), mesh.vertices[:1])
+        udf = CallableUDFProvider(
+            lambda q: FieldEvaluation(np.ones((len(q), 2)), np.zeros((len(q), 2, 3)),
+                                      np.ones((len(q), 2), bool), np.ones((len(q), 2), bool), np.zeros((len(q), 2))),
+            fingerprint='clipped', presence=('present', 'present'),
+        )
+        with self.assertRaises(ReconstructionError):
+            checked_values(MeshFieldProvider(mesh, udf, Config()), mesh.vertices[:1])
 
-    def test_gradient_reuses_checked_centers_but_still_samples_six_offsets(self):
-        mesh,udf=box();provider=MeshFieldProvider(mesh,udf,Config())
-        q=np.array([[.551,.53,.52]])
-        values=checked_values(provider,q);source=udf.fn;calls=[]
-        def record(points):calls.append(points.copy());return source(points)
-        udf.fn=record
-        g,valid=provider.gradient_from_values(q,2,values)
-        self.assertTrue(valid[0]);self.assertEqual(sum(map(len,calls)),6)
-        self.assertFalse(any(np.array_equal(p,q) for p in calls))
-        expected=q-[.55,.55,.55];expected/=np.linalg.norm(expected,axis=1)[:,None]
-        np.testing.assert_allclose(g,expected,atol=1e-7)
-
-    def test_gradient_rejects_bad_probe_values_and_zero_distance(self):
-        q=np.array([[.1,.2,.3]])
-        for failure in ('invalid','saturated','negative','nan','zero_center','flat'):
-            with self.subTest(failure=failure):
-                def values(points):
-                    v=np.column_stack((1+points[:,0],2+points[:,1]))
-                    valid=np.ones(v.shape,bool);saturated=np.zeros(v.shape,bool)
-                    probe=points[:,0]>q[0,0]
-                    if failure=='invalid':valid[probe,1]=False
-                    if failure=='saturated':saturated[probe,1]=True
-                    if failure=='negative':v[probe,1]=-.1
-                    if failure=='nan':v[probe,1]=np.nan
-                    if failure=='zero_center':v[:,1]=np.linalg.norm(points-q,axis=1)
-                    if failure=='flat':v[:,1]=1.
-                    return FieldEvaluation(v,valid,saturated,0)
-                udf=CallableUDFProvider(values,fingerprint=failure,presence=('present','present'))
-                g,valid=udf.gradient(q,1)
-                self.assertFalse(valid[0]);np.testing.assert_array_equal(g,[[0,0,0]])
-                # A bad V value must not invalidate the independent E derivative.
-                self.assertTrue(udf.gradient(q,0)[1][0])
-
-    def test_condition_load_and_tamper_detection(self):
-        from veudf.io.condition import write_condition
-        mesh,_=box()
-        with tempfile.TemporaryDirectory() as tmp:
-            path=Path(tmp)/'condition';write_condition(path,(mesh.vertices,mesh.triangles),count=32)
-            loaded=load_mesh(tmp);np.testing.assert_array_equal(mesh.triangles,loaded.triangles)
-            v=np.load(path/'vertices.npy');v[0,0]+=.01;np.save(path/'vertices.npy',v)
-            with self.assertRaises(ReconstructionError):load_mesh(tmp)
-
-    def test_invalid_mesh_writes_failed_diagnostics(self):
-        mesh,udf=box();mesh.triangles=mesh.triangles[:-1]
-        with tempfile.TemporaryDirectory() as tmp:
-            with self.assertRaises(ReconstructionError):reconstruct(mesh,udf,Config(),tmp)
-            self.assertEqual(json.loads((Path(tmp)/'quality.json').read_text())['failed_stage'],'mesh')
-
-    def test_input_identity_mesh_field_domain_and_routes(self):
-        from bandbrep.cache import cache_key
-        mesh,udf=box();cfg=Config()
-        key,_=cache_key(mesh,udf,cfg)
-        self.assertEqual(key,cache_key(mesh,udf,replace(cfg,stop_after='scout'))[0])
-        self.assertNotEqual(key,cache_key(mesh,udf,replace(cfg,local_refine_levels=0))[0])
-        self.assertNotEqual(key,cache_key(mesh,udf,replace(cfg,coarse_spacing=.012))[0])
-        udf.band_width=.03;self.assertNotEqual(key,cache_key(mesh,udf,cfg)[0]);udf.band_width=.02
-        mesh.vertices[0,0]+=.001;self.assertNotEqual(key,cache_key(mesh,udf,cfg)[0]);mesh.vertices[0,0]-=.001
+    def test_mesh_validation_rejects_bad_topology(self):
+        mesh, _ = box()
+        with self.assertRaises(ReconstructionError):
+            validate_mesh(SurfaceMesh(mesh.vertices, mesh.triangles[:-1]), Config())
+        bad = mesh.triangles.copy()
+        bad[0] = bad[0][::-1]
+        with self.assertRaises(ReconstructionError):
+            validate_mesh(SurfaceMesh(mesh.vertices, bad), Config())

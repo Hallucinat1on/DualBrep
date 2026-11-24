@@ -1,93 +1,40 @@
-"""Mesh-derived geometry and continuous metric E/V queries.
+"""Mesh-derived geometry and continuous 8D E/V joint field queries [dE, dV, uE(3), uV(3)].
 
-Only the mesh supplies SDF. No sampled-field interpolation or CAD truth loader
-is part of the reconstruction input API.
+Only the mesh supplies SDF. External field providers supply the 8D joint target:
+scalar unsigned distances [dE, dV] and 3D closest-point displacement vectors [uE, uV].
 """
 from dataclasses import dataclass
 import hashlib
 import json
 import numpy as np
-from .schemas import require
-from .deadline import checkpoint
 
-EMPTY_DISTANCE = 2 * np.sqrt(3.)
-UDF_GRADIENT_STEP = 1e-5
+from .deadline import checkpoint
+from .schemas import require
+
+EMPTY_DISTANCE = 2 * np.sqrt(3.0)
 
 
 @dataclass
 class FieldEvaluation:
-    values: np.ndarray
-    valid: np.ndarray
-    saturated: np.ndarray
-    error: np.ndarray
+    values: np.ndarray      # [N, 2] ([dE, dV]) or [N, 3] ([sdf, dE, dV])
+    offsets: np.ndarray     # [N, 2, 3] ([uE, uV])
+    valid: np.ndarray       # aligned with values
+    saturated: np.ndarray   # aligned with values
+    error: np.ndarray       # aligned with values
     strict_error_bound: bool = False
 
 
-def sampled_udf_gradient(evaluate, xyz, channel, step=UDF_GRADIENT_STEP,
-                         *, domain_mask=None, batch_size=8192, center_values=None):
-    """Central differences of E/V values only; never call a gradient backend.
-
-    The center and all six spatial probes must be usable. A zero center value
-    or a vanishing difference is unsuitable for distance-based localization.
-    """
-    require(channel in (0,1), 'field_channel', 'UDF gradient channel must be E=0 or V=1')
-    require(np.isfinite(step) and step > 0, 'gradient_step', 'Gradient step must be finite and positive')
-    q = np.asarray(xyz, float).reshape(-1,3)
-    if center_values is not None:
-        center_values=np.asarray(center_values,float)
-        require(center_values.shape==(len(q),2),'field_shape','Expected aligned checked E/V center values')
-    g = np.zeros_like(q); valid = np.zeros(len(q), bool)
-    deltas = np.eye(3)*step
-    for start in range(0,len(q),batch_size):
-        checkpoint('field_gradient')
-        points = q[start:start+batch_size]
-        mask = np.isfinite(points).all(1)
-        if domain_mask is not None:
-            mask &= domain_mask(points)
-            for delta in deltas:
-                mask &= domain_mask(points+delta) & domain_mask(points-delta)
-        ids = np.flatnonzero(mask)
-        if not len(ids):continue
-        if center_values is None:
-            center=evaluate(points[ids])
-            good=(center.valid[:,channel] & ~center.saturated[:,channel]
-                  & np.isfinite(center.values[:,channel]) & (center.values[:,channel]>1e-8))
-        else:
-            values=center_values[start:start+batch_size][ids,channel]
-            good=np.isfinite(values)&(values>1e-8)
-        ids = ids[good]
-        if not len(ids):continue
-        probes = points[ids]
-        # Pack all six directions while respecting the backend query batch size.
-        # Small active sets now require one decoder call instead of six.
-        positions=np.concatenate([probes+sign*delta for delta in deltas for sign in (1,-1)])
-        distances=np.empty(len(positions));usable=np.empty(len(positions),bool)
-        for offset in range(0,len(positions),batch_size):
-            r=evaluate(positions[offset:offset+batch_size]);end=offset+len(r.values)
-            distances[offset:end]=r.values[:,channel]
-            usable[offset:end]=(r.valid[:,channel]&~r.saturated[:,channel]
-                                &(r.values[:,channel]>=0)&np.isfinite(r.values[:,channel]))
-        pairs=distances.reshape(3,2,len(ids))
-        slopes=((pairs[:,0]-pairs[:,1])/(2*step)).T
-        good=usable.reshape(6,len(ids)).all(0)
-        good &= np.isfinite(slopes).all(1) & (np.linalg.norm(slopes,axis=1)>1e-8)
-        g[start+ids[good]] = slopes[good]
-        valid[start+ids[good]] = True
-    return g,valid
-
-
 class CallableUDFProvider:
-    """Continuous metric [dE,dV]; gradients sample values at spatial offsets.
+    """Continuous 8D joint field [dE, dV, uE_x, uE_y, uE_z, uV_x, uV_y, uV_z]."""
 
-    Gradient channels are 0=E, 1=V. Supply E/V presence explicitly.
-    """
-    def __init__(self, fn, *, fingerprint, presence, band_width=.02):
+    def __init__(self, fn, *, fingerprint, presence, band_width=0.02):
         require(isinstance(fingerprint, str) and bool(fingerprint), 'field_identity', 'Supply a field fingerprint')
         require(np.isfinite(band_width) and band_width > 0, 'field_domain', 'Invalid field band width')
-        require(presence is not None and len(presence) == 2 and all(v in ('present','absent') for v in presence),
+        require(presence is not None and len(presence) == 2 and all(v in ('present', 'absent') for v in presence),
                 'invalid_presence', 'Expected E/V presence')
         self.fn = fn
-        self.fingerprint, self.band_width = fingerprint, float(band_width)
+        self.fingerprint = fingerprint
+        self.band_width = float(band_width)
         self._presence = tuple(presence)
 
     def presence(self):
@@ -96,135 +43,135 @@ class CallableUDFProvider:
     def evaluate(self, xyz):
         q = np.asarray(xyz, float).reshape(-1, 3)
         result = self.fn(q)
-        if hasattr(result, 'values'):
+        if isinstance(result, FieldEvaluation):
             values = np.asarray(result.values, float)
+            offsets = np.asarray(result.offsets, float)
             valid = np.asarray(result.valid, bool)
             saturated = np.asarray(result.saturated, bool)
+            require(values.shape == (len(q), 2) and offsets.shape == (len(q), 2, 3),
+                    'field_shape', 'FieldEvaluation must have values [N,2] and offsets [N,2,3]')
+            require(valid.shape == values.shape and saturated.shape == values.shape,
+                    'field_shape', 'FieldEvaluation masks must align with values [N,2]')
         else:
-            values = np.asarray(result, float)
-            valid = np.isfinite(values)
+            raw = np.asarray(result, float)
+            require(raw.shape == (len(q), 8), 'field_shape',
+                    'Continuous 8D field must return [N,8]: [dE, dV, uE(3), uV(3)]')
+            values = raw[:, :2]
+            offsets = raw[:, 2:].reshape(len(q), 2, 3)
+            valid = np.isfinite(values) & np.isfinite(offsets).all(axis=2)
             saturated = values < 0
-        require(values.shape == (len(q), 2) and valid.shape == values.shape and saturated.shape == values.shape,
-                'field_shape', 'Continuous UDF must return [N,2], with aligned masks')
         saturated = saturated | (values < 0)
-        valid = valid & np.isfinite(values)
-        return FieldEvaluation(values, valid, saturated, np.zeros_like(values))
-
-    def gradient(self, xyz, channel, step=UDF_GRADIENT_STEP):
-        return sampled_udf_gradient(self.evaluate, xyz, channel, step)
+        valid = valid & np.isfinite(values) & np.isfinite(offsets).all(axis=2)
+        return FieldEvaluation(values, offsets, valid, saturated, np.zeros_like(values))
 
 
 class MeshFieldProvider:
-    """Internal [mesh SDF,dE,dV], including query-domain and gradient validity."""
-    channel_names = ('sdf','dE','dV')
+    """Internal [mesh SDF, dE, dV] + 3D closest-point displacements [uE(3), uV(3)]."""
+    channel_names = ('sdf', 'dE', 'dV')
     strict_error_bound = False
-    error = 0.
+    error = 0.0
 
     def __init__(self, mesh, udf, cfg):
         from veudf.geometry.mesh import MeshSDFOracle
         from veudf.geometry.sampling import mesh_hash
-        identity=mesh_hash(mesh.vertices,mesh.triangles)
-        require(getattr(udf,"mesh_fingerprint",identity)==identity,"condition_mismatch","Decoder condition differs from the input mesh")
-        self.oracle = MeshSDFOracle(mesh.vertices,mesh.triangles)
-        self.udf, self.band_width = udf, float(udf.band_width)
-        self.normalization = mesh.report.get('normalization',{})
+
+        identity = mesh_hash(mesh.vertices, mesh.triangles)
+        require(getattr(udf, 'mesh_fingerprint', identity) == identity,
+                'condition_mismatch', 'Decoder condition differs from the input mesh')
+        self.oracle = MeshSDFOracle(mesh.vertices, mesh.triangles)
+        self.udf = udf
+        self.band_width = float(udf.band_width)
+        self.normalization = mesh.report.get('normalization', {})
         self.batch_size = cfg.query_batch_size
         self.query_report = dict(outside_band=0, backtracked_steps=0)
         self._presence = udf.presence()
-        require(self._presence is not None and len(self._presence)==2 and all(p in ('present','absent') for p in self._presence),
-                'presence_unknown','Resolve E/V presence before reconstruction')
-        require(self._presence != ('absent','present'),'invalid_presence','Vertices require edges')
-        policy = dict(mesh=mesh_hash(mesh.vertices,mesh.triangles), udf=udf.fingerprint,
-                      band_width=self.band_width, presence=self._presence,
-                      udf_gradient=dict(method='central_difference',step=UDF_GRADIENT_STEP),
-                      normalization=self.normalization, presence_support=None)
-        self.fingerprint = 'mesh-udf:'+hashlib.sha256(json.dumps(policy,sort_keys=True).encode()).hexdigest()
+        require(self._presence is not None and len(self._presence) == 2
+                and all(p in ('present', 'absent') for p in self._presence),
+                'presence_unknown', 'Resolve E/V presence before reconstruction')
+        require(self._presence != ('absent', 'present'), 'invalid_presence', 'Vertices require edges')
+        policy = dict(
+            mesh=identity,
+            udf=udf.fingerprint,
+            band_width=self.band_width,
+            presence=self._presence,
+            field_target='8d_udf_gdf',
+            normalization=self.normalization,
+        )
+        self.fingerprint = 'mesh-udf8d:' + hashlib.sha256(json.dumps(policy, sort_keys=True).encode()).hexdigest()
 
     def presence(self):
         return self._presence
 
     def sdf(self, xyz):
-        checkpoint("mesh_distance")
-        q = np.asarray(xyz,float).reshape(-1,3)
-        require(np.isfinite(q).all(),'invalid_field_query','Nonfinite query coordinates')
+        checkpoint('mesh_distance')
+        q = np.asarray(xyz, float).reshape(-1, 3)
+        require(np.isfinite(q).all(), 'invalid_field_query', 'Nonfinite query coordinates')
         return self.oracle.query(q)
 
     def domain_mask(self, xyz):
-        q = np.asarray(xyz,float).reshape(-1,3)
+        q = np.asarray(xyz, float).reshape(-1, 3)
         finite = np.isfinite(q).all(1)
-        mask = finite & (np.abs(q)<=1.000001).all(1)
+        mask = finite & (np.abs(q) <= 1.000001).all(1)
         ids = np.flatnonzero(mask)
-        mask[ids] &= np.abs(self.sdf(q[ids])) <= self.band_width
+        if len(ids):
+            mask[ids] &= np.abs(self.sdf(q[ids])) <= self.band_width
         return mask
 
     def evaluate(self, xyz):
-        q = np.asarray(xyz,float).reshape(-1,3)
+        q = np.asarray(xyz, float).reshape(-1, 3)
         sdf = self.sdf(q)
-        values = np.full((len(q),3), EMPTY_DISTANCE)
-        values[:,0] = sdf
-        valid = np.zeros_like(values,bool);valid[:,0] = np.isfinite(sdf)
+        values = np.full((len(q), 3), EMPTY_DISTANCE)
+        values[:, 0] = sdf
+        offsets = np.zeros((len(q), 2, 3), dtype=float)
+        valid = np.zeros_like(values, bool)
+        valid[:, 0] = np.isfinite(sdf)
         saturated = np.zeros_like(valid)
-        inside = (np.abs(q)<=1.000001).all(1) & (np.abs(sdf)<=self.band_width)
+        inside = (np.abs(q) <= 1.000001).all(1) & (np.abs(sdf) <= self.band_width)
         self.query_report['outside_band'] += int((~inside).sum())
         ids = np.flatnonzero(inside)
         if len(ids) and 'present' in self._presence:
             r = self.udf.evaluate(q[ids])
-            values[ids,1:] = r.values
-            valid[ids,1:] = r.valid
-            saturated[ids,1:] = r.saturated
-        for c,p in enumerate(self._presence,1):
-            if p=='absent':
-                values[:,c] = EMPTY_DISTANCE;valid[:,c] = False
-        return FieldEvaluation(values,valid,saturated,np.zeros_like(values))
-
-    def gradient(self, xyz, channel, step=UDF_GRADIENT_STEP, *, _center_values=None):
-        checkpoint("field_gradient")
-        q = np.asarray(xyz,float).reshape(-1,3)
-        require(channel in (0,1,2),'field_channel','Unknown channel')
-        if channel==0:return self.oracle.gradient(q)
-        g = np.zeros_like(q);valid = np.zeros(len(q),bool)
-        if self._presence[channel-1]=='absent':return g,valid
-        return sampled_udf_gradient(self.udf.evaluate, q, channel-1, step,
-                                    domain_mask=self.domain_mask, batch_size=self.batch_size,
-                                    center_values=_center_values)
-
-    def gradient_from_values(self, xyz, channel, values, step=UDF_GRADIENT_STEP):
-        """Reuse aligned centers already accepted by checked_values().
-
-        All six spatial probes still undergo domain, mask and saturation checks.
-        This internal optimization must not receive unchecked model outputs.
-        """
-        q=np.asarray(xyz,float).reshape(-1,3);v=np.asarray(values,float)
-        require(v.shape==q.shape,'field_shape','Expected checked [SDF,E,V] centers')
-        require(channel in (1,2),'field_channel','Expected E or V gradient')
-        return self.gradient(q,channel,step,_center_values=v[:,1:])
+            values[ids, 1:] = r.values
+            offsets[ids] = r.offsets
+            valid[ids, 1:] = r.valid
+            saturated[ids, 1:] = r.saturated
+        for c, p in enumerate(self._presence, 1):
+            if p == 'absent':
+                values[:, c] = EMPTY_DISTANCE
+                offsets[:, c - 1] = 0.0
+                valid[:, c] = False
+                saturated[:, c] = False
+        return FieldEvaluation(values, offsets, valid, saturated, np.zeros_like(values))
 
 
 def checked_values(provider, xyz, batch=8192):
     """Require only present channels; absent sentinels are not valid geometry."""
-    q = np.asarray(xyz,float).reshape(-1,3)
-    required = np.array([True]+[p=='present' for p in provider.presence()])
-    parts=[]
-    for start in range(0,len(q),batch):
-        checkpoint("field_values")
-        r=provider.evaluate(q[start:start+batch])
-        checkpoint("field_values")
-        require(np.all(r.valid[:,required]) and np.all(~r.saturated[:,required])
-                and np.isfinite(r.values[:,required]).all(),'invalid_field_query',
+    q = np.asarray(xyz, float).reshape(-1, 3)
+    required = np.array([True] + [p == 'present' for p in provider.presence()])
+    parts = []
+    for start in range(0, len(q), batch):
+        checkpoint('field_values')
+        r = provider.evaluate(q[start:start + batch])
+        checkpoint('field_values')
+        require(np.all(r.valid[:, required]) and np.all(~r.saturated[:, required])
+                and np.isfinite(r.values[:, required]).all(),
+                'invalid_field_query',
                 'Required field channel is invalid, outside its band, or clipped')
         parts.append(r.values)
-    return np.concatenate(parts) if parts else np.empty((0,3))
+    return np.concatenate(parts) if parts else np.empty((0, 3))
 
 
 def bounded_update(provider, current, proposed):
     """Backtrack off-band steps without projecting them onto the mesh."""
-    if not hasattr(provider,'domain_mask'):return proposed
-    result=np.asarray(proposed,float).copy()
+    if not hasattr(provider, 'domain_mask'):
+        return proposed
+    result = np.asarray(proposed, float).copy()
     for _ in range(16):
-        bad=~provider.domain_mask(result)
-        if not bad.any():return result
+        bad = ~provider.domain_mask(result)
+        if not bad.any():
+            return result
         provider.query_report['backtracked_steps'] += int(bad.sum())
-        result[bad]=(current[bad]+result[bad])*.5
-    bad=~provider.domain_mask(result)
-    result[bad]=current[bad]
+        result[bad] = (current[bad] + result[bad]) * 0.5
+    bad = ~provider.domain_mask(result)
+    result[bad] = current[bad]
     return result

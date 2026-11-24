@@ -662,6 +662,40 @@ L5剩余13例为准备5（预算3、原输入退化2）、图错误6（面错4�
 - `v1`–`v4`：`band_brep_reconstruction/outputs/projection_thinning_paired_20261120_v{1,2,3,4}/`（含 `manifest.json`、`policy.json`、`results.json`、`eval_summary.json`、`source_snapshot/`）。
 - `v5`–`v6`：[v5 目录](../band_brep_reconstruction/outputs/projection_thinning_paired_20261121_v5/)、[v6 目录](../band_brep_reconstruction/outputs/projection_thinning_paired_20261121_v6/)（另含每例 `mc_vis/` MC 薄壳 `.obj` 导出与 [v6 eval_summary.json](../band_brep_reconstruction/outputs/projection_thinning_paired_20261121_v6/eval_summary.json)）。
 
+<a id="edge-first-vector-pull"></a>
+### 5.16 11-24：8D 联合场中场向量拉回配对实验（`vector_pull_paired_20261124_v1`）
+
+在分支 `bandbrep-vector-field` 上将 `band_brep_reconstruction` 前端彻底重构为 [8D 联合目标与中场向量拉回方案](VectorFieldTarget.md)（`extraction='vector_pull'`：E/V 并行中场拉回 → E/V 双向互证过滤假顶点 → V 主导解析切断球 → 微体素共识 + 1D 加权 PCA 瘦身 + 切向/横向偏移分簇 + EMST 直径排序与断口桥接），移除旧版 MC 球壳与 3D 体素 `thinning` 代码，并在同源同哈希的 20 dev 上按 §5.15 相同配对协议（`hybrid` 与 `global_exact` 共 40 任务、`fast_faces=false`、`allow_partial_wireframe=true`、单线程数值库、单任务 3600 秒上限，零超时）完成精确 8D 场对照实验。注：本批使用 `veudf` v5 契约（含 `ShapeUpgrade_UnifySameDomain` 同域面规范化与精确 8D `distance + offset`）。
+
+#### 与 `v6`（2D 标量 `thinning`）核心指标对比（固定分母 N=20）
+
+| 版本 / 方法 | 组别 | STEP | 图+STEP (`GG`) | 各阶段通过 (`scout/wf/split/surf/cad`) | wf 零未解 | E F1 / F F1 | E–V / E–F 关联 | Chamfer 中位 / 最大 | VolErr 中位 / 最大 | 耗时中位 / 均值 | scout 查询点均值 |
+|---|---|---:|---:|---|---:|---|---|---|---|---:|---:|
+| `v6` (`thinning`) | `hybrid` | **17/20 (85%)** | 12/20 (60%) | 20/20/19/17/17 | 18/20 | 98.2% / 90.2% | 98.1% / 93.7% | 0.00002 / 0.00038 | 0.00004 / 0.04630 | 369.4s / 423.5s | 0.97M |
+| `v6` (`thinning`) | `global_exact` | **17/20 (85%)** | 12/20 (60%) | 20/20/19/18/17 | 18/20 | 98.2% / 90.2% | 98.1% / 93.7% | 0.00002 / 0.00038 | 0.00004 / **0.00090** | 391.2s / 425.8s | 0.97M |
+| `vector_pull v1` | `hybrid` | 15/20 (75%) | **14/20 (70%)** | 20/20/19/17/15 | **19/20** | **99.5% / 99.8%** | **99.8% / 100.1%** | **0.00001 / 0.00014** | **0.00003 / 0.00285** | 743.3s / 939.6s | 1.79M |
+| `vector_pull v1` | `global_exact` | 16/20 (80%) | **15/20 (75%)** | 20/20/19/17/16 | **19/20** | **99.5% / 99.8%** | **99.8% / 100.1%** | **0.00001 / 0.00014** | **0.00003 / 0.00283** | 984.3s / 1084.1s | 1.79M |
+
+#### 核心结论与差异分析
+
+1. **线框质量、严格图+STEP 与拓扑/几何保真度大幅跃升**：
+   - **严格图+STEP（`graph_good`）** 由 `12/20 (60%)` 提升至 **`15/20 (75%)`**（`global_exact` 下 16 例 STEP 中有 **15 例（93.8%）** V/E/F 数量与关联全部精确，仅 `00005094` 多出 2 条边/2 个面）；`hybrid` 同步提升至 **`14/20 (70%)`**。
+   - **线框零未解（`zero_unresolved`）** 由 `18/20` 提升至 **`19/20 (95%)`**，且全 20 例中 **19/20 顶点数完全精确、17/20 边数完全精确**。
+   - **拓扑 F1 全面突破**：在 STEP-valid 子集上，顶点保持 `100.0%`（572/572，最大顶点误差 `0.00000`），边 F1 从 `98.2%`（44 缺失）跃升至 **`99.5%`**（仅 4 缺失），面 F1 从 `90.2%`（80 缺失、40 未匹配）跃升至 **`99.8%`**（**0 缺失、0 未匹配**），E–V / E–F 关联分别升至 **`99.8%` / `100.1%`**。
+   - **几何精度显著改善**：对称 Chamfer 中位/最大由 `0.00002 / 0.00038` 降至 **`0.00001 / 0.00014`**（最大误差下降 `2.7×`）；`hybrid` 最大体积相对误差由 `0.04630` 降至 **`0.00285`**（下降 `16×`）。
+   - **修复历史顽疾**：`00004627`（`v6` 回退失败）在 `global_exact` 恢复完整 `GG=True` 成功（`22/22, 35/35, 16/16`）；`00004610`（`v6` 存在 394 点 `skeleton_junction_unresolved` 死锁）在线框阶段实现 **`V=74/74, E=116/116` 零未解精确恢复**并顺利跨过 `split_mesh`。
+2. **剩余失败（`global_exact` 4 例）与耗时开销诊断**：
+   - **`00000688`（`cad:cad_face_invalid`）**：线框完全精确（`V=119/119, E=204/204`）且通过 `split_mesh` 与 `surfaces`，仅在 OCC 最终面构造处失败；
+   - **`00008804`（`surfaces:surface_boundary_incompatible`）**：顶点完全精确（`102/102`），边 `155/159` 缺失 4 条极短边导致曲面边界不兼容；
+   - **`00004610`（`surfaces:surface_boundary_incompatible`）**：线框与切面全部通过，需排查曲面边界容差/相容性；
+   - **`00008133`（`split_mesh:edge_neighbors_unresolved`）**：`V=28/36, E=38/58`，因密集近距顶点在 `collapse_tolerance=0.005` / `vertex_cut_radius=0.007` 下被合并或切断导致漏边；
+   - **`hybrid` 额外失败 `00004627`（`cad:unsupported_multi_solid`）**：`global_exact` 已成功；
+   - **耗时与查询量**：本初版 `scout_margin=0.010`（为 `v6` `shell_radius=0.005` 的 2 倍），导致 `scout` 唯一查询点均值从 `0.97M` 增至 `1.79M`（耗时约 `2.2×`）。后续将 `scout_margin` 收紧至 `0.006–0.007` 并优化近距顶点合并阈值与短边恢复，即可同时收回查询成本并冲击 `19/20+`。
+
+#### 批次产物入口
+
+- [vector_pull_paired_20261124_v1 目录](../band_brep_reconstruction/outputs/vector_pull_paired_20261124_v1/)（含 `manifest.json`、`results.json` 与 [eval_summary.json](../band_brep_reconstruction/outputs/vector_pull_paired_20261124_v1/eval_summary.json)）；运行脚本见 [run_paired_experiment.py](../band_brep_reconstruction/scripts/run_paired_experiment.py)。
+
 <a id="alignment-contract"></a>
 ## 6. 历史 F30 对齐约定与候选配置
 

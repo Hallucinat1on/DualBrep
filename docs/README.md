@@ -7,11 +7,12 @@
 | v5 数据集格式与全链路改造方案（8D 联合场 + 编解码池彻底解耦，现行） | [Dataset.md](Dataset.md) |
 | 历史 STEP 到 v3 数据说明 | [Pre.md](Pre.md) |
 | 当前网格到 STEP 入口 | [边优先重建 README](../band_brep_reconstruction/README.md) |
-| 现行边优先重建与优化方案（含原 `MCShellCenterline`） | [Post1121.md](Post1121.md) |
-| 历史面优先流程 | [Post1109.md](Post1109.md) |
+| 后处理文档版本关系与归档口径（最新） | [Post1125.md](Post1125.md) |
+| 上一代边优先方案（MC 球壳 + 体素 thinning 前端，已被 8D 向量拉回取代） | [Post1121.md](Post1121.md) |
+| 历史面优先流程 | [archive/Post1109.md](archive/Post1109.md) |
 | 原 DualBrep 源码和原理解读 | [原版 README](../legacy_dualbrep/README.md) · [DualBrep.md](../legacy_dualbrep/DualBrep.md) |
-| 历史成绩、协议和冻结命令 | [Experiment.md](Experiment.md) · [Post1116.md](Post1116.md) |
-| 旧处理说明 | [Post1104.md](Post1104.md) |
+| 历史成绩、协议和冻结命令 | [Experiment.md](Experiment.md) · [archive/Post1116.md](archive/Post1116.md) |
+| 旧处理说明 | [archive/Post1104.md](archive/Post1104.md) |
 | 研究备忘 | [Wireframe.md](Wireframe.md) |
 
-现行使用以 `Pipeline.md`、`Pre.md`、`Post1121.md` 和各模块 README 为准。历史实验保留原配置、数据版本和成绩口径。
+现行使用以 `Pipeline.md`、`Pre.md`、`VectorFieldTarget.md`、[边优先重建 README](../band_brep_reconstruction/README.md) 和各模块 README 为准；`Post1121.md` 的线框提取前端（阶段 1/2）已被 8D 向量拉回取代，版本关系见 `Post1125.md`。历史实验保留原配置、数据版本和成绩口径，`Post1104/1109/1116` 已归档至 `archive/`。

@@ -1,6 +1,6 @@
 # DualBrep：UDF 表示、面分割与 B-rep 拓扑恢复
 
-原始核查：2026-10-15；文档整理：2026-10-31。本说明介绍原 DualBrep 的 GVD-UDF、训练与推理、面分割、学习式参数化及 CAD 后处理。已实现的最近真实边／顶点三场路线见[现行后处理](../docs/Post1109.md)，数据目标见[预处理规范](../docs/Pre.md)。本文不将原 DualBrep 的网络预测流程描述为 `bandbrep` 的执行路径。
+原始核查：2026-10-15；文档整理：2026-10-31。本说明介绍原 DualBrep 的 GVD-UDF、训练与推理、面分割、学习式参数化及 CAD 后处理。已实现的最近真实边／顶点三场路线见[现行后处理](../docs/archive/Post1109.md)，数据目标见[预处理规范](../docs/Pre.md)。本文不将原 DualBrep 的网络预测流程描述为 `bandbrep` 的执行路径。
 
 - [A. UDF 表示与处理流程](#udf-flow)
 - [B. 拓扑恢复、seam 与特殊边](#topology-seam)

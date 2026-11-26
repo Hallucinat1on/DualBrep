@@ -170,6 +170,7 @@ def _verify_vertices_with_edges(candidates, pulled_e, provider, cfg):
     e_tree = cKDTree(pulled_e) if len(pulled_e) else None
     e_support_radius = max(0.008, 2.5 * cfg.fine_spacing)
     e_val_tol = max(0.005, 1.5 * cfg.edge_consistency_tol)
+    e_usable = eval_res.valid[:, 1] & (~eval_res.saturated[:, 1] | (eval_res.values[:, 1] > 0)) & np.isfinite(eval_res.values[:, 1])
 
     verified = []
     rejected = []
@@ -179,7 +180,7 @@ def _verify_vertices_with_edges(candidates, pulled_e, provider, cfg):
             rejected.append(dict(reason='false_vertex_no_edge_support', position=cand['position'].tolist(),
                                  edge_support=e_count))
             continue
-        if eval_res.valid[i, 1] and not eval_res.saturated[i, 1] and eval_res.values[i, 1] > e_val_tol:
+        if e_usable[i] and eval_res.values[i, 1] > e_val_tol:
             rejected.append(dict(reason='false_vertex_high_dE', position=cand['position'].tolist(),
                                  dE=float(eval_res.values[i, 1])))
             continue
@@ -468,7 +469,7 @@ def _verify_polylines(polylines, provider, cfg):
     for p, cnt in zip(polylines, counts):
         sl = slice(offset, offset + cnt)
         offset += cnt
-        ok = res.valid[sl, 1] & ~res.saturated[sl, 1]
+        ok = res.valid[sl, 1] & (~res.saturated[sl, 1] | (res.values[sl, 1] > 0)) & np.isfinite(res.values[sl, 1])
         dE_ok = (not ok.any()) or (float(np.median(res.values[sl, 1][ok])) <= e_tol)
         mesh_ok = float(np.max(mesh_d[sl])) <= cfg.feature_sdf_limit
         if dE_ok and mesh_ok:
@@ -548,7 +549,12 @@ def _attach_and_bridge(polylines, vertices, provider, cfg):
                             continue
                         mid = np.array([0.5 * (p_a + p_b)])
                         m_res = provider.evaluate(mid)
-                        if m_res.valid[0, 1] and not m_res.saturated[0, 1] and m_res.values[0, 1] > e_tol:
+                        m_usable = bool(
+                            m_res.valid[0, 1]
+                            and (not m_res.saturated[0, 1] or m_res.values[0, 1] > 0)
+                            and np.isfinite(m_res.values[0, 1])
+                        )
+                        if m_usable and m_res.values[0, 1] > e_tol:
                             continue
                         if _mesh_distances(mid, provider)[0] > cfg.feature_sdf_limit:
                             continue
@@ -600,7 +606,7 @@ def _attach_and_bridge(polylines, vertices, provider, cfg):
                 continue
             probes = p0 + np.linspace(0.2, 0.8, 5)[:, None] * (p1 - p0)
             res = provider.evaluate(probes)
-            ok = res.valid[:, 1] & ~res.saturated[:, 1]
+            ok = res.valid[:, 1] & (~res.saturated[:, 1] | (res.values[:, 1] > 0)) & np.isfinite(res.values[:, 1])
             if not ok.all() or float(res.values[:, 1].max()) > short_tol:
                 continue
             if float(_mesh_distances(probes, provider).max()) > cfg.feature_sdf_limit:

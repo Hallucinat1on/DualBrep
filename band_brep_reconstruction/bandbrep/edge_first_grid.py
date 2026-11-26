@@ -31,7 +31,11 @@ def query(provider, points, batch_size):
         result = provider.evaluate(points[start:start + batch_size])
         parts.append(result.values)
         offset_parts.append(result.offsets)
-        masks.append(result.valid & ~result.saturated & np.isfinite(result.values))
+        # Clipped far-field distances (saturated & values > 0, e.g. d >= udf_clip=0.05) are valid
+        # lower bounds for block pruning; only negative/nonfinite values are invalid.
+        masks.append(
+            result.valid & (~result.saturated | (result.values > 0)) & np.isfinite(result.values)
+        )
     if not parts:
         return np.empty((0, 3)), np.empty((0, 2, 3)), np.empty((0, 3), bool)
     return np.vstack(parts), np.vstack(offset_parts), np.vstack(masks)

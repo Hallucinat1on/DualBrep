@@ -112,6 +112,8 @@ def plan_periodic_band(patch,cycles,curves,graph,offsets,anchor):
 
     Supports cylinder, cone, torus, and sphere, including loops whose anchor
     vertices lie on different meridians (handled via an explicit UV-linear seam).
+    Rotates open-edge loops to the closest-u anchor pair to minimize seam tilt
+    and prevent diagonal seams from intersecting notched boundaries.
     """
     offsets={k:np.array(v,float) for k,v in offsets.items()}
     wraps=[];holes=[]
@@ -123,8 +125,52 @@ def plan_periodic_band(patch,cycles,curves,graph,offsets,anchor):
         uv=np.vstack(traced);turn=float(uv[-1,0]-uv[0,0])
         (wraps if abs(abs(turn)-2*np.pi)<.15 else holes).append((cycle,uv,turn))
     if len(wraps)!=2 or any(abs(t)>.15 for _,_,t in holes):return None
+
+    def _cycle_starts(cycle):
+        """Return (u_mod, v, idx) for each candidate start vertex of a wrapping cycle."""
+        pts=[]
+        for idx,use in enumerate(cycle):
+            uv_e=patch.uv(curves[use.edge].evaluate(np.linspace(0,1,17)),ordered=True)
+            pt=uv_e[0] if use.forward else uv_e[-1]
+            pts.append((float(np.mod(pt[0],2*np.pi)),float(pt[1]),idx))
+        return pts
+
+    def _rechain_cycle(cycle):
+        """Recompute continuous periodic offsets starting from cycle[0]."""
+        prev=None
+        traced=[]
+        for use in cycle:
+            uv_e=patch.uv(curves[use.edge].evaluate(np.linspace(0,1,129)),ordered=True)
+            st,en=(uv_e[0],uv_e[-1]) if use.forward else (uv_e[-1],uv_e[0])
+            off=np.zeros(2)
+            if prev is not None:
+                for d in periodic_dims(patch.kind):
+                    off[d]=2*np.pi*np.round((prev[d]-st[d])/(2*np.pi))
+            offsets[use.edge]=off
+            prev=en+off
+            traced.append((uv_e+off) if use.forward else (uv_e+off)[::-1])
+        uv_all=np.vstack(traced)
+        return uv_all,float(uv_all[-1,0]-uv_all[0,0])
+
+    # Choose the vertex pair (idx0, idx1) across the two wrapping cycles with minimum |du mod 2pi|.
+    s0=_cycle_starts(wraps[0][0])
+    s1=_cycle_starts(wraps[1][0])
+    best_pair=(0,0)
+    best_du=np.inf
+    for u0m,_,i0 in s0:
+        for u1m,_,i1 in s1:
+            du=abs(((u1m-u0m+np.pi)%(2*np.pi))-np.pi)
+            if du<best_du-1e-9:
+                best_du=du
+                best_pair=(i0,i1)
+    rotated_wraps=[]
+    for (cycle,_,_),k_rot in zip(wraps,best_pair):
+        rc=cycle[k_rot:]+cycle[:k_rot]
+        uv_r,turn_r=_rechain_cycle(rc)
+        rotated_wraps.append((rc,uv_r,turn_r))
+
     layout=[]
-    for cycle,uv,turn in wraps:
+    for cycle,uv,turn in rotated_wraps:
         u_start=float(uv[0,0])
         v_start=float(uv[0,1])
         # Shift so the loop begins at u_start and spans [u_start, u_start+2*pi] when traversed in +u.
@@ -673,7 +719,7 @@ def assemble_brep(graph,curves,patches,cfg,out):
     return solid,mapping
 
 def verify_export_and_roundtrip(solid,graph,curves,patches,mapping,cfg,out):
-    props=GProp_GProps();brepgprop.VolumeProperties(solid,props);volume=props.Mass()
+    props=GProp_GProps();brepgprop.VolumeProperties(solid,props,1e-5);volume=props.Mass()
     require(volume>0,'cad_volume_invalid','Solid has nonpositive volume')
     mesher=BRepMesh_IncrementalMesh(solid,cfg.surface_tolerance,False,.15,False);mesher.Perform()
     require(mesher.IsDone(),'cad_mesh_failed','Final solid cannot be triangulated')
@@ -682,8 +728,8 @@ def verify_export_and_roundtrip(solid,graph,curves,patches,mapping,cfg,out):
     require(writer.Write(str(path))==IFSelect_RetDone,'step_write_failed','STEP export failed')
     reader=STEPControl_Reader();require(reader.ReadFile(str(path))==IFSelect_RetDone,'step_read_failed','STEP readback failed');reader.TransferRoots();readback=reader.OneShape()
     require(BRepCheck_Analyzer(readback).IsValid(),'step_readback_invalid','Exported STEP fails CAD validity')
-    rprops=GProp_GProps();brepgprop.VolumeProperties(readback,rprops)
-    surface_props=GProp_GProps();brepgprop.SurfaceProperties(solid,surface_props)
+    rprops=GProp_GProps();brepgprop.VolumeProperties(readback,rprops,1e-5)
+    surface_props=GProp_GProps();brepgprop.SurfaceProperties(solid,surface_props,1e-4)
     volume_budget=max(1e-7,abs(volume)*1e-5,surface_props.Mass()*cfg.boundary_tolerance)
     require(abs(rprops.Mass()-volume)<=volume_budget,'step_volume_changed','STEP roundtrip changed volume beyond geometry budget',
             original=volume,readback=rprops.Mass(),budget=volume_budget)

@@ -4,7 +4,7 @@ import heapq
 
 import numpy as np
 from shapely import LineString, constrained_delaunay_triangles
-from shapely.ops import polygonize
+from shapely.ops import polygonize, unary_union
 
 from .boundary_cycles import complete_face_regions_and_cycles
 from .deadline import checkpoint
@@ -317,25 +317,99 @@ class SurfaceCut:
             axis = (b - a) / np.linalg.norm(b - a)
             normal = np.cross(axis, c - a)
             basis = np.vstack((axis, np.cross(normal / np.linalg.norm(normal), axis)))
-            uv_to_id, segments = {}, set()
+            uv_to_id, uv_list, segments = {}, [], set()
+            tri_barriers = []
 
             def uv(node):
                 result = tuple((self.points[node] - a) @ basis.T)
-                uv_to_id[result] = node
+                if result not in uv_to_id:
+                    uv_to_id[result] = node
+                    uv_list.append((result, node))
                 return result
+
+            def resolve_uv(pt):
+                key = (float(pt[0]), float(pt[1]))
+                nid = uv_to_id.get(key)
+                if nid is not None:
+                    return nid
+                best_nid, best_d2 = None, 1e-22
+                for coord, cid in uv_list:
+                    d2 = (coord[0] - key[0]) ** 2 + (coord[1] - key[1]) ** 2
+                    if d2 < best_d2:
+                        best_d2, best_nid = d2, cid
+                if best_nid is not None:
+                    uv_to_id[key] = best_nid
+                    return best_nid
+                # Lift interior intersection point back to 3D on the triangle plane.
+                p3 = a + key[0] * basis[0] + key[1] * basis[1]
+                nid = self.point(p3)
+                uv_to_id[key] = nid
+                uv_list.append((key, nid))
+                return nid
 
             def add_segments(nodes, eid=None):
                 for u, v in zip(nodes, nodes[1:]):
                     key = tuple(sorted((u, v)))
                     segments.add(key)
                     if eid is not None:
-                        self.add_barrier(u, v, eid)
+                        tri_barriers.append((u, v, eid))
 
             for u, v in zip(face, np.roll(face, -1)):
                 add_segments(self._expanded(fid, u, v))
             for u, v, eid in self.cuts[fid]:
                 add_segments(self._expanded(fid, u, v), eid)
-            polygons = list(polygonize([LineString((uv(u), uv(v))) for u, v in segments]))
+
+            lines = [LineString((uv(u), uv(v))) for u, v in segments]
+            # Check if any cut segments cross inside this triangle; if so, node them with unary_union.
+            has_crossing = False
+            if len(tri_barriers) >= 2:
+                cut_lines = [LineString((uv(u), uv(v))) for u, v, _ in tri_barriers]
+                for i_c in range(len(cut_lines)):
+                    for j_c in range(i_c + 1, len(cut_lines)):
+                        if cut_lines[i_c].crosses(cut_lines[j_c]):
+                            has_crossing = True
+                            break
+                    if has_crossing:
+                        break
+
+            if has_crossing:
+                noded = unary_union(lines)
+                noded_lines = list(noded.geoms) if hasattr(noded, 'geoms') else [noded]
+                noded_pts = []
+                for ln in noded_lines:
+                    if ln.geom_type != 'LineString':
+                        continue
+                    for coord in ln.coords:
+                        nid = resolve_uv(coord)
+                        noded_pts.append((uv(nid), nid))
+                # Split each barrier segment along any interior noded vertices lying on it.
+                for u, v, eid in tri_barriers:
+                    pu, pv = np.asarray(uv(u)), np.asarray(uv(v))
+                    seg_vec = pv - pu
+                    seg_len2 = float(seg_vec @ seg_vec)
+                    if seg_len2 <= 1e-24:
+                        continue
+                    on_seg = [(0.0, u), (1.0, v)]
+                    seen_ids = {u, v}
+                    for coord, nid in noded_pts:
+                        if nid in seen_ids:
+                            continue
+                        dvec = np.asarray(coord) - pu
+                        t = float(dvec @ seg_vec) / seg_len2
+                        if 1e-9 < t < 1.0 - 1e-9:
+                            perp = np.linalg.norm(dvec - t * seg_vec)
+                            if perp <= max(1e-10, np.sqrt(seg_len2) * 1e-6):
+                                seen_ids.add(nid)
+                                on_seg.append((t, nid))
+                    on_seg.sort(key=lambda item: item[0])
+                    for (_, w0), (_, w1) in zip(on_seg, on_seg[1:]):
+                        self.add_barrier(w0, w1, eid)
+                polygons = list(polygonize(noded))
+            else:
+                for u, v, eid in tri_barriers:
+                    self.add_barrier(u, v, eid)
+                polygons = list(polygonize(lines))
+
             area = np.linalg.norm(normal) * np.linalg.norm(b - a) / 2
             require(abs(sum(p.area for p in polygons) - area) <= max(1e-14, area * 1e-6),
                     'curve_embedding_crossing', 'Local cuts do not partition the original triangle', triangle=fid)
@@ -345,7 +419,7 @@ class SurfaceCut:
                     u, v = coordinates[1:] - coordinates[0]
                     if u[0] * v[1] - u[1] * v[0] < 0:
                         coordinates = coordinates[[0, 2, 1]]
-                    triangles.append([uv_to_id[tuple(p)] for p in coordinates])
+                    triangles.append([resolve_uv(p) for p in coordinates])
         return SurfaceMesh(np.asarray(self.points), np.array(triangles), dict(self.mesh.report))
 
 

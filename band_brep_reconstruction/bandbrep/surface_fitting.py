@@ -503,10 +503,12 @@ def fit_general_spline(face, points, boundaries, normal, cfg, *, mesh=None, face
             data['controls'] = P.reshape(n, n, 3)
             patch = FacePatch(face, 'bspline', data, normal.mean(axis=0), {})
             b_err = float(np.linalg.norm(patch.evaluate(cur_bu) - boundaries, axis=1).max())
-            i_err = float(np.quantile(np.linalg.norm(patch.evaluate(cur_uv) - points, axis=1), 0.95))
-            if b_err <= cfg.boundary_tolerance and i_err <= cfg.surface_tolerance * 2:
+            i_dists = np.linalg.norm(patch.evaluate(cur_uv) - points, axis=1)
+            i_err = float(np.quantile(i_dists, 0.95))
+            i_max = float(i_dists.max())
+            if b_err <= cfg.boundary_tolerance and i_err <= cfg.surface_tolerance * 2 and i_max <= cfg.scan_offset_tolerance:
                 return patch
-            last_err = f'mode={mode} n={n} b_err={b_err:.5f} i_err={i_err:.5f}'
+            last_err = f'mode={mode} n={n} b_err={b_err:.5f} i_err={i_err:.5f} i_max={i_max:.5f}'
     raise ReconstructionError('surface_boundary_incompatible', 'Spline budget cannot satisfy fixed boundary',
                               {'face': face, 'cause': str(last_err)})
 
@@ -565,11 +567,21 @@ def _refit_collapsed_edges(patches, graph, curves, collapsed_edges, cfg):
             pass
 
 
-def initialize_face_surfaces(mesh, face_labels, graph, curves, provider, cfg):
+def initialize_face_surfaces(mesh, face_labels, graph, curves, provider, cfg, *, raw_point_cloud=None):
+    from .boundary_prior import boundary_prior_samples
+
     regions = sample_face_regions(mesh, face_labels, cfg)
+    if raw_point_cloud is not None:
+        from .point_cloud_source import map_point_cloud_to_faces
+
+        raw_regions = map_point_cloud_to_faces(raw_point_cloud[0], raw_point_cloud[1], mesh, face_labels, cfg)
+        for fid, (rp, rn) in raw_regions.items():
+            if len(rp) >= cfg.min_core_points:
+                regions[fid] = (rp, rn)
     patches = {}
     scan_limit = max(cfg.surface_tolerance * 2, cfg.scan_offset_tolerance)
     collapsed_edges = set(graph.report.get('wireframe', {}).get('collapsed_edges', []))
+    core_cache = {}
     for face in range(graph.face_count):
         require(face in regions, 'missing_face_region', 'No sampled region for face', face=face)
         p, n = regions[face]
@@ -582,6 +594,11 @@ def initialize_face_surfaces(mesh, face_labels, graph, curves, provider, cfg):
                         if (has_collapsed and clean_related) else boundary)
         bnd_screen_tol = max(cfg.boundary_tolerance, cfg.collapse_tolerance) if has_collapsed else cfg.boundary_tolerance
         p_core, n_core = _core_samples(p, n, boundary, cfg)
+        if len(p_core) < cfg.min_core_points and graph.cycles.get(face):
+            prior_p, prior_n = boundary_prior_samples(graph.cycles[face], curves, cfg, ref_normals=n)
+            if len(prior_p):
+                p_core, n_core = prior_p, prior_n
+        core_cache[face] = (p_core, n_core)
         candidates = analytic_candidates(p_core, n_core, fit_boundary)
         if len(related) == 2 and all(c.kind == 'circle' for c in related):
             c0, c1 = related
@@ -654,8 +671,7 @@ def initialize_face_surfaces(mesh, face_labels, graph, curves, provider, cfg):
         p, n = regions[face]
         inc_edges = [e for e in graph.edges if face in e.faces]
         related = [curves[e.id] for e in inc_edges]
-        boundary = np.vstack([c.evaluate(np.linspace(0, 1, 65)) for c in related]) if related else np.empty((0, 3))
-        p_core, _ = _core_samples(p, n, boundary, cfg)
+        p_core, _ = core_cache[face]
         maximum = 0.
         for e_inst, curve in zip(inc_edges, related):
             tol_e = max(cfg.boundary_tolerance, cfg.cad_tolerance) if e_inst.id in collapsed_edges else cfg.boundary_tolerance

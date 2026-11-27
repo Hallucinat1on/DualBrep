@@ -189,10 +189,12 @@ def _verify_vertices_with_edges(candidates, pulled_e, provider, cfg):
     if not verified:
         return [], rejected
 
-    # Collapse nearly-coincident verified vertices if enabled.
+    # Deduplicate nearly-coincident verified vertices using a tight merge radius
+    # decoupled from collapse_tolerance so genuine close CAD vertices survive.
     if cfg.allow_feature_collapse and len(verified) > 1:
+        merge_tol = min(0.002, 0.7 * cfg.vertex_cluster_radius, cfg.collapse_tolerance)
         pos = np.array([v['position'] for v in verified])
-        pairs = cKDTree(pos).query_pairs(cfg.collapse_tolerance, output_type='ndarray')
+        pairs = cKDTree(pos).query_pairs(merge_tol, output_type='ndarray')
         if len(pairs):
             n = len(verified)
             adj = csr_matrix((np.ones(len(pairs), dtype=np.int8), (pairs[:, 0], pairs[:, 1])), shape=(n, n))

@@ -9,7 +9,7 @@ class Config:
     coarse_spacing: float = 0.024
     fine_spacing: float = 0.003
     band_width: float = 0.02
-    scout_margin: float = 0.010
+    scout_margin: float = 0.007
     coarse_error_margin: float = 0.0
     support_radius: float = 0.007
     scout_point_budget: int = 4000000
@@ -42,8 +42,9 @@ class Config:
     scan_offset_tolerance: float = 0.02
     max_segments: int = 64
     face_samples: int = 1200
+    min_core_points: int = 15
     spline_controls: int = 8
-    max_spline_controls: int = 16
+    max_spline_controls: int = 20
     uv_iterations: int = 4
     seed: int = 0
     stop_after: str = 'solid'
@@ -69,7 +70,7 @@ class Config:
 
     def validate(self):
         for key in ('query_batch_size', 'max_segments', 'scout_point_budget', 'patch_budget',
-                    'face_samples', 'spline_controls', 'max_spline_controls', 'uv_iterations',
+                    'face_samples', 'min_core_points', 'spline_controls', 'max_spline_controls', 'uv_iterations',
                     'pca_thin_iterations'):
             v = getattr(self, key)
             if type(v) is not int or v < 1:

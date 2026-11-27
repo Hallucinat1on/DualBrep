@@ -176,14 +176,15 @@ def patch_candidates(mesh, labels, constraints, graph, curves, face, cfg, uses):
         yield new_graph, new_curves, new_labels, new_constraints, info
 
 
-def fit_with_patch_fallback(mesh, labels, constraints, graph, curves, provider, cfg):
+def fit_with_patch_fallback(mesh, labels, constraints, graph, curves, provider, cfg, *, raw_point_cloud=None):
     """Allow a small number of internal seams; keep the original graph for scoring."""
     attempts = []
     uses = None
     mapping = list(range(graph.face_count))
+    fit_kw = dict(raw_point_cloud=raw_point_cloud) if raw_point_cloud is not None else {}
     for _ in range(cfg.patch_budget):
         try:
-            return initialize_face_surfaces(mesh, labels, graph, curves, provider, cfg), graph, curves, mapping, attempts
+            return initialize_face_surfaces(mesh, labels, graph, curves, provider, cfg, **fit_kw), graph, curves, mapping, attempts
         except ReconstructionError as exc:
             face = exc.details.get('face')
             if (exc.code not in ('surface_boundary_incompatible', 'surface_fit_failed', 'surface_fold')
@@ -196,7 +197,7 @@ def fit_with_patch_fallback(mesh, labels, constraints, graph, curves, provider, 
             for candidate in patch_candidates(mesh, labels, constraints, graph, curves, face, cfg, uses):
                 proposed, pc, pl, constraint, info = candidate
                 try:
-                    patches = initialize_face_surfaces(mesh, pl, proposed, pc, provider, cfg)
+                    patches = initialize_face_surfaces(mesh, pl, proposed, pc, provider, cfg, **fit_kw)
                 except ReconstructionError as inner:
                     last = inner
                     if inner.details.get('face') not in (face, info['face']) and best is None:

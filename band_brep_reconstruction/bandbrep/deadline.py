@@ -36,7 +36,7 @@ def checkpoint(stage=None):
 
 def timed_reconstruction(fn):
     @wraps(fn)
-    def wrapped(mesh,udf,cfg,output_dir):
+    def wrapped(mesh,udf,cfg,output_dir,**kwargs):
         with sample_budget(cfg.sample_timeout_seconds):
-            return fn(mesh,udf,cfg,output_dir)
+            return fn(mesh,udf,cfg,output_dir,**kwargs)
     return wrapped

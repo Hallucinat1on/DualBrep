@@ -26,8 +26,11 @@ def _run_one(task):
     from bandbrep.cad_source import load_cad_source
     from bandbrep.config import Config
     from bandbrep.deadline import sample_budget
-    from bandbrep.edge_first import reconstruct
+    from bandbrep.edge_first import reconstruct, reconstruct_point_cloud
+    from bandbrep.point_cloud_source import build_proxy_mesh
+    from bandbrep.surface_mesh import normals as mesh_normals
     from evaluate_step import evaluate
+    import numpy as np
 
     group, mid, step_path, sha, out_dir, hybrid, timeout_s = task
     out_dir = Path(out_dir)
@@ -46,7 +49,23 @@ def _run_one(task):
     try:
         with sample_budget(timeout_s):
             mesh, udf = load_cad_source(Path(step_path), sha)
-            res = reconstruct(mesh, udf, cfg, run_dir)
+            if group == 'point_cloud':
+                rng = np.random.default_rng(0)
+                tri = mesh.vertices[mesh.triangles]
+                tri_n = mesh_normals(mesh)
+                areas = 0.5 * np.linalg.norm(np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0]), axis=1)
+                pick = rng.choice(len(tri), size=50000, p=areas / areas.sum())
+                r = np.sqrt(rng.random(len(pick)))
+                s = rng.random(len(pick))
+                bary = np.column_stack((1.0 - r, r * (1.0 - s), r * s))
+                raw_pts = np.einsum('ni,nij->nj', bary, tri[pick])
+                raw_nrms = tri_n[pick]
+                proxy = build_proxy_mesh(raw_pts, raw_nrms, depth=8)
+                proxy.report['source_step_sha256'] = sha
+                proxy.report['normalization'] = mesh.report.get('normalization', {})
+                res = reconstruct_point_cloud(raw_pts, udf, cfg, run_dir, normals=raw_nrms, proxy_mesh=proxy)
+            else:
+                res = reconstruct(mesh, udf, cfg, run_dir)
             if res['report'].get('status') == 'solid_validated':
                 status = 'success'
                 sc = evaluate(Path(step_path), run_dir)
@@ -65,6 +84,7 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--workers', type=int, default=20)
     parser.add_argument('--timeout', type=float, default=3600.0)
+    parser.add_argument('--with-point-cloud', action='store_true')
     args = parser.parse_args()
 
     root = Path(__file__).resolve().parents[1]
@@ -81,8 +101,11 @@ def main():
         manifest.append(dict(id=mid, step=str(step_path), source_sha256=file_hash(step_path)))
     (args.output / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
 
+    groups = [('hybrid', True), ('global_exact', False)]
+    if args.with_point_cloud:
+        groups.append(('point_cloud', False))
     tasks = []
-    for grp, hybrid in (('hybrid', True), ('global_exact', False)):
+    for grp, hybrid in groups:
         for row in manifest:
             tasks.append((
                 grp,

@@ -100,7 +100,7 @@ def try_fast(mesh, graph, curves, cfg, run):
     return run.finish('solid_validated', solid=solid, graph=proposed, curves=curves, patches=patches)
 
 
-def run_route(mesh, provider, grid, cfg, run):
+def run_route(mesh, provider, grid, cfg, run, *, raw_point_cloud=None):
     out = run.out
     run.stage = 'wireframe'
     graph, curves, support = recover_wireframe(grid, provider, cfg)
@@ -120,7 +120,7 @@ def run_route(mesh, provider, grid, cfg, run):
             'Unresolved branches remain in the wireframe' if curves else 'No edge could be recovered',
             unresolved=len(wireframe['unresolved']), uncovered_support=wireframe['uncovered_support'])
 
-    if cfg.fast_faces and not cfg.hybrid_projection and cfg.stop_after == 'solid':
+    if cfg.fast_faces and not cfg.hybrid_projection and cfg.stop_after == 'solid' and raw_point_cloud is None:
         fast = try_fast(mesh, graph, curves, cfg, run)
         if fast is not None:
             return fast
@@ -190,7 +190,7 @@ def run_route(mesh, provider, grid, cfg, run):
 
     run.stage = 'surfaces'
     patches, assembly_graph, assembly_curves, face_map, seams = fit_with_patch_fallback(
-        cut, labels, constraints, graph, curves, provider, cfg)
+        cut, labels, constraints, graph, curves, provider, cfg, raw_point_cloud=raw_point_cloud)
     write_json(out / 'face_patches.json', patches)
     run.record(dict(faces=len(patches), patch_seams=seams))
 
@@ -209,7 +209,7 @@ def run_route(mesh, provider, grid, cfg, run):
 
 
 @timed_reconstruction
-def reconstruct(mesh, udf, cfg, output_dir):
+def reconstruct(mesh, udf, cfg, output_dir, *, raw_point_cloud=None):
     """Run edge-first reconstruction with continuous 8D E/V joint field and no truth topology."""
     cfg.validate()
     run = Run(Path(output_dir), mesh, udf, cfg)
@@ -224,7 +224,18 @@ def reconstruct(mesh, udf, cfg, output_dir):
         run.record(grid.report)
         if cfg.stop_after == 'scout':
             return run.finish('scout_ready')
-        return run_route(mesh, provider, grid, cfg, run)
+        return run_route(mesh, provider, grid, cfg, run, raw_point_cloud=raw_point_cloud)
     except Exception as exc:
         run.fail(exc)
         raise
+
+
+def reconstruct_point_cloud(points, udf, cfg, output_dir, *, normals=None, proxy_mesh=None, poisson_depth=8):
+    """Unified point-cloud entry: build watertight proxy mesh for manifold topology, fit surfaces on raw points."""
+    from .point_cloud_source import build_proxy_mesh, estimate_oriented_normals
+
+    pts = np.asarray(points, dtype=np.float64).reshape(-1, 3)
+    nrms = estimate_oriented_normals(pts) if normals is None else np.asarray(normals, dtype=np.float64).reshape(-1, 3)
+    nrms = nrms / np.maximum(np.linalg.norm(nrms, axis=1, keepdims=True), 1e-12)
+    mesh = proxy_mesh if proxy_mesh is not None else build_proxy_mesh(pts, nrms, depth=poisson_depth)
+    return reconstruct(mesh, udf, cfg, output_dir, raw_point_cloud=(pts, nrms))

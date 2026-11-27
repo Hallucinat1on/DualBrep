@@ -71,6 +71,16 @@ class ContractTests(unittest.TestCase):
         self.assertFalse(r.valid[:, 1:].any())
         self.assertTrue(np.isfinite(checked_values(p, mesh.vertices[:3])).all())
 
+    def test_vertex_channel_never_skipped_when_edges_present(self):
+        mesh, udf = box()
+        udf_v_absent = CallableUDFProvider(udf.fn, fingerprint='box-v-absent', presence=('present', 'absent'))
+        p = MeshFieldProvider(mesh, udf_v_absent, Config())
+        self.assertEqual(p.presence(), ('present', 'present'))
+        q = np.array([[0.551, 0.53, 0.52]])
+        res = p.evaluate(q)
+        self.assertTrue(res.valid[0, 2])
+        np.testing.assert_allclose(q[0] + res.offsets[0, 1], [0.55, 0.55, 0.55], atol=1e-10)
+
     def test_off_band_never_queries_udf_and_update_backtracks(self):
         mesh, udf = box()
         p = MeshFieldProvider(mesh, udf, Config())

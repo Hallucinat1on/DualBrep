@@ -27,10 +27,12 @@ class FieldEvaluation:
 class CallableUDFProvider:
     """Continuous 8D joint field [dE, dV, uE_x, uE_y, uE_z, uV_x, uV_y, uV_z]."""
 
-    def __init__(self, fn, *, fingerprint, presence, band_width=0.02):
+    def __init__(self, fn, *, fingerprint, presence=('present', 'present'), band_width=0.02):
         require(isinstance(fingerprint, str) and bool(fingerprint), 'field_identity', 'Supply a field fingerprint')
         require(np.isfinite(band_width) and band_width > 0, 'field_domain', 'Invalid field band width')
-        require(presence is not None and len(presence) == 2 and all(v in ('present', 'absent') for v in presence),
+        if presence is None:
+            presence = ('present', 'present')
+        require(len(presence) == 2 and all(v in ('present', 'absent') for v in presence),
                 'invalid_presence', 'Expected E/V presence')
         self.fn = fn
         self.fingerprint = fingerprint
@@ -84,11 +86,14 @@ class MeshFieldProvider:
         self.normalization = mesh.report.get('normalization', {})
         self.batch_size = cfg.query_batch_size
         self.query_report = dict(outside_band=0, backtracked_steps=0)
-        self._presence = udf.presence()
-        require(self._presence is not None and len(self._presence) == 2
-                and all(p in ('present', 'absent') for p in self._presence),
+        raw_presence = udf.presence() if hasattr(udf, 'presence') else ('present', 'present')
+        if raw_presence is None:
+            raw_presence = ('present', 'present')
+        require(len(raw_presence) == 2 and all(p in ('present', 'absent') for p in raw_presence),
                 'presence_unknown', 'Resolve E/V presence before reconstruction')
-        require(self._presence != ('absent', 'present'), 'invalid_presence', 'Vertices require edges')
+        require(tuple(raw_presence) != ('absent', 'present'), 'invalid_presence', 'Vertices require edges')
+        # Never mask out V-channel when edges are present (prevents missed vertices on neural predictions).
+        self._presence = ('absent', 'absent') if raw_presence[0] == 'absent' else ('present', 'present')
         policy = dict(
             mesh=identity,
             udf=udf.fingerprint,

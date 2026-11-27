@@ -118,7 +118,6 @@ def sample_grid(mesh, provider, cfg):
 
     blocks = candidate_blocks(mesh, provider.band_width, H, cfg.scout_point_budget)
     levels = []
-    has_vertex = provider.presence()[1] == 'present'
     aux_points = 0
 
     def scout(blocks, spacing):
@@ -135,7 +134,7 @@ def sample_grid(mesh, provider, cfg):
         old_count, old_aux = len(codes), aux_points
         v, ok = observe(center)
         margins = np.array([cfg.scout_margin, cfg.scout_margin]) + cfg.coarse_error_margin
-        channels = 2 if has_vertex else 1
+        channels = 2
         keep = (ok[:, 1:1 + channels] & (v[:, 1:1 + channels] <= margins[:channels] + radius)).any(1)
         unknown = np.flatnonzero(~ok[:, 1:1 + channels].all(1))
         corners = np.array(list(product((0, 2 * stride), repeat=3)), int)

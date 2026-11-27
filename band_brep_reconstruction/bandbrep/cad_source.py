@@ -73,10 +73,7 @@ def load_cad_source(path, fingerprint):
     (vertices, triangles), _ = weld(triangulate(targets, cfg), cfg)
     mesh = SurfaceMesh(vertices, triangles, {"normalization": normalization, "source_step_sha256": fingerprint})
     oracle = ExactField8D(targets, cfg)
-    presence = (
-        "present" if targets.edges else "absent",
-        "present" if len(targets.vertices) else "absent",
-    )
+    presence = ("present", "present") if targets.edges else ("absent", "absent")
     provider = CallableUDFProvider(
         oracle.values,
         fingerprint=f"production-cad-8d:{fingerprint}:{code_fingerprint()}",

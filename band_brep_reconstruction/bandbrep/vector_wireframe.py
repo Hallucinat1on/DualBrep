@@ -44,7 +44,7 @@ def _weighted_l1_median(points, weights, iterations=4):
 
 def _pull_vertex_candidates(grid, provider, cfg):
     """Step 1a: Pull V-channel mid-field points to 0D vertex clusters via x + uV."""
-    if provider.presence()[1] == 'absent' or not len(grid.points):
+    if not len(grid.points):
         return [], dict(mid_points=0, clusters=0)
 
     dV = grid.values[:, 2]
@@ -630,8 +630,6 @@ def extract_vector_wireframe(grid, provider, cfg):
     t_pull = perf_counter()
 
     vertices, v_rejected = _verify_vertices_with_edges(v_cands, pulled_e, provider, cfg)
-    if provider.presence()[1] == 'present' and not vertices:
-        v_rejected.append(dict(reason='vertex_pull_empty'))
     t_verify = perf_counter()
 
     cut_e, cut_w = _cut_edges_by_vertices(src_xyz, src_dV, src_v_valid, pulled_e, weights_e, vertices)

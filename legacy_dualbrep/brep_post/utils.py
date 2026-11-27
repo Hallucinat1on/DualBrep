@@ -878,6 +878,18 @@ def create_edge(points, use_variational_smoothing=USE_VARIATIONAL_SMOOTHING):
     return approx_edge
 
 
+def _connect_edges_to_wires(edges_seq, connected_tolerance, shared=False):
+    """OCC 7.9 changed ConnectEdgesToWires to an out-parameter overload."""
+    try:
+        return ShapeAnalysis_FreeBounds.ConnectEdgesToWires(
+            edges_seq, connected_tolerance, shared)
+    except TypeError:
+        wires = TopTools_HSequenceOfShape()
+        ShapeAnalysis_FreeBounds.ConnectEdgesToWires(
+            edges_seq, connected_tolerance, shared, wires)
+        return wires
+
+
 def create_wire_from_unordered_edges(face_edges, connected_tolerance, max_retry_times=3,
                                      is_sort_by_length=True, seam_required=False):
     # if seam_required!=-1:
@@ -893,7 +905,7 @@ def create_wire_from_unordered_edges(face_edges, connected_tolerance, max_retry_
         edges_seq = TopTools_HSequenceOfShape()
         for edge in face_edges:
             edges_seq.Append(edge)
-        wire_array_c = ShapeAnalysis_FreeBounds.ConnectEdgesToWires(edges_seq, connected_tolerance, False)
+        wire_array_c = _connect_edges_to_wires(edges_seq, connected_tolerance, False)
 
         # Check if all wires is valid
         all_wire_valid = True

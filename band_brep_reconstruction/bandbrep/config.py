@@ -13,11 +13,12 @@ class Config:
     coarse_error_margin: float = 0.0
     support_radius: float = 0.007
     scout_point_budget: int = 4000000
-    edge_mid_min: float = 0.003
-    edge_mid_max: float = 0.018
+    edge_mid_min: float = 0.002
+    edge_mid_max: float = 0.010
     vertex_mid_min: float = 0.003
     vertex_mid_max: float = 0.020
-    edge_consistency_tol: float = 0.0035
+    edge_consistency_tol: float = 0.0025
+    edge_consistency_rel_tol: float = 0.35
     vertex_consistency_tol: float = 0.004
     vertex_cluster_radius: float = 0.003
     vertex_cut_radius: float = 0.007
@@ -79,7 +80,8 @@ class Config:
             raise ValueError('invalid spline controls')
         for key in ('coarse_spacing', 'fine_spacing', 'band_width', 'scout_margin',
                     'support_radius', 'edge_mid_min', 'edge_mid_max', 'vertex_mid_min',
-                    'vertex_mid_max', 'edge_consistency_tol', 'vertex_consistency_tol',
+                    'vertex_mid_max', 'edge_consistency_tol', 'edge_consistency_rel_tol',
+                    'vertex_consistency_tol',
                     'vertex_cluster_radius', 'vertex_cut_radius', 'edge_link_radius',
                     'edge_lateral_tol', 'pca_thin_radius', 'sample_timeout_seconds',
                     'field_error', 'surface_tolerance', 'localization_tolerance',

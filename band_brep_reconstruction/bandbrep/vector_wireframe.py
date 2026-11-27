@@ -121,13 +121,16 @@ def _pull_edge_points(grid, provider, cfg):
     uE_norm = np.linalg.norm(uE, axis=1)
     cons_err = np.abs(uE_norm - dE)
 
+    eff_tol = np.minimum(cfg.edge_consistency_tol, cfg.edge_consistency_rel_tol * dE)
     mask = (
         grid.valid[:, 1]
         & (dE >= cfg.edge_mid_min)
         & (dE <= cfg.edge_mid_max)
-        & (cons_err <= cfg.edge_consistency_tol)
+        & (cons_err <= eff_tol)
     )
+    used_fallback = False
     if mask.sum() < 8:
+        used_fallback = True
         mask = (
             grid.valid[:, 1]
             & (dE > 1e-8)
@@ -142,6 +145,7 @@ def _pull_edge_points(grid, provider, cfg):
     src_v_valid = grid.valid[mask, 2]
     pulled = src_xyz + uE[mask]
     err = cons_err[mask]
+    tol_used = np.full(len(err), cfg.edge_consistency_tol, dtype=float) if used_fallback else eff_tol[mask]
 
     mesh_d = _mesh_distances(pulled, provider)
     near_mesh = mesh_d <= cfg.feature_sdf_limit
@@ -152,9 +156,10 @@ def _pull_edge_points(grid, provider, cfg):
     src_v_valid = src_v_valid[near_mesh]
     pulled = pulled[near_mesh]
     err = err[near_mesh]
+    tol_used = tol_used[near_mesh]
     mesh_d = mesh_d[near_mesh]
 
-    sigma_c = max(0.5 * cfg.edge_consistency_tol, 1e-4)
+    sigma_c = np.maximum(0.5 * tol_used, 1e-4)
     sigma_s = max(cfg.feature_sdf_tolerance, 1e-4)
     weights = np.exp(-(err / sigma_c) ** 2) * np.exp(-(np.maximum(0.0, mesh_d - cfg.feature_sdf_tolerance) / sigma_s) ** 2)
     return src_xyz, src_dV, src_v_valid, pulled, weights

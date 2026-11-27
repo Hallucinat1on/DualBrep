@@ -114,3 +114,38 @@ def test_narrow_parallel_edges_stay_separated_and_noise_resilient():
     # Verify both long parallel edges (length ~0.12) are recovered separately!
     long_paths = [p for p in paths if np.linalg.norm(vertices[p.nodes[0]].position - vertices[p.nodes[1]].position) > 0.10]
     assert len(long_paths) == 2
+
+
+def test_edge_relative_consistency_rejects_near_medial_collapsed_vectors():
+    """Narrowed [0.002, 0.010] edge mid-field with relative consistency rejects collapsed uE=0 points."""
+    from bandbrep.vector_wireframe import _pull_edge_points
+
+    cfg = Config()
+    assert cfg.edge_mid_min == 0.002
+    assert cfg.edge_mid_max == 0.010
+    assert cfg.edge_consistency_tol == 0.0025
+    assert cfg.edge_consistency_rel_tol == 0.35
+
+    # 12 clean points at dE=0.003..0.009 + 4 collapsed medial-axis points (uE=0) at dE=0.0025
+    clean_y = np.linspace(0.003, 0.009, 12)
+    clean_pts = np.column_stack((np.linspace(0.01, 0.09, 12), clean_y, np.zeros(12)))
+    bad_pts = np.column_stack((np.linspace(0.02, 0.08, 4), np.full(4, 0.0025), np.zeros(4)))
+    pts = np.vstack((clean_pts, bad_pts))
+
+    vals = np.zeros((len(pts), 3), dtype=float)
+    vals[:12, 1] = clean_y
+    vals[12:, 1] = 0.0025  # <= edge_consistency_tol, but violates 0.35 * dE when uE=0
+    offs = np.zeros((len(pts), 2, 3), dtype=float)
+    offs[:12, 0, 1] = -clean_y  # pulls cleanly to y=0
+    # offs[12:, 0] stays (0, 0, 0) -> collapsed medial vector
+    valid = np.ones((len(pts), 3), dtype=bool)
+    keys = np.rint(pts / cfg.fine_spacing).astype(np.int64)
+    grid = GridSamples(np.empty((0, 3), int), keys, pts, vals, offs, valid, {})
+
+    provider = _SyntheticProvider(lambda q: np.zeros((len(q), 8)))
+    src_xyz, _, _, pulled, weights = _pull_edge_points(grid, provider, cfg)
+
+    assert len(pulled) == 12
+    assert np.allclose(pulled[:, 1], 0.0, atol=1e-9)
+    assert np.all(weights > 0.0)
+    assert np.all(src_xyz[:, 1] >= 0.003)
